@@ -1,0 +1,10 @@
+/target/
+/wenyuan.db
+*.db
+/web/node_modules/
+/web/dist/
+/web/.pnpm-store/
+/web/.pnpm-home/
+/web/tsconfig.tsbuildinfo
+*.log
+.env
