@@ -28,7 +28,7 @@ export interface Proposal {
 }
 
 export interface Decision {
-  status: 'majority_reached' | 'no_majority'
+  status: 'majority_reached' | 'conditionally_adopted' | 'no_majority'
   selected_proposal?: Proposal | null
   vote_count: number
   majority_reasons: string[]
@@ -309,7 +309,8 @@ function eventPayloadIncludesSeat(payload: unknown, seat: SeatKind) {
 }
 
 export function hasMajority(details: SessionDetails) {
-  return details.session.result?.status === 'majority_reached' || details.artifacts.decision?.status === 'majority_reached'
+  const status = details.session.result?.status ?? details.artifacts.decision?.status
+  return status === 'majority_reached' || status === 'conditionally_adopted'
 }
 
 export function seatRunStats(runs: SeatRunTrace[]) {
@@ -382,7 +383,7 @@ export function qualityMetricRows(metrics?: DiscussionQualityMetrics, hasUsage =
   ]
 }
 
-export function exportSessionMarkdown(details: SessionDetails) {
+export function exportSessionMarkdown(details: SessionDetails, level: 'brief' | 'standard' | 'audit' = 'brief') {
   const decision = details.session.result ?? details.artifacts.decision
   const lines = [
     `# ${markdownText(details.session.title)}`,
@@ -391,10 +392,74 @@ export function exportSessionMarkdown(details: SessionDetails) {
     `- 模式：${modeLabels[details.session.mode]}`,
     `- Session：${details.session.id}`,
     '',
-    '## 原始议题',
-    '',
-    markdownText(details.session.topic),
   ]
+
+  if (level === 'brief') {
+    lines.push('## 议题', '', markdownText(details.session.topic))
+    if (details.session.context.trim()) {
+      lines.push('', '### 背景', '', markdownText(details.session.context))
+    }
+    lines.push('', '## 表决结果', '')
+    if (decision) {
+      lines.push(`- 状态：${decisionLabel(decision)}`)
+      if (decision.has_risk_blocker) lines.push('- 存在风险阻塞')
+      if (decision.selected_proposal) {
+        lines.push(`- 多数策案：${seatLabels[decision.selected_proposal.proposed_by]} - ${markdownText(decision.selected_proposal.title)}`)
+      }
+      lines.push(`- 有效票数：${decision.vote_count}`)
+      lines.push(`- 自投数：${decision.self_vote_count}`)
+      lines.push('')
+      if (decision.majority_reasons.length) {
+        lines.push('### 多数理由', '')
+        for (const r of decision.majority_reasons) lines.push(`- ${markdownText(r)}`)
+        lines.push('')
+      }
+      if (decision.minority_opinion.length || decision.minority_choices?.length) {
+        lines.push('### 少数留议', '')
+        for (const choice of decision.minority_choices ?? []) {
+          lines.push(`- ${seatLabels[choice.seat]}：${markdownText(choice.reason)}${choice.has_risk_warning ? ' ⚠️' : ''}`)
+        }
+        if (!decision.minority_choices?.length) {
+          for (const o of decision.minority_opinion) lines.push(`- ${markdownText(o)}`)
+        }
+        lines.push('')
+      }
+      if (decision.minority_choices?.length) {
+        lines.push('### 重新评估条件', '')
+        for (const choice of decision.minority_choices) {
+          if (choice.reassessment_condition) lines.push(`- ${seatLabels[choice.seat]}：${markdownText(choice.reassessment_condition)}`)
+        }
+        lines.push('')
+      }
+      if (decision.adoption_conditions.length) {
+        appendList(lines, '采纳条件', decision.adoption_conditions)
+      }
+      if (decision.next_steps.length) {
+        appendList(lines, '下一步', decision.next_steps)
+      }
+    } else {
+      lines.push('暂无表决结果。')
+    }
+    lines.push('')
+    if (details.artifacts.proposals.length) {
+      lines.push('## 策案', '')
+      for (const proposal of details.artifacts.proposals) {
+        lines.push(`### ${seatLabels[proposal.proposed_by]}：${markdownText(proposal.title)}`)
+        lines.push('', markdownText(proposal.summary), '')
+        if (proposal.confidence !== undefined) lines.push(`- 置信度：${formatPercent(proposal.confidence)}`)
+        lines.push('')
+      }
+    }
+    lines.push('## 讨论质量', '')
+    const hasUsage = details.artifacts.seat_runs.some((run) => typeof run.total_tokens === 'number')
+    for (const metric of qualityMetricRows(details.artifacts.quality, hasUsage)) {
+      if (metric.label === '平均 token' || metric.label === '平均耗时' || metric.label === '票数集中度' || metric.label === '少数留议率') continue
+      lines.push(`- ${metric.label}：${metric.value}`)
+    }
+    return `${lines.join('\n').replace(/\n{3,}/g, '\n\n')}\n`
+  }
+
+  lines.push('## 原始议题', '', markdownText(details.session.topic))
 
   if (details.session.context.trim()) {
     lines.push('', '### 背景', '', markdownText(details.session.context))
@@ -442,7 +507,7 @@ export function exportSessionMarkdown(details: SessionDetails) {
 
   lines.push('## 表决结果', '')
   if (decision) {
-    lines.push(`- 状态：${decision.status === 'majority_reached' ? '形成多数' : '未形成多数'}`)
+    lines.push(`- 状态：${decisionLabel(decision)}`)
     lines.push(`- 有效票数：${decision.vote_count}`)
     lines.push(`- 自投数：${decision.self_vote_count}`)
     if (decision.has_risk_blocker) lines.push('- 存在风险阻塞')
@@ -452,11 +517,9 @@ export function exportSessionMarkdown(details: SessionDetails) {
     appendList(lines, '多数理由', decision.majority_reasons)
     appendList(lines, '少数留议', decision.minority_opinion)
     if (decision.minority_choices?.length) {
-      lines.push('', '### 少数方详情', '')
       for (const choice of decision.minority_choices) {
-        lines.push(`- ${seatLabels[choice.seat]}：${markdownText(choice.reason)}`)
-        lines.push(`  - 重新评估条件：${markdownText(choice.reassessment_condition)}`)
-        if (choice.has_risk_warning) lines.push('  - 含风险提醒')
+        lines.push(`- ${seatLabels[choice.seat]}：${markdownText(choice.reason)}${choice.has_risk_warning ? ' ⚠️含风险提醒' : ''}`)
+        lines.push(`  - 重新评估：${markdownText(choice.reassessment_condition)}`)
       }
     }
     appendList(lines, '重新评估条件', decision.reassessment_conditions)
@@ -481,7 +544,43 @@ export function exportSessionMarkdown(details: SessionDetails) {
     lines.push(`- ${metric.label}：${metric.value}`)
   }
 
+  if (level === 'audit') {
+    if (details.artifacts.claims?.length) {
+      lines.push('', '## 主张池（Audit）', '')
+      for (const claim of details.artifacts.claims) {
+        lines.push(`- ${claim.proposed_by}：${markdownText(claim.content)}${claim.is_supported ? ' ✅' : ' ❌'}`)
+      }
+    }
+    if (details.artifacts.evidence?.length) {
+      lines.push('', '## 证据池（Audit）', '')
+      for (const ev of details.artifacts.evidence) {
+        lines.push(`- [${ev.kind}] ${markdownText(ev.content)}${ev.source ? ` (${ev.source})` : ''}`)
+      }
+    }
+    if (details.artifacts.assessments?.length) {
+      lines.push('', '## 评估记录（Audit）', '')
+      for (const a of details.artifacts.assessments) {
+        lines.push(`- ${a.assessor} → ${a.claim_id}：${a.supports_claim ? '支持' : '反对'}`)
+      }
+    }
+    if (details.artifacts.seat_runs.length) {
+      lines.push('', '## 执行轨迹（Audit）', '')
+      for (const run of details.artifacts.seat_runs) {
+        lines.push(`- ${seatLabels[run.seat]} [${run.phase}]：${run.status}`, '')
+        if (run.raw_output) {
+          lines.push('  ```', `  ${run.raw_output.slice(0, 500).replace(/\n/g, '\n  ')}`, '  ```', '')
+        }
+      }
+    }
+  }
+
   return `${lines.join('\n').replace(/\n{3,}/g, '\n\n')}\n`
+}
+
+function decisionLabel(decision: Decision) {
+  if (decision.status === 'majority_reached') return '形成多数'
+  if (decision.status === 'conditionally_adopted') return '有条件通过'
+  return '未形成多数'
 }
 
 function appendList(lines: string[], label: string, values?: string[]) {

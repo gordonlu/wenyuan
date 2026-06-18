@@ -18,9 +18,20 @@
             <ChevronDown :size="16" />
           </button>
           <div v-if="showExportMenu" class="action-menu">
-            <button @click="downloadAndClose('markdown')">Markdown</button>
             <button @click="downloadAndClose('json')">JSON</button>
             <button @click="downloadAndClose('html')">HTML</button>
+          </div>
+        </div>
+        <div class="menu-wrap">
+          <button title="导出 Markdown" @click="showMdMenu = !showMdMenu">
+            <FileText :size="18" />
+            Markdown
+            <ChevronDown :size="16" />
+          </button>
+          <div v-if="showMdMenu" class="action-menu">
+            <button @click="downloadMarkdown('brief')">简报 (简明)</button>
+            <button @click="downloadMarkdown('standard')">完整报告</button>
+            <button @click="downloadMarkdown('audit')">审计全文</button>
           </div>
         </div>
         <button v-if="details.execution.running" class="icon" title="暂停" @click="pause">
@@ -232,7 +243,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
-import { Ban, ChevronDown, Copy, Download, Pause, Pen, Play, RefreshCw, RotateCw } from '@lucide/vue'
+import { Ban, ChevronDown, Copy, Download, FileText, Pause, Pen, Play, RefreshCw, RotateCw } from '@lucide/vue'
 import { api } from '../api'
 import ApiErrorState from '../components/ApiErrorState.vue'
 import CritiqueGraph from '../components/CritiqueGraph.vue'
@@ -253,6 +264,7 @@ const editingContext = ref(false)
 const newContext = ref('')
 const showTrajectory = ref(false)
 const showExportMenu = ref(false)
+const showMdMenu = ref(false)
 const trajectory = ref<Array<{ id: number; event_type: string; created_at: string }>>([])
 const canManualRevision = computed(
   () =>
@@ -287,11 +299,9 @@ function eventBadge(type: string) {
   return ''
 }
 
-function downloadAndClose(format: 'markdown' | 'json' | 'html') {
+function downloadAndClose(format: 'json' | 'html') {
   showExportMenu.value = false
-  if (format === 'markdown') {
-    downloadMarkdown()
-  } else if (format === 'json') {
+  if (format === 'json') {
     downloadJSON()
   } else {
     downloadHTML()
@@ -374,7 +384,7 @@ function generateHTML(details: SessionDetails): string {
   ${details.artifacts.ideas.map(i => `<div class="section"><h3>${escapeHTML(i.title)}</h3><p>${escapeHTML(i.summary)}</p></div>`).join('')}` : ''}
   ${details.artifacts.proposals.length ? `<h2>策案对比</h2>
   ${details.artifacts.proposals.map(p => `<div class="section"><h3>${escapeHTML(p.title)}</h3><p>${escapeHTML(p.summary)}</p></div>`).join('')}` : ''}
-  ${decision ? `<h2>表决结果</h2><div class="section"><p>${decision.status === 'majority_reached' ? '形成多数' : '未形成多数'}</p></div>` : ''}
+  ${decision ? `<h2>表决结果</h2><div class="section"><p>${decision.status === 'majority_reached' ? '形成多数' : decision.status === 'conditionally_adopted' ? '有条件通过' : '未形成多数'}${decision.has_risk_blocker ? ' ⚠️存在风险阻塞' : ''}</p></div>` : ''}
 </body></html>`
 }
 
@@ -459,14 +469,16 @@ async function loadTrajectory() {
   }
 }
 
-function downloadMarkdown() {
+function downloadMarkdown(level: 'brief' | 'standard' | 'audit') {
   if (!details.value) return
-  const markdown = exportSessionMarkdown(details.value)
+  showMdMenu.value = false
+  const name = level === 'brief' ? '简报' : level === 'standard' ? '完整报告' : '审计全文'
+  const markdown = exportSessionMarkdown(details.value, level)
   const blob = new Blob([markdown], { type: 'text/markdown;charset=utf-8' })
   const url = URL.createObjectURL(blob)
   const link = document.createElement('a')
   link.href = url
-  link.download = `${safeFilename(details.value.session.title)}.md`
+  link.download = `${safeFilename(details.value.session.title)}-${name}.md`
   link.click()
   URL.revokeObjectURL(url)
 }

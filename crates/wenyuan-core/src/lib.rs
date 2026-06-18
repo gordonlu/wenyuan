@@ -393,6 +393,7 @@ pub struct MinorityChoice {
 #[serde(rename_all = "snake_case")]
 pub enum DecisionStatus {
     MajorityReached,
+    ConditionallyAdopted,
     NoMajority,
 }
 
@@ -548,31 +549,6 @@ pub fn build_decision(
                     .is_some_and(|proposal| proposal.proposed_by == vote.voter)
         })
         .count();
-    let status = if selected_proposal.is_some() {
-        DecisionStatus::MajorityReached
-    } else {
-        DecisionStatus::NoMajority
-    };
-    let majority_reasons = selected_proposal
-        .as_ref()
-        .map(|proposal| {
-            votes
-                .iter()
-                .filter(|vote| vote.final_choice && vote.proposal_id == proposal.id)
-                .map(|vote| vote.reason.clone())
-                .collect()
-        })
-        .unwrap_or_default();
-    let minority_opinion = votes
-        .iter()
-        .filter(|vote| {
-            selected_proposal
-                .as_ref()
-                .is_none_or(|proposal| vote.proposal_id != proposal.id)
-        })
-        .map(|vote| vote.reason.clone())
-        .collect();
-
     let minority_choices: Vec<MinorityChoice> = votes
         .iter()
         .filter(|vote| {
@@ -595,6 +571,35 @@ pub fn build_decision(
         .collect();
 
     let has_risk_blocker = minority_choices.iter().any(|m| m.has_risk_warning);
+
+    let status = if selected_proposal.is_some() {
+        if has_risk_blocker {
+            DecisionStatus::ConditionallyAdopted
+        } else {
+            DecisionStatus::MajorityReached
+        }
+    } else {
+        DecisionStatus::NoMajority
+    };
+    let majority_reasons = selected_proposal
+        .as_ref()
+        .map(|proposal| {
+            votes
+                .iter()
+                .filter(|vote| vote.final_choice && vote.proposal_id == proposal.id)
+                .map(|vote| vote.reason.clone())
+                .collect()
+        })
+        .unwrap_or_default();
+    let minority_opinion = votes
+        .iter()
+        .filter(|vote| {
+            selected_proposal
+                .as_ref()
+                .is_none_or(|proposal| vote.proposal_id != proposal.id)
+        })
+        .map(|vote| vote.reason.clone())
+        .collect();
 
     let mut reassessment_conditions: Vec<String> = minority_choices
         .iter()

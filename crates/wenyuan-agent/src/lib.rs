@@ -1267,7 +1267,18 @@ impl DiscussionQualityMetrics {
             self_vote_rate: artifacts
                 .decision
                 .as_ref()
-                .map(|decision| ratio(decision.self_vote_count, artifacts.votes.len()))
+                .map(|decision| {
+                    let final_count = artifacts
+                        .votes
+                        .iter()
+                        .filter(|vote| vote.final_choice)
+                        .count();
+                    if final_count > 0 {
+                        ratio(decision.self_vote_count, final_count)
+                    } else {
+                        0.0
+                    }
+                })
                 .unwrap_or_default(),
             vote_concentration: vote_concentration(&artifacts.votes),
             minority_retention_rate: artifacts
@@ -1795,11 +1806,21 @@ where
 }
 
 fn token_set(value: &str) -> HashSet<String> {
-    value
-        .split(|ch: char| ch.is_whitespace() || ch.is_ascii_punctuation())
-        .map(normalize_for_metric)
-        .filter(|token| !token.is_empty())
-        .collect()
+    let mut tokens = HashSet::new();
+    for token in value.split(|ch: char| ch.is_whitespace() || ch.is_ascii_punctuation()) {
+        let normalized = normalize_for_metric(token);
+        if !normalized.is_empty() {
+            tokens.insert(normalized);
+        }
+    }
+    let chars: Vec<char> = value
+        .chars()
+        .filter(|ch| !ch.is_whitespace() && !ch.is_ascii_punctuation())
+        .collect();
+    for window in chars.windows(2) {
+        tokens.insert(window.iter().collect::<String>().to_lowercase());
+    }
+    tokens
 }
 
 #[derive(Debug, Deserialize)]

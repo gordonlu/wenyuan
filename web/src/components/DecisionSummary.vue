@@ -4,14 +4,15 @@
       <h2>表决结果</h2>
       <div class="phase-labels">
         <span v-if="decision?.has_risk_blocker" class="badge danger">风险阻塞</span>
-        <span :class="['badge', decision?.status === 'majority_reached' ? 'ok' : 'warn']">
-          {{ decision?.status === 'majority_reached' ? '形成多数' : '未形成多数' }}
+        <span :class="['badge', decision?.status === 'conditionally_adopted' ? 'warn' : decision?.status === 'majority_reached' ? 'ok' : 'warn']">
+          {{ decision?.status === 'majority_reached' ? '形成多数' : decision?.status === 'conditionally_adopted' ? '有条件通过' : '未形成多数' }}
         </span>
       </div>
     </header>
     <div v-if="decision?.selected_proposal" class="result-block">
       <h3>{{ decision.selected_proposal.title }}</h3>
       <p>{{ decision.selected_proposal.summary }}</p>
+      <p v-if="decision.status === 'conditionally_adopted'" class="muted" style="font-size: 13px">多数已形成但存在风险阻塞，需满足采纳条件后方可执行</p>
       <dl>
         <dt>有效票数</dt>
         <dd>{{ decision.vote_count }}</dd>

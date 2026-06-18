@@ -153,7 +153,7 @@ describe('session domain helpers', () => {
       events: [],
     } as SessionDetails
 
-    const markdown = exportSessionMarkdown(details)
+    const markdown = exportSessionMarkdown(details, 'standard')
     expect(markdown).toContain('# 增长策略')
     expect(markdown).toContain('## 原始议题')
     expect(markdown).toContain('### 谋远席：激活路径')
