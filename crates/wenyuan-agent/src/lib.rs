@@ -1,3 +1,4 @@
+use async_trait::async_trait;
 use futures::future::join_all;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -7,12 +8,18 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 use thiserror::Error;
+use tokio::sync::Notify;
 use uuid::Uuid;
 use wenyuan_core::{
     ChatMessage, Critique, Decision, IdeaCard, Proposal, SeatKind, SeatStatus, Session,
     SessionPhase, Vote, VoteOutcome, VotePolicy, build_decision, phase_barrier_completed,
 };
 use wenyuan_provider::{LlmProvider, LlmRequest, LlmResponse, ProviderError};
+
+#[async_trait]
+pub trait ProgressSink: Send + Sync {
+    async fn emit(&self, event_type: &str, payload: serde_json::Value);
+}
 
 #[derive(Debug, Error)]
 pub enum AgentError {
@@ -42,16 +49,30 @@ pub enum AgentError {
     Core(String),
 }
 
+#[derive(Debug, Default)]
+struct CancellationState {
+    cancelled: AtomicBool,
+    notify: Notify,
+}
+
 #[derive(Debug, Default, Clone)]
-pub struct CancellationFlag(Arc<AtomicBool>);
+pub struct CancellationFlag(Arc<CancellationState>);
 
 impl CancellationFlag {
     pub fn cancel(&self) {
-        self.0.store(true, Ordering::SeqCst);
+        self.0.cancelled.store(true, Ordering::SeqCst);
+        self.0.notify.notify_waiters();
     }
 
     pub fn is_cancelled(&self) -> bool {
-        self.0.load(Ordering::SeqCst)
+        self.0.cancelled.load(Ordering::SeqCst)
+    }
+
+    async fn cancelled(&self) {
+        if self.is_cancelled() {
+            return;
+        }
+        self.0.notify.notified().await;
     }
 }
 
@@ -78,8 +99,17 @@ impl AgentRunner {
 
     pub async fn run_session(
         &self,
+        session: Session,
+        cancel: CancellationFlag,
+    ) -> Result<DiscussionArtifacts, AgentError> {
+        self.run_session_with_progress(session, cancel, None).await
+    }
+
+    pub async fn run_session_with_progress(
+        &self,
         mut session: Session,
         cancel: CancellationFlag,
+        progress: Option<Arc<dyn ProgressSink>>,
     ) -> Result<DiscussionArtifacts, AgentError> {
         let mut artifacts = DiscussionArtifacts::default();
 
@@ -90,46 +120,106 @@ impl AgentRunner {
         artifacts
             .events
             .push("phase_started:independent_deliberation".into());
-        let (ideas, traces) = self.run_independent(session.id, &cancel).await?;
+        emit_progress(
+            progress.as_ref(),
+            "phase_started",
+            serde_json::json!({ "phase": SessionPhase::IndependentDeliberation }),
+        )
+        .await;
+        let (ideas, traces) = self
+            .run_independent(&session, &cancel, progress.as_ref())
+            .await?;
         artifacts.ideas = ideas;
         artifacts.seat_runs.extend(traces);
         artifacts
             .events
             .push("phase_completed:independent_deliberation".into());
+        emit_progress(
+            progress.as_ref(),
+            "phase_completed",
+            serde_json::json!({ "phase": SessionPhase::IndependentDeliberation }),
+        )
+        .await;
 
         self.ensure_not_cancelled(&cancel)?;
         session
             .transition_to(SessionPhase::CrossCritique)
             .map_err(|err| AgentError::Core(err.to_string()))?;
         artifacts.events.push("phase_started:cross_critique".into());
-        let (critiques, traces) = self.run_critiques(session.id, &cancel).await?;
+        emit_progress(
+            progress.as_ref(),
+            "phase_started",
+            serde_json::json!({ "phase": SessionPhase::CrossCritique }),
+        )
+        .await;
+        let (critiques, traces) = self
+            .run_critiques(session.id, &artifacts.ideas, &cancel, progress.as_ref())
+            .await?;
         artifacts.critiques = critiques;
         artifacts.seat_runs.extend(traces);
         artifacts
             .events
             .push("phase_completed:cross_critique".into());
+        emit_progress(
+            progress.as_ref(),
+            "phase_completed",
+            serde_json::json!({ "phase": SessionPhase::CrossCritique }),
+        )
+        .await;
 
         self.ensure_not_cancelled(&cancel)?;
         session
             .transition_to(SessionPhase::Revision)
             .map_err(|err| AgentError::Core(err.to_string()))?;
         artifacts.events.push("phase_started:revision".into());
-        let (proposals, traces) = self.run_revision(session.id, &cancel).await?;
+        emit_progress(
+            progress.as_ref(),
+            "phase_started",
+            serde_json::json!({ "phase": SessionPhase::Revision }),
+        )
+        .await;
+        let (proposals, traces) = self
+            .run_revision(
+                session.id,
+                &artifacts.ideas,
+                &artifacts.critiques,
+                &cancel,
+                progress.as_ref(),
+            )
+            .await?;
         artifacts.proposals = proposals;
         artifacts.seat_runs.extend(traces);
         artifacts.events.push("phase_completed:revision".into());
+        emit_progress(
+            progress.as_ref(),
+            "phase_completed",
+            serde_json::json!({ "phase": SessionPhase::Revision }),
+        )
+        .await;
 
         self.ensure_not_cancelled(&cancel)?;
         session
             .transition_to(SessionPhase::Voting)
             .map_err(|err| AgentError::Core(err.to_string()))?;
         artifacts.events.push("phase_started:voting".into());
+        emit_progress(
+            progress.as_ref(),
+            "phase_started",
+            serde_json::json!({ "phase": SessionPhase::Voting }),
+        )
+        .await;
         let (votes, traces) = self
-            .run_voting(session.id, &artifacts.proposals, &cancel)
+            .run_voting(session.id, &artifacts.proposals, &cancel, progress.as_ref())
             .await?;
         artifacts.votes = votes;
         artifacts.seat_runs.extend(traces);
         artifacts.events.push("phase_completed:voting".into());
+        emit_progress(
+            progress.as_ref(),
+            "phase_completed",
+            serde_json::json!({ "phase": SessionPhase::Voting }),
+        )
+        .await;
         let mut decision_votes = artifacts.votes.clone();
 
         match wenyuan_core::tally_votes(
@@ -150,12 +240,24 @@ impl AgentRunner {
                     .transition_to(SessionPhase::Convergence)
                     .map_err(|err| AgentError::Core(err.to_string()))?;
                 artifacts.events.push("convergence_started".into());
+                emit_progress(
+                    progress.as_ref(),
+                    "phase_started",
+                    serde_json::json!({ "phase": SessionPhase::Convergence }),
+                )
+                .await;
                 let (mut second_votes, traces) = self
-                    .run_voting(session.id, &artifacts.proposals, &cancel)
+                    .run_voting(session.id, &artifacts.proposals, &cancel, progress.as_ref())
                     .await?;
                 artifacts.seat_runs.extend(traces);
                 decision_votes = second_votes.clone();
                 artifacts.votes.append(&mut second_votes);
+                emit_progress(
+                    progress.as_ref(),
+                    "phase_completed",
+                    serde_json::json!({ "phase": SessionPhase::Convergence }),
+                )
+                .await;
                 session
                     .transition_to(SessionPhase::Completed)
                     .map_err(|err| AgentError::Core(err.to_string()))?;
@@ -176,6 +278,7 @@ impl AgentRunner {
         .map_err(|err| AgentError::Core(err.to_string()))?;
         session.result = Some(decision.clone());
         artifacts.decision = Some(decision);
+        artifacts.quality = DiscussionQualityMetrics::calculate(&artifacts);
         artifacts.session = Some(session);
         artifacts.events.push("session_completed".into());
         Ok(artifacts)
@@ -183,26 +286,46 @@ impl AgentRunner {
 
     async fn run_independent(
         &self,
-        session_id: Uuid,
+        session: &Session,
         cancel: &CancellationFlag,
+        progress: Option<&Arc<dyn ProgressSink>>,
     ) -> Result<(Vec<IdeaCard>, Vec<SeatRunTrace>), AgentError> {
+        let input = serde_json::json!({
+            "title": session.title,
+            "topic": session.topic,
+            "context": session.context,
+            "rule": "第一轮独议完全隔离，不引用其他席位输出。"
+        });
         let run = self
             .run_three::<IndependentOutput>(
-                session_id,
+                session.id,
                 SessionPhase::IndependentDeliberation,
+                input,
                 cancel,
+                progress,
             )
             .await?;
         let mut ideas = Vec::new();
         for (seat, output) in run.outputs {
             for idea in output.ideas.into_iter().take(5) {
+                let key = normalize_for_metric(&format!("{} {}", idea.title, idea.summary));
+                if let Some(existing) = ideas.iter_mut().find(|existing: &&mut IdeaCard| {
+                    normalize_for_metric(&format!("{} {}", existing.title, existing.summary)) == key
+                }) {
+                    if !existing.source_seats.contains(&seat) {
+                        existing.source_seats.push(seat);
+                    }
+                    continue;
+                }
                 ideas.push(IdeaCard {
                     id: Uuid::new_v4(),
                     proposed_by: seat,
+                    source_seats: vec![seat],
                     title: idea.title,
                     summary: idea.summary,
                     value: idea.value,
                     mechanism: idea.mechanism,
+                    unconventional: idea.unconventional,
                     assumptions: idea.assumptions,
                     risks: idea.risks,
                 });
@@ -214,10 +337,22 @@ impl AgentRunner {
     async fn run_critiques(
         &self,
         session_id: Uuid,
+        ideas: &[IdeaCard],
         cancel: &CancellationFlag,
+        progress: Option<&Arc<dyn ProgressSink>>,
     ) -> Result<(Vec<Critique>, Vec<SeatRunTrace>), AgentError> {
+        let input = serde_json::json!({
+            "ideas": ideas,
+            "rule": "只批议其他席位的独议结果，必须逐席给出结构化批议。"
+        });
         let run = self
-            .run_three::<CritiqueOutput>(session_id, SessionPhase::CrossCritique, cancel)
+            .run_three::<CritiqueOutput>(
+                session_id,
+                SessionPhase::CrossCritique,
+                input,
+                cancel,
+                progress,
+            )
             .await?;
         Ok((
             run.outputs
@@ -230,7 +365,9 @@ impl AgentRunner {
                         weakest_point: review.weakest_point,
                         hidden_assumption: review.hidden_assumption,
                         challenge: review.challenge,
+                        counterexample: review.counterexample,
                         suggested_improvement: review.suggested_improvement,
+                        evidence_question: review.evidence_question,
                     })
                 })
                 .collect(),
@@ -241,10 +378,24 @@ impl AgentRunner {
     async fn run_revision(
         &self,
         session_id: Uuid,
+        ideas: &[IdeaCard],
+        critiques: &[Critique],
         cancel: &CancellationFlag,
+        progress: Option<&Arc<dyn ProgressSink>>,
     ) -> Result<(Vec<Proposal>, Vec<SeatRunTrace>), AgentError> {
+        let input = serde_json::json!({
+            "ideas": ideas,
+            "critiques": critiques,
+            "rule": "形成正式策案，说明采纳、拒绝、相较独议修改和置信度。"
+        });
         let run = self
-            .run_three::<ProposalOutput>(session_id, SessionPhase::Revision, cancel)
+            .run_three::<ProposalOutput>(
+                session_id,
+                SessionPhase::Revision,
+                input,
+                cancel,
+                progress,
+            )
             .await?;
         Ok((
             run.outputs
@@ -255,10 +406,15 @@ impl AgentRunner {
                     title: output.title,
                     summary: output.summary,
                     source_idea_ids: output.source_idea_ids,
+                    adopted_points: output.adopted_points,
+                    rejected_points: output.rejected_points,
+                    rejection_reasons: output.rejection_reasons,
+                    changes_from_initial: output.changes_from_initial,
                     user_value: output.user_value,
                     implementation_path: output.implementation_path,
                     risks: output.risks,
                     success_metrics: output.success_metrics,
+                    confidence: output.confidence,
                 })
                 .collect(),
             run.traces,
@@ -270,9 +426,14 @@ impl AgentRunner {
         session_id: Uuid,
         proposals: &[Proposal],
         cancel: &CancellationFlag,
+        progress: Option<&Arc<dyn ProgressSink>>,
     ) -> Result<(Vec<Vote>, Vec<SeatRunTrace>), AgentError> {
+        let input = serde_json::json!({
+            "proposals": proposals,
+            "rule": "对三个策案匿名投票，proposal_ref 使用 proposal_0、proposal_1、proposal_2。"
+        });
         let run = self
-            .run_three::<VoteOutput>(session_id, SessionPhase::Voting, cancel)
+            .run_three::<VoteOutput>(session_id, SessionPhase::Voting, input, cancel, progress)
             .await?;
         let mut votes = Vec::new();
         for (voter, output) in run.outputs {
@@ -306,21 +467,39 @@ impl AgentRunner {
         &self,
         session_id: Uuid,
         phase: SessionPhase,
+        phase_input: serde_json::Value,
         cancel: &CancellationFlag,
+        progress: Option<&Arc<dyn ProgressSink>>,
     ) -> Result<PhaseRun<T>, AgentError>
     where
         T: for<'de> Deserialize<'de> + Send + 'static,
     {
         self.ensure_not_cancelled(cancel)?;
-        let futures = SeatKind::ALL
-            .into_iter()
-            .map(|seat| self.call_and_parse::<T>(session_id, seat, phase));
+        let futures = SeatKind::ALL.into_iter().map(|seat| {
+            self.call_and_parse::<T>(
+                session_id,
+                seat,
+                phase,
+                phase_input.clone(),
+                cancel,
+                progress,
+            )
+        });
         let results = join_all(futures).await;
         let mut outputs = Vec::new();
         let mut traces = Vec::new();
         let mut statuses = Vec::new();
+        let mut cancelled = false;
 
         for result in results {
+            let result = match result {
+                Ok(result) => result,
+                Err(AgentError::Cancelled) => {
+                    cancelled = true;
+                    continue;
+                }
+                Err(err) => return Err(err),
+            };
             statuses.push((
                 result.seat,
                 if result.parsed.is_some() {
@@ -333,6 +512,10 @@ impl AgentRunner {
                 outputs.push((result.seat, parsed));
             }
             traces.extend(result.traces);
+        }
+
+        if cancelled {
+            return Err(AgentError::Cancelled);
         }
 
         if let Err(err) = phase_barrier_completed(&statuses) {
@@ -358,37 +541,62 @@ impl AgentRunner {
         session_id: Uuid,
         seat: SeatKind,
         phase: SessionPhase,
-    ) -> SeatCallResult<T>
+        phase_input: serde_json::Value,
+        cancel: &CancellationFlag,
+        progress: Option<&Arc<dyn ProgressSink>>,
+    ) -> Result<SeatCallResult<T>, AgentError>
     where
         T: for<'de> Deserialize<'de>,
     {
         let mut traces = Vec::new();
         let prompt = prompt_config(seat);
-        let request = self.build_request(session_id, seat, phase, false, &prompt);
-        let (first, first_duration_ms) = self.call_provider(seat, request).await;
+        emit_progress(
+            progress,
+            "seat_started",
+            serde_json::json!({ "seat": seat, "phase": phase }),
+        )
+        .await;
+        let request = self.build_request(session_id, seat, phase, false, &prompt, &phase_input);
+        let (first, first_duration_ms) = self.call_provider(request, cancel).await;
         let Ok(response) = first else {
+            if matches!(first, Err(ProviderError::Cancelled)) {
+                return Err(AgentError::Cancelled);
+            }
+            let error = first.err().unwrap_or_else(unknown_provider_error);
+            emit_progress(
+                progress,
+                "seat_failed",
+                serde_json::json!({ "seat": seat, "phase": phase, "error": error.to_string() }),
+            )
+            .await;
             traces.push(SeatRunTrace::failed_provider(
                 TraceContext::new(session_id, seat, phase, &prompt, false, first_duration_ms),
-                response_error(first.err()),
+                error,
             ));
-            return SeatCallResult {
+            return Ok(SeatCallResult {
                 seat,
                 parsed: None,
                 traces,
-            };
+            });
         };
 
         match serde_json::from_str::<T>(&response.content) {
             Ok(parsed) => {
+                emit_progress(
+                    progress,
+                    "seat_completed",
+                    serde_json::json!({ "seat": seat, "phase": phase }),
+                )
+                .await;
                 traces.push(SeatRunTrace::completed(
                     TraceContext::new(session_id, seat, phase, &prompt, false, first_duration_ms),
                     &response,
                 ));
-                SeatCallResult {
+                Ok(SeatCallResult {
                     seat,
                     parsed: Some(parsed),
                     traces,
-                }
+                })
             }
             Err(err) => {
                 traces.push(SeatRunTrace::failed_parse(
@@ -396,9 +604,21 @@ impl AgentRunner {
                     &response,
                     err.to_string(),
                 ));
-                let repair_request = self.build_request(session_id, seat, phase, true, &prompt);
-                let (repaired, repair_duration_ms) = self.call_provider(seat, repair_request).await;
+                let repair_request =
+                    self.build_request(session_id, seat, phase, true, &prompt, &phase_input);
+                let (repaired, repair_duration_ms) =
+                    self.call_provider(repair_request, cancel).await;
                 let Ok(repaired_response) = repaired else {
+                    if matches!(repaired, Err(ProviderError::Cancelled)) {
+                        return Err(AgentError::Cancelled);
+                    }
+                    let error = repaired.err().unwrap_or_else(unknown_provider_error);
+                    emit_progress(
+                        progress,
+                        "seat_failed",
+                        serde_json::json!({ "seat": seat, "phase": phase, "error": error.to_string() }),
+                    )
+                    .await;
                     traces.push(SeatRunTrace::failed_provider(
                         TraceContext::new(
                             session_id,
@@ -408,16 +628,22 @@ impl AgentRunner {
                             true,
                             repair_duration_ms,
                         ),
-                        response_error(repaired.err()),
+                        error,
                     ));
-                    return SeatCallResult {
+                    return Ok(SeatCallResult {
                         seat,
                         parsed: None,
                         traces,
-                    };
+                    });
                 };
                 match serde_json::from_str::<T>(&repaired_response.content) {
                     Ok(parsed) => {
+                        emit_progress(
+                            progress,
+                            "seat_completed",
+                            serde_json::json!({ "seat": seat, "phase": phase, "repair_attempted": true }),
+                        )
+                        .await;
                         traces.push(SeatRunTrace::completed(
                             TraceContext::new(
                                 session_id,
@@ -429,13 +655,19 @@ impl AgentRunner {
                             ),
                             &repaired_response,
                         ));
-                        SeatCallResult {
+                        Ok(SeatCallResult {
                             seat,
                             parsed: Some(parsed),
                             traces,
-                        }
+                        })
                     }
                     Err(err) => {
+                        emit_progress(
+                            progress,
+                            "seat_failed",
+                            serde_json::json!({ "seat": seat, "phase": phase, "error": err.to_string(), "repair_attempted": true }),
+                        )
+                        .await;
                         traces.push(SeatRunTrace::failed_parse(
                             TraceContext::new(
                                 session_id,
@@ -448,11 +680,11 @@ impl AgentRunner {
                             &repaired_response,
                             err.to_string(),
                         ));
-                        SeatCallResult {
+                        Ok(SeatCallResult {
                             seat,
                             parsed: None,
                             traces,
-                        }
+                        })
                     }
                 }
             }
@@ -461,19 +693,16 @@ impl AgentRunner {
 
     async fn call_provider(
         &self,
-        seat: SeatKind,
         request: LlmRequest,
+        cancel: &CancellationFlag,
     ) -> (Result<LlmResponse, ProviderError>, u128) {
         let started = Instant::now();
-        let response = tokio::time::timeout(self.timeout, self.provider.complete(request)).await;
-        let duration_ms = started.elapsed().as_millis();
-        match response {
-            Ok(result) => (result, duration_ms),
-            Err(_) => {
-                let _ = seat;
-                (Err(ProviderError::Timeout), duration_ms)
-            }
-        }
+        let response = tokio::select! {
+            result = self.provider.complete(request) => result,
+            _ = tokio::time::sleep(self.timeout) => Err(ProviderError::Timeout),
+            _ = cancel.cancelled() => Err(ProviderError::Cancelled),
+        };
+        (response, started.elapsed().as_millis())
     }
 
     fn build_request(
@@ -483,7 +712,13 @@ impl AgentRunner {
         phase: SessionPhase,
         repair_json: bool,
         prompt: &SeatPrompt,
+        phase_input: &serde_json::Value,
     ) -> LlmRequest {
+        let instruction = if repair_json {
+            "上一轮输出不是合法 JSON。请仅根据同一阶段输入修复格式，并只返回合法 JSON。"
+        } else {
+            "请执行当前阶段并只返回合法 JSON。"
+        };
         LlmRequest {
             session_id,
             seat,
@@ -499,7 +734,10 @@ impl AgentRunner {
                 },
                 ChatMessage {
                     role: "user".into(),
-                    content: format!("请执行 {phase:?} 阶段并只返回 JSON。"),
+                    content: format!(
+                        "{instruction}\n阶段：{phase:?}\n输入：{}",
+                        serde_json::to_string(phase_input).unwrap_or_else(|_| "{}".into())
+                    ),
                 },
             ],
         }
@@ -523,7 +761,90 @@ pub struct DiscussionArtifacts {
     pub votes: Vec<Vote>,
     pub seat_runs: Vec<SeatRunTrace>,
     pub decision: Option<Decision>,
+    #[serde(default)]
+    pub quality: DiscussionQualityMetrics,
     pub events: Vec<String>,
+}
+
+#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
+pub struct DiscussionQualityMetrics {
+    pub idea_duplicate_rate: f32,
+    pub seat_similarity: f32,
+    pub high_similarity_detected: bool,
+    pub critique_effectiveness_rate: f32,
+    pub revision_change_rate: f32,
+    pub self_vote_rate: f32,
+    pub vote_concentration: f32,
+    pub minority_retention_rate: f32,
+    pub average_tokens: f32,
+    pub average_duration_ms: f32,
+}
+
+impl DiscussionQualityMetrics {
+    fn calculate(artifacts: &DiscussionArtifacts) -> Self {
+        let completed_runs: Vec<_> = artifacts
+            .seat_runs
+            .iter()
+            .filter(|run| run.status == SeatRunStatus::Completed)
+            .collect();
+        let seat_similarity = average_pair_similarity(
+            artifacts
+                .ideas
+                .iter()
+                .map(|idea| format!("{} {}", idea.title, idea.summary))
+                .collect(),
+        );
+        Self {
+            idea_duplicate_rate: duplicate_rate(
+                artifacts
+                    .ideas
+                    .iter()
+                    .map(|idea| format!("{} {}", idea.title, idea.summary)),
+            ),
+            seat_similarity,
+            high_similarity_detected: seat_similarity >= 0.75,
+            critique_effectiveness_rate: ratio(
+                artifacts
+                    .critiques
+                    .iter()
+                    .filter(|critique| {
+                        !critique.strongest_point.trim().is_empty()
+                            && !critique.weakest_point.trim().is_empty()
+                            && !critique.hidden_assumption.trim().is_empty()
+                            && !critique.counterexample.trim().is_empty()
+                            && !critique.suggested_improvement.trim().is_empty()
+                            && !critique.evidence_question.trim().is_empty()
+                    })
+                    .count(),
+                artifacts.critiques.len(),
+            ),
+            revision_change_rate: ratio(
+                artifacts
+                    .proposals
+                    .iter()
+                    .filter(|proposal| !proposal.changes_from_initial.is_empty())
+                    .count(),
+                artifacts.proposals.len(),
+            ),
+            self_vote_rate: artifacts
+                .decision
+                .as_ref()
+                .map(|decision| ratio(decision.self_vote_count, artifacts.votes.len()))
+                .unwrap_or_default(),
+            vote_concentration: vote_concentration(&artifacts.votes),
+            minority_retention_rate: artifacts
+                .decision
+                .as_ref()
+                .map(|decision| ratio(decision.minority_opinion.len(), artifacts.votes.len()))
+                .unwrap_or_default(),
+            average_tokens: average(
+                completed_runs
+                    .iter()
+                    .filter_map(|run| run.total_tokens.map(|tokens| tokens as f32)),
+            ),
+            average_duration_ms: average(completed_runs.iter().map(|run| run.duration_ms as f32)),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -560,7 +881,8 @@ impl SeatRunTrace {
         Self::from_response(SeatRunStatus::Failed, ctx, response, Some(error))
     }
 
-    fn failed_provider(ctx: TraceContext<'_>, error: String) -> Self {
+    fn failed_provider(ctx: TraceContext<'_>, error: ProviderError) -> Self {
+        let upstream_status = error.upstream_status();
         Self {
             id: Uuid::new_v4(),
             session_id: ctx.session_id,
@@ -570,12 +892,12 @@ impl SeatRunTrace {
             prompt_version: ctx.prompt.version.to_string(),
             repair_attempted: ctx.repair_attempted,
             raw_output: None,
-            error: Some(error),
+            error: Some(error.to_string()),
             duration_ms: ctx.duration_ms,
             prompt_tokens: None,
             completion_tokens: None,
             total_tokens: None,
-            upstream_status: None,
+            upstream_status,
         }
     }
 
@@ -681,10 +1003,100 @@ struct SeatCallResult<T> {
     traces: Vec<SeatRunTrace>,
 }
 
-fn response_error(error: Option<ProviderError>) -> String {
-    error
-        .map(|error| error.to_string())
-        .unwrap_or_else(|| "unknown provider error".to_string())
+fn unknown_provider_error() -> ProviderError {
+    ProviderError::Request("unknown provider error".to_string())
+}
+
+async fn emit_progress(
+    progress: Option<&Arc<dyn ProgressSink>>,
+    event_type: &str,
+    payload: serde_json::Value,
+) {
+    if let Some(progress) = progress {
+        progress.emit(event_type, payload).await;
+    }
+}
+
+fn ratio(numerator: usize, denominator: usize) -> f32 {
+    if denominator == 0 {
+        0.0
+    } else {
+        numerator as f32 / denominator as f32
+    }
+}
+
+fn average(values: impl Iterator<Item = f32>) -> f32 {
+    let mut sum = 0.0;
+    let mut count = 0usize;
+    for value in values {
+        sum += value;
+        count += 1;
+    }
+    ratio_float(sum, count)
+}
+
+fn ratio_float(sum: f32, count: usize) -> f32 {
+    if count == 0 { 0.0 } else { sum / count as f32 }
+}
+
+fn duplicate_rate(values: impl Iterator<Item = String>) -> f32 {
+    let mut seen = HashSet::new();
+    let mut total = 0usize;
+    let mut duplicates = 0usize;
+    for value in values {
+        total += 1;
+        if !seen.insert(normalize_for_metric(&value)) {
+            duplicates += 1;
+        }
+    }
+    ratio(duplicates, total)
+}
+
+fn average_pair_similarity(values: Vec<String>) -> f32 {
+    let normalized: Vec<_> = values
+        .iter()
+        .map(|value| token_set(value))
+        .filter(|tokens| !tokens.is_empty())
+        .collect();
+    let mut sum = 0.0;
+    let mut pairs = 0usize;
+    for left in 0..normalized.len() {
+        for right in (left + 1)..normalized.len() {
+            let intersection = normalized[left].intersection(&normalized[right]).count() as f32;
+            let union = normalized[left].union(&normalized[right]).count() as f32;
+            if union > 0.0 {
+                sum += intersection / union;
+                pairs += 1;
+            }
+        }
+    }
+    ratio_float(sum, pairs)
+}
+
+fn vote_concentration(votes: &[Vote]) -> f32 {
+    let mut counts = std::collections::HashMap::new();
+    let mut total = 0usize;
+    for vote in votes.iter().filter(|vote| vote.final_choice) {
+        total += 1;
+        *counts.entry(vote.proposal_id).or_insert(0usize) += 1;
+    }
+    ratio(counts.values().copied().max().unwrap_or_default(), total)
+}
+
+fn normalize_for_metric(value: &str) -> String {
+    value
+        .chars()
+        .filter(|ch| !ch.is_whitespace() && !ch.is_ascii_punctuation())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn token_set(value: &str) -> HashSet<String> {
+    value
+        .split(|ch: char| ch.is_whitespace() || ch.is_ascii_punctuation())
+        .map(normalize_for_metric)
+        .filter(|token| !token.is_empty())
+        .collect()
 }
 
 #[derive(Debug, Deserialize)]
@@ -698,6 +1110,8 @@ struct RawIdea {
     summary: String,
     value: String,
     mechanism: String,
+    #[serde(default)]
+    unconventional: bool,
     assumptions: Vec<String>,
     risks: Vec<String>,
 }
@@ -714,18 +1128,33 @@ struct RawCritique {
     weakest_point: String,
     hidden_assumption: String,
     challenge: String,
+    #[serde(default)]
+    counterexample: String,
     suggested_improvement: String,
+    #[serde(default)]
+    evidence_question: String,
 }
 
 #[derive(Debug, Deserialize)]
 struct ProposalOutput {
     title: String,
     summary: String,
+    #[serde(default)]
     source_idea_ids: Vec<Uuid>,
+    #[serde(default)]
+    adopted_points: Vec<String>,
+    #[serde(default)]
+    rejected_points: Vec<String>,
+    #[serde(default)]
+    rejection_reasons: Vec<String>,
+    #[serde(default)]
+    changes_from_initial: Vec<String>,
     user_value: String,
     implementation_path: String,
     risks: Vec<String>,
     success_metrics: Vec<String>,
+    #[serde(default)]
+    confidence: f32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -757,8 +1186,33 @@ pub fn has_duplicate_phase_start(events: &[String], phase: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::sync::Mutex;
     use wenyuan_core::DecisionStatus;
     use wenyuan_provider::{MockProvider, MockScenario};
+
+    struct HttpStatusProvider;
+
+    #[async_trait]
+    impl LlmProvider for HttpStatusProvider {
+        async fn complete(&self, _request: LlmRequest) -> Result<LlmResponse, ProviderError> {
+            Err(ProviderError::HttpStatus {
+                status: 429,
+                message: "rate limited".into(),
+            })
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingSink {
+        events: Mutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl ProgressSink for RecordingSink {
+        async fn emit(&self, event_type: &str, _payload: serde_json::Value) {
+            self.events.lock().await.push(event_type.to_string());
+        }
+    }
 
     fn runner(scenario: MockScenario) -> AgentRunner {
         AgentRunner::new(Arc::new(MockProvider::new(scenario)))
@@ -774,7 +1228,7 @@ mod tests {
             .await
             .unwrap();
         assert!(artifacts.decision.unwrap().selected_proposal.is_some());
-        assert_eq!(artifacts.ideas.len(), 3);
+        assert_eq!(artifacts.ideas.len(), 6);
         assert!(
             artifacts
                 .seat_runs
@@ -787,6 +1241,30 @@ mod tests {
                 .iter()
                 .all(|run| run.total_tokens == Some(200))
         );
+        assert!(artifacts.ideas.iter().any(|idea| idea.unconventional));
+        assert!(!artifacts.quality.high_similarity_detected);
+        assert_eq!(artifacts.quality.critique_effectiveness_rate, 1.0);
+        assert_eq!(artifacts.quality.revision_change_rate, 1.0);
+        assert!(artifacts.quality.average_tokens > 0.0);
+    }
+
+    #[tokio::test]
+    async fn progress_sink_receives_phase_and_seat_events() {
+        let sink = Arc::new(RecordingSink::default());
+        runner(MockScenario::SuccessMajority)
+            .run_session_with_progress(
+                Session::new("title", "topic", ""),
+                CancellationFlag::default(),
+                Some(sink.clone()),
+            )
+            .await
+            .unwrap();
+
+        let events = sink.events.lock().await;
+        assert!(events.iter().any(|event| event == "phase_started"));
+        assert!(events.iter().any(|event| event == "phase_completed"));
+        assert!(events.iter().any(|event| event == "seat_started"));
+        assert!(events.iter().any(|event| event == "seat_completed"));
     }
 
     #[test]
@@ -901,6 +1379,49 @@ mod tests {
             trace.seat == SeatKind::Jingshi
                 && trace.status == SeatRunStatus::Failed
                 && trace.error.as_deref() == Some("provider timeout")
+        }));
+    }
+
+    #[tokio::test]
+    async fn running_provider_call_can_be_cancelled() {
+        let cancel = CancellationFlag::default();
+        let cancel_task = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            cancel_task.cancel();
+        });
+
+        let started = Instant::now();
+        let err = AgentRunner::new(Arc::new(MockProvider::new(MockScenario::Timeout)))
+            .with_timeout(Duration::from_secs(5))
+            .run_session(Session::new("title", "topic", ""), cancel)
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, AgentError::Cancelled));
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[tokio::test]
+    async fn upstream_status_is_recorded_for_provider_failures() {
+        let err = AgentRunner::new(Arc::new(HttpStatusProvider))
+            .run_session(
+                Session::new("title", "topic", ""),
+                CancellationFlag::default(),
+            )
+            .await
+            .unwrap_err();
+        let AgentError::PhaseFailed { traces, .. } = err else {
+            panic!("expected phase failure");
+        };
+
+        assert!(traces.iter().all(|trace| {
+            trace.status == SeatRunStatus::Failed
+                && trace.upstream_status == Some(429)
+                && trace
+                    .error
+                    .as_deref()
+                    .is_some_and(|error| error.contains("rate limited"))
         }));
     }
 

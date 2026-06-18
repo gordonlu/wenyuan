@@ -1,3 +1,4 @@
+use async_trait::async_trait;
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -10,15 +11,16 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, env, net::SocketAddr, sync::Arc};
-use tokio::sync::Mutex;
-use tokio_stream::Stream;
+use tokio::sync::{Mutex, broadcast};
+use tokio_stream::{Stream, StreamExt};
 use tower_http::{cors::CorsLayer, services::ServeDir, trace::TraceLayer};
 use tracing::{error, info};
 use uuid::Uuid;
-use wenyuan_agent::{AgentError, AgentRunner, CancellationFlag};
-use wenyuan_core::{Session, SessionPhase};
+use wenyuan_agent::{AgentError, AgentRunner, CancellationFlag, ProgressSink};
+use wenyuan_core::{SeatKind, Session, SessionPhase};
 use wenyuan_provider::{
     LlmProvider, MockProvider, MockScenario, OpenAiCompatibleConfig, OpenAiCompatibleProvider,
+    SeatRoutedProvider,
 };
 use wenyuan_store::{SessionDetails, Store};
 
@@ -27,7 +29,29 @@ struct AppState {
     store: Store,
     runner: AgentRunner,
     running: Arc<Mutex<HashMap<Uuid, CancellationFlag>>>,
+    event_tx: broadcast::Sender<Uuid>,
     config: ConfigStatus,
+}
+
+struct StoreProgressSink {
+    session_id: Uuid,
+    store: Store,
+    event_tx: broadcast::Sender<Uuid>,
+}
+
+#[async_trait]
+impl ProgressSink for StoreProgressSink {
+    async fn emit(&self, event_type: &str, payload: serde_json::Value) {
+        if let Err(err) = self
+            .store
+            .append_event(self.session_id, event_type, payload)
+            .await
+        {
+            error!("failed to append progress event: {err}");
+            return;
+        }
+        let _ = self.event_tx.send(self.session_id);
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -35,6 +59,7 @@ struct ConfigStatus {
     provider_configured: bool,
     provider_kind: String,
     model: String,
+    seat_models: HashMap<String, String>,
     database_url: String,
     version: String,
 }
@@ -73,6 +98,7 @@ async fn main() -> anyhow::Result<()> {
         store,
         runner: AgentRunner::new(provider),
         running: Arc::new(Mutex::new(HashMap::new())),
+        event_tx: broadcast::channel(128).0,
         config,
     };
 
@@ -109,15 +135,18 @@ fn provider_from_env(database_url: &str) -> (Arc<dyn LlmProvider>, ConfigStatus)
     } else {
         "mock".to_string()
     };
-    let provider: Arc<dyn LlmProvider> = if provider_kind == "openai-compatible" {
-        Arc::new(OpenAiCompatibleProvider::new(OpenAiCompatibleConfig {
-            base_url,
-            api_key,
-            model: model.clone(),
-        }))
-    } else {
-        Arc::new(MockProvider::new(mock_scenario_from_env()))
-    };
+    let (provider, seat_models): (Arc<dyn LlmProvider>, HashMap<String, String>) =
+        if provider_kind == "openai-compatible" {
+            openai_provider_from_env(base_url, api_key, model.clone())
+        } else {
+            (
+                Arc::new(MockProvider::new(mock_scenario_from_env())),
+                SeatKind::ALL
+                    .into_iter()
+                    .map(|seat| (seat_env_key(seat).to_string(), model.clone()))
+                    .collect(),
+            )
+        };
     (
         provider,
         ConfigStatus {
@@ -125,10 +154,58 @@ fn provider_from_env(database_url: &str) -> (Arc<dyn LlmProvider>, ConfigStatus)
                 || env::var("WENYUAN_LLM_API_KEY").is_ok(),
             provider_kind,
             model,
+            seat_models,
             database_url: database_url.to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),
         },
     )
+}
+
+fn openai_provider_from_env(
+    default_base_url: String,
+    default_api_key: String,
+    default_model: String,
+) -> (Arc<dyn LlmProvider>, HashMap<String, String>) {
+    let default_provider: Arc<dyn LlmProvider> =
+        Arc::new(OpenAiCompatibleProvider::new(OpenAiCompatibleConfig {
+            base_url: default_base_url.clone(),
+            api_key: default_api_key.clone(),
+            model: default_model.clone(),
+        }));
+    let mut routed = SeatRoutedProvider::new(default_provider);
+    let mut seat_models = HashMap::new();
+
+    for seat in SeatKind::ALL {
+        let suffix = seat_env_key(seat);
+        let base_url =
+            env::var(format!("WENYUAN_LLM_BASE_URL_{suffix}")).unwrap_or(default_base_url.clone());
+        let api_key =
+            env::var(format!("WENYUAN_LLM_API_KEY_{suffix}")).unwrap_or(default_api_key.clone());
+        let model = env::var(format!("WENYUAN_LLM_MODEL_{suffix}"))
+            .unwrap_or_else(|_| default_model.clone());
+        seat_models.insert(suffix.to_string(), model.clone());
+
+        if base_url != default_base_url || api_key != default_api_key || model != default_model {
+            routed = routed.with_seat_provider(
+                seat,
+                Arc::new(OpenAiCompatibleProvider::new(OpenAiCompatibleConfig {
+                    base_url,
+                    api_key,
+                    model,
+                })),
+            );
+        }
+    }
+
+    (Arc::new(routed), seat_models)
+}
+
+fn seat_env_key(seat: SeatKind) -> &'static str {
+    match seat {
+        SeatKind::Mouyuan => "MOUYUAN",
+        SeatKind::Jingshi => "JINGSHI",
+        SeatKind::Chizheng => "CHIZHENG",
+    }
 }
 
 fn mock_scenario_from_env() -> MockScenario {
@@ -159,8 +236,23 @@ async fn create_session(
     Json(input): Json<CreateSessionRequest>,
 ) -> Result<Json<Session>, ApiError> {
     let session = Session::new(input.title, input.topic, input.context.unwrap_or_default());
-    state.store.create_session(&session).await?;
+    state
+        .store
+        .create_session_with_provider_refs(&session, &seat_provider_refs(&state.config))
+        .await?;
     Ok(Json(session))
+}
+
+fn seat_provider_refs(config: &ConfigStatus) -> HashMap<SeatKind, String> {
+    SeatKind::ALL
+        .into_iter()
+        .filter_map(|seat| {
+            config
+                .seat_models
+                .get(seat_env_key(seat))
+                .map(|model| (seat, format!("{}:{model}", config.provider_kind)))
+        })
+        .collect()
 }
 
 async fn list_sessions(State(state): State<AppState>) -> Result<impl IntoResponse, ApiError> {
@@ -206,9 +298,17 @@ async fn start_session(
     let store = state.store.clone();
     let runner = state.runner.clone();
     let running_map = state.running.clone();
+    let event_tx = state.event_tx.clone();
     let session = details.session;
     tokio::spawn(async move {
-        let result = runner.run_session(session, cancel).await;
+        let progress = Arc::new(StoreProgressSink {
+            session_id: id,
+            store: store.clone(),
+            event_tx: event_tx.clone(),
+        });
+        let result = runner
+            .run_session_with_progress(session, cancel, Some(progress))
+            .await;
         match result {
             Ok(artifacts) => {
                 let active = store
@@ -225,11 +325,6 @@ async fn start_session(
                     }
                     if let Err(err) = store.save_artifacts(id, &artifacts).await {
                         error!("failed to save artifacts: {err}");
-                    }
-                    for event in &artifacts.events {
-                        let _ = store
-                            .append_event(id, event, serde_json::json!({ "source": "runner" }))
-                            .await;
                     }
                     if let Err(err) = store.complete_execution(id, execution_token).await {
                         error!("failed to complete session execution: {err}");
@@ -248,6 +343,7 @@ async fn start_session(
                     .await;
             }
         }
+        let _ = event_tx.send(id);
         running_map.lock().await.remove(&id);
     });
 
@@ -273,6 +369,7 @@ async fn cancel_session(
         cancel.cancel();
     }
     state.store.cancel_session(id).await?;
+    let _ = state.event_tx.send(id);
     Ok(Json(state.store.get_session(id).await?))
 }
 
@@ -280,12 +377,38 @@ async fn events_sse(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>>, ApiError> {
-    let events = state.store.events(id).await?;
-    let stream = tokio_stream::iter(events.into_iter().map(|event| {
-        Ok(Event::default()
-            .event(event.event_type)
-            .data(event.payload.to_string()))
+    let initial = state.store.events(id).await?;
+    let initial_stream = tokio_stream::iter(initial.into_iter().map(|event| {
+        Ok(Event::default().data(
+            serde_json::json!({
+                "type": event.event_type,
+                "payload": event.payload,
+                "created_at": event.created_at,
+            })
+            .to_string(),
+        ))
     }));
+    let store = state.store.clone();
+    let mut rx = state.event_tx.subscribe();
+    let live_stream = async_stream::stream! {
+        loop {
+            match rx.recv().await {
+                Ok(session_id) if session_id == id => {
+                    let payload = match store.events(id).await {
+                        Ok(events) => serde_json::json!({ "type": "refresh", "events": events }),
+                        Err(err) => serde_json::json!({ "type": "error", "error": err.to_string() }),
+                    };
+                    yield Ok(Event::default().data(payload.to_string()));
+                }
+                Ok(_) => {}
+                Err(broadcast::error::RecvError::Lagged(_)) => {
+                    yield Ok(Event::default().data(serde_json::json!({ "type": "refresh" }).to_string()));
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    };
+    let stream = initial_stream.chain(live_stream);
     Ok(Sse::new(stream))
 }
 

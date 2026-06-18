@@ -6,6 +6,9 @@
         <h1>{{ details.session.title }}</h1>
       </div>
       <div class="actions">
+        <button class="icon" title="导出 Markdown" @click="downloadMarkdown">
+          <Download :size="18" />
+        </button>
         <button class="icon" title="重试" @click="retry">
           <RotateCw :size="18" />
         </button>
@@ -38,6 +41,12 @@
           <span>{{ seatLabels[idea.proposed_by] }}</span>
           <h3>{{ idea.title }}</h3>
           <p>{{ idea.summary }}</p>
+          <p v-if="idea.source_seats?.length && idea.source_seats.length > 1" class="muted">
+            合并来源：{{ idea.source_seats.map((seat) => seatLabels[seat]).join('、') }}
+          </p>
+          <p v-if="idea.unconventional" class="muted">非主流方向</p>
+          <p v-if="idea.assumptions?.length" class="muted">假设：{{ idea.assumptions.join('、') }}</p>
+          <p v-if="idea.risks?.length" class="muted">风险：{{ idea.risks.join('、') }}</p>
         </article>
       </div>
     </section>
@@ -47,8 +56,33 @@
       <div class="item-grid">
         <article v-for="critique in details.artifacts.critiques" :key="`${critique.reviewer}-${critique.target_seat}`" class="item">
           <span>{{ seatLabels[critique.reviewer] }} → {{ seatLabels[critique.target_seat] }}</span>
+          <p class="muted">强点：{{ critique.strongest_point || '暂无' }}</p>
+          <p class="muted">弱点：{{ critique.weakest_point || '暂无' }}</p>
           <p>{{ critique.challenge }}</p>
+          <p v-if="critique.counterexample" class="muted">反例：{{ critique.counterexample }}</p>
           <p class="muted">{{ critique.suggested_improvement }}</p>
+          <p v-if="critique.evidence_question" class="muted">补证：{{ critique.evidence_question }}</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>独议 / 复议差异</h2>
+      <div class="item-grid">
+        <article v-for="diff in revisionDiffs(details)" :key="diff.seat" class="item">
+          <span>{{ seatLabels[diff.seat] }}</span>
+          <h3>{{ diff.proposalTitle || '暂无复议策案' }}</h3>
+          <p class="muted">采纳独议：{{ diff.ideaTitles.join('、') || '暂无' }}</p>
+          <p>
+            {{ diff.titleChanged || diff.summaryChanged ? '复议已调整表达或方向' : '复议基本延续独议' }}
+          </p>
+          <p v-if="diff.initialSummary" class="muted">独议：{{ diff.initialSummary }}</p>
+          <p v-if="diff.revisedSummary">复议：{{ diff.revisedSummary }}</p>
+          <p v-if="diff.addedImplementationPath" class="muted">落地：{{ diff.addedImplementationPath }}</p>
+          <p v-if="diff.addedSuccessMetrics.length" class="muted">指标：{{ diff.addedSuccessMetrics.join('、') }}</p>
+          <p v-if="details.artifacts.proposals.find((proposal) => proposal.proposed_by === diff.seat)?.changes_from_initial?.length" class="muted">
+            修改：{{ details.artifacts.proposals.find((proposal) => proposal.proposed_by === diff.seat)?.changes_from_initial?.join('、') }}
+          </p>
         </article>
       </div>
     </section>
@@ -61,6 +95,20 @@
           <h3>{{ proposal.title }}</h3>
           <p>{{ proposal.summary }}</p>
           <p class="muted">{{ proposal.implementation_path }}</p>
+          <p v-if="proposal.adopted_points?.length" class="muted">采纳：{{ proposal.adopted_points.join('、') }}</p>
+          <p v-if="proposal.rejected_points?.length" class="muted">拒绝：{{ proposal.rejected_points.join('、') }}</p>
+          <p v-if="proposal.rejection_reasons?.length" class="muted">理由：{{ proposal.rejection_reasons.join('、') }}</p>
+          <p v-if="proposal.confidence !== undefined" class="muted">置信度：{{ Math.round(proposal.confidence * 100) }}%</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>讨论质量</h2>
+      <div class="stat-grid">
+        <article v-for="metric in qualityMetricRows(details.artifacts.quality)" :key="metric.label" class="stat">
+          <span>{{ metric.label }}</span>
+          <strong>{{ metric.value }}</strong>
         </article>
       </div>
     </section>
@@ -97,12 +145,12 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
-import { Ban, RotateCw } from '@lucide/vue'
+import { Ban, Download, RotateCw } from '@lucide/vue'
 import { api } from '../api'
 import ApiErrorState from '../components/ApiErrorState.vue'
 import DecisionSummary from '../components/DecisionSummary.vue'
 import SeatStatusStrip from '../components/SeatStatusStrip.vue'
-import { phaseLabels, seatLabels, seatRunStats, type SessionDetails } from '../domain/session'
+import { exportSessionMarkdown, phaseLabels, qualityMetricRows, revisionDiffs, seatLabels, seatRunStats, type SessionDetails } from '../domain/session'
 
 const route = useRoute()
 const id = computed(() => String(route.params.id))
@@ -126,6 +174,22 @@ async function retry() {
 
 async function cancel() {
   details.value = await api.cancelSession(id.value)
+}
+
+function downloadMarkdown() {
+  if (!details.value) return
+  const markdown = exportSessionMarkdown(details.value)
+  const blob = new Blob([markdown], { type: 'text/markdown;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = `${safeFilename(details.value.session.title)}.md`
+  link.click()
+  URL.revokeObjectURL(url)
+}
+
+function safeFilename(value: string) {
+  return value.trim().replace(/[\\/:*?"<>|]+/g, '-').replace(/\s+/g, '-').slice(0, 80) || 'wenyuan-session'
 }
 
 onMounted(async () => {

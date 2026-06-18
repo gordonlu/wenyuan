@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
@@ -39,15 +40,60 @@ pub struct TokenUsage {
 pub enum ProviderError {
     #[error("provider timeout")]
     Timeout,
+    #[error("provider cancelled")]
+    Cancelled,
     #[error("provider request failed: {0}")]
     Request(String),
+    #[error("provider request failed with upstream status {status}: {message}")]
+    HttpStatus { status: u16, message: String },
     #[error("provider returned invalid response: {0}")]
     InvalidResponse(String),
+}
+
+impl ProviderError {
+    pub fn upstream_status(&self) -> Option<u16> {
+        match self {
+            ProviderError::HttpStatus { status, .. } => Some(*status),
+            _ => None,
+        }
+    }
 }
 
 #[async_trait]
 pub trait LlmProvider: Send + Sync {
     async fn complete(&self, request: LlmRequest) -> Result<LlmResponse, ProviderError>;
+}
+
+#[derive(Clone)]
+pub struct SeatRoutedProvider {
+    default: Arc<dyn LlmProvider>,
+    seat_providers: HashMap<SeatKind, Arc<dyn LlmProvider>>,
+}
+
+impl SeatRoutedProvider {
+    pub fn new(default: Arc<dyn LlmProvider>) -> Self {
+        Self {
+            default,
+            seat_providers: HashMap::new(),
+        }
+    }
+
+    pub fn with_seat_provider(mut self, seat: SeatKind, provider: Arc<dyn LlmProvider>) -> Self {
+        self.seat_providers.insert(seat, provider);
+        self
+    }
+}
+
+#[async_trait]
+impl LlmProvider for SeatRoutedProvider {
+    async fn complete(&self, request: LlmRequest) -> Result<LlmResponse, ProviderError> {
+        let provider = self
+            .seat_providers
+            .get(&request.seat)
+            .unwrap_or(&self.default)
+            .clone();
+        provider.complete(request).await
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -114,7 +160,11 @@ impl LlmProvider for OpenAiCompatibleProvider {
             .map_err(|err| ProviderError::Request(err.to_string()))?;
         let status = response.status();
         if !status.is_success() {
-            return Err(ProviderError::Request(format!("http status {status}")));
+            let message = response.text().await.unwrap_or_default();
+            return Err(ProviderError::HttpStatus {
+                status: status.as_u16(),
+                message,
+            });
         }
         let payload = response
             .json::<OpenAiResponse>()
@@ -231,8 +281,17 @@ fn independent_json(seat: SeatKind) -> String {
             "summary": "围绕议题给出一个可比较的结构化想法",
             "value": "帮助用户更快看到取舍",
             "mechanism": "独立构思后交叉批议",
+            "unconventional": false,
             "assumptions": ["用户愿意提供足够背景"],
             "risks": ["模型输出需要格式校验"]
+        }, {
+            "title": format!("{}非主流备选", seat.label()),
+            "summary": "保留一个与常规路径不同的小规模反向验证方案",
+            "value": "避免三席只重复主流答案",
+            "mechanism": "用低成本实验验证反直觉假设",
+            "unconventional": true,
+            "assumptions": ["用户允许探索非默认路径"],
+            "risks": ["短期收益可能不明显"]
         }],
         "questions": ["成功标准如何量化"],
         "confidence": 0.75
@@ -251,7 +310,9 @@ fn critique_json(seat: SeatKind) -> String {
                 "weakest_point": "落地路径还需要收敛",
                 "hidden_assumption": "假设数据足够完整",
                 "challenge": "请给出最小可行验证",
-                "suggested_improvement": "补充验收指标和失败边界"
+                "counterexample": "若用户背景不足，该方案可能无法区分优先级",
+                "suggested_improvement": "补充验收指标和失败边界",
+                "evidence_question": "需要哪些用户反馈或成本数据来验证"
             })
         })
         .collect();
@@ -263,10 +324,15 @@ fn proposal_json(seat: SeatKind) -> String {
         "title": format!("{}策案", seat.label()),
         "summary": "以最小闭环先完成一次三席合议",
         "source_idea_ids": [],
+        "adopted_points": ["保留可验证路径", "吸收批议中的验收指标"],
+        "rejected_points": ["暂不扩大复杂基础设施"],
+        "rejection_reasons": ["当前阶段先证明讨论价值"],
+        "changes_from_initial": ["从初案补充了失败边界和成功指标"],
         "user_value": "用结构化过程替代松散聊天",
         "implementation_path": "先 Mock 跑通，再接真实 Provider",
         "risks": ["真实模型格式稳定性", "阶段并发控制"],
-        "success_metrics": ["完整流程可重复执行", "多数和少数意见可追溯"]
+        "success_metrics": ["完整流程可重复执行", "多数和少数意见可追溯"],
+        "confidence": 0.78
     })
     .to_string()
 }
@@ -301,6 +367,50 @@ fn vote_json(seat: SeatKind, scenario: MockScenario) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct StaticProvider(&'static str);
+
+    #[async_trait]
+    impl LlmProvider for StaticProvider {
+        async fn complete(&self, _request: LlmRequest) -> Result<LlmResponse, ProviderError> {
+            Ok(LlmResponse {
+                content: self.0.to_string(),
+                usage: None,
+                upstream_status: Some(200),
+            })
+        }
+    }
+
+    fn request_for(seat: SeatKind) -> LlmRequest {
+        LlmRequest {
+            session_id: Uuid::new_v4(),
+            seat,
+            phase: SessionPhase::IndependentDeliberation,
+            messages: vec![],
+            repair_json: false,
+            temperature: 0.7,
+            max_tokens: 800,
+            prompt_version: "test".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn seat_routed_provider_uses_seat_override() {
+        let provider = SeatRoutedProvider::new(Arc::new(StaticProvider("default")))
+            .with_seat_provider(SeatKind::Jingshi, Arc::new(StaticProvider("jingshi")));
+
+        let mouyuan = provider
+            .complete(request_for(SeatKind::Mouyuan))
+            .await
+            .unwrap();
+        let jingshi = provider
+            .complete(request_for(SeatKind::Jingshi))
+            .await
+            .unwrap();
+
+        assert_eq!(mouyuan.content, "default");
+        assert_eq!(jingshi.content, "jingshi");
+    }
 
     #[tokio::test]
     async fn mock_provider_returns_structured_json() {

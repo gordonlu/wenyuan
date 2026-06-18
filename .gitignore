@@ -8,3 +8,4 @@
 /web/tsconfig.tsbuildinfo
 *.log
 .env
+Agents.md

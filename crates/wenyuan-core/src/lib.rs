@@ -157,10 +157,14 @@ pub struct ChatMessage {
 pub struct IdeaCard {
     pub id: Uuid,
     pub proposed_by: SeatKind,
+    #[serde(default)]
+    pub source_seats: Vec<SeatKind>,
     pub title: String,
     pub summary: String,
     pub value: String,
     pub mechanism: String,
+    #[serde(default)]
+    pub unconventional: bool,
     pub assumptions: Vec<String>,
     pub risks: Vec<String>,
 }
@@ -173,7 +177,11 @@ pub struct Critique {
     pub weakest_point: String,
     pub hidden_assumption: String,
     pub challenge: String,
+    #[serde(default)]
+    pub counterexample: String,
     pub suggested_improvement: String,
+    #[serde(default)]
+    pub evidence_question: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -183,10 +191,20 @@ pub struct Proposal {
     pub title: String,
     pub summary: String,
     pub source_idea_ids: Vec<Uuid>,
+    #[serde(default)]
+    pub adopted_points: Vec<String>,
+    #[serde(default)]
+    pub rejected_points: Vec<String>,
+    #[serde(default)]
+    pub rejection_reasons: Vec<String>,
+    #[serde(default)]
+    pub changes_from_initial: Vec<String>,
     pub user_value: String,
     pub implementation_path: String,
     pub risks: Vec<String>,
     pub success_metrics: Vec<String>,
+    #[serde(default)]
+    pub confidence: f32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -371,10 +389,15 @@ mod tests {
             title: format!("{} 策案", proposed_by.label()),
             summary: "summary".into(),
             source_idea_ids: vec![],
+            adopted_points: vec![],
+            rejected_points: vec![],
+            rejection_reasons: vec![],
+            changes_from_initial: vec![],
             user_value: "value".into(),
             implementation_path: "path".into(),
             risks: vec![],
             success_metrics: vec![],
+            confidence: 0.8,
         }
     }
 

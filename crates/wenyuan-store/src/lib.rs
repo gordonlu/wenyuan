@@ -1,11 +1,12 @@
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::{Row, SqlitePool, sqlite::SqliteConnectOptions, sqlite::SqlitePoolOptions};
+use std::collections::HashMap;
 use std::str::FromStr;
 use thiserror::Error;
 use uuid::Uuid;
-use wenyuan_agent::{DiscussionArtifacts, SeatRunStatus, SeatRunTrace};
-use wenyuan_core::{Session, SessionPhase};
+use wenyuan_agent::{DiscussionArtifacts, SeatRunStatus, SeatRunTrace, system_prompt};
+use wenyuan_core::{ChatMessage, SeatKind, Session, SessionPhase};
 
 #[derive(Debug, Error)]
 pub enum StoreError {
@@ -36,6 +37,7 @@ impl Store {
         let store = Self { pool };
         store.migrate().await?;
         store.ensure_session_execution_columns().await?;
+        store.ensure_seat_conversation_columns().await?;
         store.ensure_seat_run_trace_columns().await?;
         Ok(store)
     }
@@ -130,7 +132,47 @@ impl Store {
         Ok(())
     }
 
+    async fn ensure_seat_conversation_columns(&self) -> Result<(), StoreError> {
+        let rows = sqlx::query("pragma table_info(seats)")
+            .fetch_all(&self.pool)
+            .await?;
+        let columns: std::collections::HashSet<String> = rows
+            .into_iter()
+            .filter_map(|row| row.try_get::<String, _>("name").ok())
+            .collect();
+        let additions = [
+            (
+                "system_prompt",
+                "alter table seats add column system_prompt text not null default ''",
+            ),
+            (
+                "conversation_json",
+                "alter table seats add column conversation_json text not null default '[]'",
+            ),
+            (
+                "provider_ref",
+                "alter table seats add column provider_ref text not null default 'default'",
+            ),
+        ];
+        for (column, statement) in additions {
+            if !columns.contains(column) {
+                sqlx::query(statement).execute(&self.pool).await?;
+            }
+        }
+        Ok(())
+    }
+
     pub async fn create_session(&self, session: &Session) -> Result<(), StoreError> {
+        self.create_session_with_provider_refs(session, &HashMap::new())
+            .await
+    }
+
+    pub async fn create_session_with_provider_refs(
+        &self,
+        session: &Session,
+        provider_refs: &HashMap<SeatKind, String>,
+    ) -> Result<(), StoreError> {
+        let mut tx = self.pool.begin().await?;
         sqlx::query(
             "insert into sessions
             (id, title, topic, context, phase, created_at, updated_at, result_json, failure_reason, convergence_used, artifacts_json, recovery_state)
@@ -148,8 +190,34 @@ impl Store {
         .bind(session.convergence_used)
         .bind(serde_json::to_string(&DiscussionArtifacts::default())?)
         .bind("idle")
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
+        for seat in SeatKind::ALL {
+            let conversation = vec![ChatMessage {
+                role: "system".into(),
+                content: system_prompt(seat).to_string(),
+            }];
+            sqlx::query(
+                "insert into seats
+                 (session_id, seat_kind, status, last_error, system_prompt, conversation_json, provider_ref)
+                 values (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            )
+            .bind(session.id.to_string())
+            .bind(seat_to_string(seat))
+            .bind("pending")
+            .bind(Option::<String>::None)
+            .bind(system_prompt(seat))
+            .bind(serde_json::to_string(&conversation)?)
+            .bind(
+                provider_refs
+                    .get(&seat)
+                    .map(String::as_str)
+                    .unwrap_or("default"),
+            )
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
         self.append_event(
             session.id,
             "session_created",
@@ -235,6 +303,7 @@ impl Store {
                 .await?;
         }
         insert_seat_runs(&mut tx, session_id, &artifacts.seat_runs).await?;
+        update_seat_conversations(&mut tx, session_id, &artifacts.seat_runs).await?;
         let result_json = optional_json(&artifacts.decision)?;
         sqlx::query("update sessions set artifacts_json = ?2, result_json = ?3 where id = ?1")
             .bind(session_id.to_string())
@@ -259,6 +328,7 @@ impl Store {
     ) -> Result<(), StoreError> {
         let mut tx = self.pool.begin().await?;
         insert_seat_runs(&mut tx, session_id, seat_runs).await?;
+        update_seat_conversations(&mut tx, session_id, seat_runs).await?;
         tx.commit().await?;
         Ok(())
     }
@@ -530,9 +600,21 @@ impl Store {
                 .map(serde_json::from_str)
                 .transpose()?
                 .unwrap_or_default(),
+            seats: self.seats(id).await?,
             execution: self.execution_info(id).await?,
             events: self.events(id).await?,
         })
+    }
+
+    pub async fn seats(&self, session_id: Uuid) -> Result<Vec<SeatRecord>, StoreError> {
+        let rows = sqlx::query(
+            "select session_id, seat_kind, status, last_error, system_prompt, conversation_json, provider_ref
+             from seats where session_id = ?1 order by seat_kind asc",
+        )
+        .bind(session_id.to_string())
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(seat_from_row).collect()
     }
 
     pub async fn cancel_session(&self, id: Uuid) -> Result<(), StoreError> {
@@ -599,8 +681,20 @@ pub struct SessionSummary {
 pub struct SessionDetails {
     pub session: Session,
     pub artifacts: DiscussionArtifacts,
+    pub seats: Vec<SeatRecord>,
     pub execution: ExecutionInfo,
     pub events: Vec<SessionEvent>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SeatRecord {
+    pub session_id: Uuid,
+    pub seat: SeatKind,
+    pub status: String,
+    pub last_error: Option<String>,
+    pub system_prompt: String,
+    pub conversation: Vec<ChatMessage>,
+    pub provider_ref: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -641,6 +735,9 @@ create table if not exists seats (
     seat_kind text not null,
     status text not null,
     last_error text,
+    system_prompt text not null default '',
+    conversation_json text not null default '[]',
+    provider_ref text not null default 'default',
     primary key (session_id, seat_kind)
 );
 create table if not exists seat_runs (
@@ -731,6 +828,22 @@ fn parse_phase(value: &str) -> SessionPhase {
     }
 }
 
+fn seat_to_string(seat: SeatKind) -> &'static str {
+    match seat {
+        SeatKind::Mouyuan => "mouyuan",
+        SeatKind::Jingshi => "jingshi",
+        SeatKind::Chizheng => "chizheng",
+    }
+}
+
+fn parse_seat(value: &str) -> SeatKind {
+    match value {
+        "jingshi" | "Jingshi" => SeatKind::Jingshi,
+        "chizheng" | "Chizheng" => SeatKind::Chizheng,
+        _ => SeatKind::Mouyuan,
+    }
+}
+
 fn parse_time(value: String) -> Result<DateTime<Utc>, StoreError> {
     Ok(DateTime::parse_from_rfc3339(&value)?.with_timezone(&Utc))
 }
@@ -784,6 +897,20 @@ fn event_from_row(row: sqlx::sqlite::SqliteRow) -> Result<SessionEvent, StoreErr
     })
 }
 
+fn seat_from_row(row: sqlx::sqlite::SqliteRow) -> Result<SeatRecord, StoreError> {
+    let conversation_json: String = row.try_get("conversation_json")?;
+    Ok(SeatRecord {
+        session_id: Uuid::parse_str(&row.try_get::<String, _>("session_id")?)
+            .map_err(|err| sqlx::Error::Decode(Box::new(err)))?,
+        seat: parse_seat(&row.try_get::<String, _>("seat_kind")?),
+        status: row.try_get("status")?,
+        last_error: row.try_get("last_error")?,
+        system_prompt: row.try_get("system_prompt")?,
+        conversation: serde_json::from_str(&conversation_json)?,
+        provider_ref: row.try_get("provider_ref")?,
+    })
+}
+
 async fn insert_seat_runs(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     session_id: Uuid,
@@ -818,6 +945,65 @@ async fn insert_seat_runs(
     Ok(())
 }
 
+async fn update_seat_conversations(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    session_id: Uuid,
+    seat_runs: &[SeatRunTrace],
+) -> Result<(), StoreError> {
+    for seat in SeatKind::ALL {
+        let scoped: Vec<_> = seat_runs.iter().filter(|run| run.seat == seat).collect();
+        if scoped.is_empty() {
+            continue;
+        }
+
+        let mut conversation = vec![ChatMessage {
+            role: "system".into(),
+            content: system_prompt(seat).to_string(),
+        }];
+        let mut status = "completed";
+        let mut last_error = None;
+
+        for run in scoped {
+            conversation.push(ChatMessage {
+                role: "user".into(),
+                content: format!(
+                    "请执行 {:?} 阶段并只返回 JSON。{}",
+                    run.phase,
+                    if run.repair_attempted {
+                        "这是格式修复请求。"
+                    } else {
+                        ""
+                    }
+                ),
+            });
+            if let Some(raw_output) = &run.raw_output {
+                conversation.push(ChatMessage {
+                    role: "assistant".into(),
+                    content: raw_output.clone(),
+                });
+            }
+            if run.status == SeatRunStatus::Failed {
+                status = "failed";
+                last_error = run.error.clone();
+            }
+        }
+
+        sqlx::query(
+            "update seats
+             set status = ?3, last_error = ?4, conversation_json = ?5
+             where session_id = ?1 and seat_kind = ?2",
+        )
+        .bind(session_id.to_string())
+        .bind(seat_to_string(seat))
+        .bind(status)
+        .bind(last_error)
+        .bind(serde_json::to_string(&conversation)?)
+        .execute(&mut **tx)
+        .await?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -839,7 +1025,7 @@ mod tests {
             .unwrap();
         store.save_artifacts(id, &artifacts).await.unwrap();
         let details = store.get_session(id).await.unwrap();
-        assert_eq!(details.artifacts.ideas.len(), 3);
+        assert_eq!(details.artifacts.ideas.len(), 6);
         assert!(details.artifacts.seat_runs.len() >= 12);
         assert_eq!(
             store.count_seat_runs(id).await.unwrap(),
@@ -867,6 +1053,96 @@ mod tests {
         assert!(first.is_some());
         assert!(second.is_none());
         assert!(store.execution_info(id).await.unwrap().running);
+    }
+
+    #[tokio::test]
+    async fn create_session_initializes_independent_seat_conversations() {
+        let store = Store::connect("sqlite::memory:").await.unwrap();
+        let session = Session::new("议题", "三席独立会话", "");
+        let id = session.id;
+
+        store.create_session(&session).await.unwrap();
+        let details = store.get_session(id).await.unwrap();
+
+        assert_eq!(details.seats.len(), 3);
+        for seat in SeatKind::ALL {
+            let record = details
+                .seats
+                .iter()
+                .find(|record| record.seat == seat)
+                .unwrap();
+            assert_eq!(record.status, "pending");
+            assert_eq!(record.provider_ref, "default");
+            assert_eq!(record.conversation.len(), 1);
+            assert_eq!(record.conversation[0].role, "system");
+            assert_eq!(record.conversation[0].content, system_prompt(seat));
+        }
+    }
+
+    #[tokio::test]
+    async fn create_session_persists_seat_provider_refs() {
+        let store = Store::connect("sqlite::memory:").await.unwrap();
+        let session = Session::new("议题", "每席模型配置", "");
+        let mut refs = HashMap::new();
+        refs.insert(SeatKind::Mouyuan, "openai-compatible:model-a".to_string());
+        refs.insert(SeatKind::Jingshi, "openai-compatible:model-b".to_string());
+
+        store
+            .create_session_with_provider_refs(&session, &refs)
+            .await
+            .unwrap();
+        let details = store.get_session(session.id).await.unwrap();
+
+        let mouyuan = details
+            .seats
+            .iter()
+            .find(|seat| seat.seat == SeatKind::Mouyuan)
+            .unwrap();
+        let jingshi = details
+            .seats
+            .iter()
+            .find(|seat| seat.seat == SeatKind::Jingshi)
+            .unwrap();
+        let chizheng = details
+            .seats
+            .iter()
+            .find(|seat| seat.seat == SeatKind::Chizheng)
+            .unwrap();
+
+        assert_eq!(mouyuan.provider_ref, "openai-compatible:model-a");
+        assert_eq!(jingshi.provider_ref, "openai-compatible:model-b");
+        assert_eq!(chizheng.provider_ref, "default");
+    }
+
+    #[tokio::test]
+    async fn save_artifacts_updates_independent_seat_conversation_history() {
+        let store = Store::connect("sqlite::memory:").await.unwrap();
+        let session = Session::new("议题", "记录上下文历史", "");
+        let id = session.id;
+        store.create_session(&session).await.unwrap();
+        let runner = AgentRunner::new(Arc::new(MockProvider::new(MockScenario::SuccessMajority)));
+        let artifacts = runner
+            .run_session(session, CancellationFlag::default())
+            .await
+            .unwrap();
+
+        store.save_artifacts(id, &artifacts).await.unwrap();
+        let details = store.get_session(id).await.unwrap();
+
+        for seat in SeatKind::ALL {
+            let record = details
+                .seats
+                .iter()
+                .find(|record| record.seat == seat)
+                .unwrap();
+            assert!(record.conversation.len() > 2);
+            assert!(
+                record
+                    .conversation
+                    .iter()
+                    .any(|message| message.role == "assistant")
+            );
+        }
     }
 
     #[tokio::test]

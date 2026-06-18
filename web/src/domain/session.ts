@@ -15,10 +15,16 @@ export interface Proposal {
   proposed_by: SeatKind
   title: string
   summary: string
+  source_idea_ids?: string[]
+  adopted_points?: string[]
+  rejected_points?: string[]
+  rejection_reasons?: string[]
+  changes_from_initial?: string[]
   user_value: string
   implementation_path: string
   risks: string[]
   success_metrics: string[]
+  confidence?: number
 }
 
 export interface Decision {
@@ -60,13 +66,61 @@ export interface SessionEvent {
 }
 
 export interface DiscussionArtifacts {
-  ideas: Array<{ id: string; proposed_by: SeatKind; title: string; summary: string; value: string }>
-  critiques: Array<{ reviewer: SeatKind; target_seat: SeatKind; challenge: string; suggested_improvement: string }>
+  ideas: Array<{
+    id: string
+    proposed_by: SeatKind
+    source_seats?: SeatKind[]
+    title: string
+    summary: string
+    value: string
+    mechanism?: string
+    unconventional?: boolean
+    assumptions?: string[]
+    risks?: string[]
+  }>
+  critiques: Array<{
+    reviewer: SeatKind
+    target_seat: SeatKind
+    strongest_point?: string
+    weakest_point?: string
+    hidden_assumption?: string
+    challenge: string
+    counterexample?: string
+    suggested_improvement: string
+    evidence_question?: string
+  }>
   proposals: Proposal[]
   votes: Array<{ voter: SeatKind; proposal_id: string; final_choice: boolean; reason: string }>
   seat_runs: SeatRunTrace[]
   decision?: Decision | null
+  quality?: DiscussionQualityMetrics
   events: string[]
+}
+
+export interface DiscussionQualityMetrics {
+  idea_duplicate_rate: number
+  seat_similarity: number
+  high_similarity_detected?: boolean
+  critique_effectiveness_rate: number
+  revision_change_rate: number
+  self_vote_rate: number
+  vote_concentration: number
+  minority_retention_rate: number
+  average_tokens: number
+  average_duration_ms: number
+}
+
+export interface RevisionDiff {
+  seat: SeatKind
+  ideaTitles: string[]
+  proposalTitle?: string
+  summaryChanged: boolean
+  titleChanged: boolean
+  adoptedIdeaCount: number
+  initialSummary: string
+  revisedSummary: string
+  addedImplementationPath?: string
+  addedSuccessMetrics: string[]
 }
 
 export interface SeatRunTrace {
@@ -89,8 +143,19 @@ export interface SeatRunTrace {
 export interface SessionDetails {
   session: SessionRecord
   artifacts: DiscussionArtifacts
+  seats?: SeatRecord[]
   execution: ExecutionInfo
   events: SessionEvent[]
+}
+
+export interface SeatRecord {
+  session_id: string
+  seat: SeatKind
+  status: string
+  last_error?: string | null
+  system_prompt: string
+  conversation: Array<{ role: string; content: string }>
+  provider_ref: string
 }
 
 export interface ExecutionInfo {
@@ -103,6 +168,7 @@ export interface ConfigStatus {
   provider_configured: boolean
   provider_kind: string
   model: string
+  seat_models?: Record<string, string>
   database_url: string
   version: string
 }
@@ -126,8 +192,12 @@ export const phaseLabels: Record<SessionPhase, string> = {
 }
 
 export function seatStatus(phase: SessionPhase, seat: SeatKind, events: SessionEvent[] = []) {
-  const failed = events.some((event) => event.event_type === 'seat_failed' && JSON.stringify(event.payload).includes(seat))
-  if (failed) return '失败'
+  const latest = [...events]
+    .reverse()
+    .find((event) => ['seat_started', 'seat_completed', 'seat_failed'].includes(event.event_type) && eventPayloadIncludesSeat(event.payload, seat))
+  if (latest?.event_type === 'seat_failed') return '失败'
+  if (latest?.event_type === 'seat_started') return '进行中'
+  if (latest?.event_type === 'seat_completed') return '已完成'
   if (phase === 'cancelled') return '已取消'
   if (phase === 'draft') return '待陈策'
   if (phase === 'independent_deliberation') return '陈策中'
@@ -136,6 +206,10 @@ export function seatStatus(phase: SessionPhase, seat: SeatKind, events: SessionE
   if (phase === 'voting' || phase === 'convergence') return '已投策'
   if (phase === 'completed') return '已投策'
   return '失败'
+}
+
+function eventPayloadIncludesSeat(payload: unknown, seat: SeatKind) {
+  return typeof payload === 'object' && payload !== null && 'seat' in payload && (payload as { seat?: unknown }).seat === seat
 }
 
 export function hasMajority(details: SessionDetails) {
@@ -155,4 +229,169 @@ export function seatRunStats(runs: SeatRunTrace[]) {
       promptVersions: Array.from(new Set(scoped.map((run) => run.prompt_version))).join(', '),
     }
   })
+}
+
+export function revisionDiffs(details: SessionDetails): RevisionDiff[] {
+  return (['mouyuan', 'jingshi', 'chizheng'] as SeatKind[]).map((seat) => {
+    const seatIdeas = details.artifacts.ideas.filter((idea) => idea.proposed_by === seat)
+    const proposal = details.artifacts.proposals.find((item) => item.proposed_by === seat)
+    const referencedIdeas = proposal?.source_idea_ids?.length
+      ? seatIdeas.filter((idea) => proposal.source_idea_ids?.includes(idea.id))
+      : seatIdeas
+    const initialSummary = referencedIdeas.map((idea) => idea.summary).filter(Boolean).join('\n') || seatIdeas.map((idea) => idea.summary).filter(Boolean).join('\n')
+    const initialTitle = referencedIdeas.map((idea) => idea.title).filter(Boolean).join(' / ') || seatIdeas.map((idea) => idea.title).filter(Boolean).join(' / ')
+    const revisedSummary = proposal?.summary ?? ''
+    const proposalTitle = proposal?.title
+
+    return {
+      seat,
+      ideaTitles: referencedIdeas.map((idea) => idea.title),
+      proposalTitle,
+      summaryChanged: normalizeText(initialSummary) !== normalizeText(revisedSummary) || Boolean(proposal?.changes_from_initial?.length),
+      titleChanged: normalizeText(initialTitle) !== normalizeText(proposalTitle ?? ''),
+      adoptedIdeaCount: referencedIdeas.length,
+      initialSummary,
+      revisedSummary,
+      addedImplementationPath: proposal?.implementation_path,
+      addedSuccessMetrics: proposal?.success_metrics ?? [],
+    }
+  })
+}
+
+export function qualityMetricRows(metrics?: DiscussionQualityMetrics) {
+  const safe = metrics ?? {
+    idea_duplicate_rate: 0,
+    seat_similarity: 0,
+    high_similarity_detected: false,
+    critique_effectiveness_rate: 0,
+    revision_change_rate: 0,
+    self_vote_rate: 0,
+    vote_concentration: 0,
+    minority_retention_rate: 0,
+    average_tokens: 0,
+    average_duration_ms: 0,
+  }
+  return [
+    { label: 'Idea 重复率', value: formatPercent(safe.idea_duplicate_rate) },
+    { label: '三席相似度', value: formatPercent(safe.seat_similarity) },
+    { label: '高度重复检测', value: safe.high_similarity_detected ? '是' : '否' },
+    { label: '批议有效率', value: formatPercent(safe.critique_effectiveness_rate) },
+    { label: '复议修改率', value: formatPercent(safe.revision_change_rate) },
+    { label: '自投率', value: formatPercent(safe.self_vote_rate) },
+    { label: '票数集中度', value: formatPercent(safe.vote_concentration) },
+    { label: '少数留议率', value: formatPercent(safe.minority_retention_rate) },
+    { label: '平均 token', value: String(Math.round(safe.average_tokens)) },
+    { label: '平均耗时', value: `${Math.round(safe.average_duration_ms)} ms` },
+  ]
+}
+
+export function exportSessionMarkdown(details: SessionDetails) {
+  const decision = details.session.result ?? details.artifacts.decision
+  const lines = [
+    `# ${markdownText(details.session.title)}`,
+    '',
+    `- 阶段：${phaseLabels[details.session.phase]}`,
+    `- Session：${details.session.id}`,
+    '',
+    '## 原始议题',
+    '',
+    markdownText(details.session.topic),
+  ]
+
+  if (details.session.context.trim()) {
+    lines.push('', '### 背景', '', markdownText(details.session.context))
+  }
+
+  lines.push('', '## 三席独议', '')
+  for (const idea of details.artifacts.ideas) {
+    lines.push(`### ${seatLabels[idea.proposed_by]}：${markdownText(idea.title)}`)
+    lines.push('', markdownText(idea.summary))
+    lines.push('', `- 价值：${markdownText(idea.value)}`)
+    if (idea.mechanism) lines.push(`- 机制：${markdownText(idea.mechanism)}`)
+    if (idea.unconventional) lines.push('- 非主流方向：是')
+    appendList(lines, '假设', idea.assumptions)
+    appendList(lines, '风险', idea.risks)
+    lines.push('')
+  }
+
+  lines.push('## 批议摘要', '')
+  for (const critique of details.artifacts.critiques) {
+    lines.push(`### ${seatLabels[critique.reviewer]} → ${seatLabels[critique.target_seat]}`)
+    if (critique.strongest_point) lines.push(`- 最强点：${markdownText(critique.strongest_point)}`)
+    if (critique.weakest_point) lines.push(`- 最弱点：${markdownText(critique.weakest_point)}`)
+    if (critique.hidden_assumption) lines.push(`- 隐含假设：${markdownText(critique.hidden_assumption)}`)
+    lines.push(`- 挑战：${markdownText(critique.challenge)}`)
+    if (critique.counterexample) lines.push(`- 反例或失败条件：${markdownText(critique.counterexample)}`)
+    lines.push(`- 改进建议：${markdownText(critique.suggested_improvement)}`, '')
+    if (critique.evidence_question) lines.push(`- 需要补证：${markdownText(critique.evidence_question)}`)
+  }
+
+  lines.push('## 三个策案', '')
+  for (const proposal of details.artifacts.proposals) {
+    lines.push(`### ${seatLabels[proposal.proposed_by]}：${markdownText(proposal.title)}`)
+    lines.push('', markdownText(proposal.summary), '')
+    lines.push(`- 用户价值：${markdownText(proposal.user_value)}`)
+    lines.push(`- 落地路径：${markdownText(proposal.implementation_path)}`)
+    appendList(lines, '采纳观点', proposal.adopted_points)
+    appendList(lines, '拒绝观点', proposal.rejected_points)
+    appendList(lines, '拒绝理由', proposal.rejection_reasons)
+    appendList(lines, '相较独议修改', proposal.changes_from_initial)
+    appendList(lines, '风险', proposal.risks)
+    appendList(lines, '成功指标', proposal.success_metrics)
+    if (proposal.confidence !== undefined) lines.push(`- 置信度：${formatPercent(proposal.confidence)}`)
+    lines.push('')
+  }
+
+  lines.push('## 表决结果', '')
+  if (decision) {
+    lines.push(`- 状态：${decision.status === 'majority_reached' ? '形成多数' : '未形成多数'}`)
+    lines.push(`- 有效票数：${decision.vote_count}`)
+    lines.push(`- 自投数：${decision.self_vote_count}`)
+    if (decision.selected_proposal) {
+      lines.push(`- 多数策案：${seatLabels[decision.selected_proposal.proposed_by]} - ${markdownText(decision.selected_proposal.title)}`)
+    }
+    appendList(lines, '多数理由', decision.majority_reasons)
+    appendList(lines, '少数留议', decision.minority_opinion)
+    appendList(lines, '采纳条件', decision.adoption_conditions)
+    appendList(lines, '未决问题', decision.unresolved_questions)
+    appendList(lines, '下一步', decision.next_steps)
+  } else {
+    lines.push('暂无表决结果。')
+  }
+
+  if (details.artifacts.votes.length > 0) {
+    lines.push('', '### 逐席投票', '')
+    for (const vote of details.artifacts.votes) {
+      const proposal = details.artifacts.proposals.find((item) => item.id === vote.proposal_id)
+      lines.push(`- ${seatLabels[vote.voter]}：${vote.final_choice ? '支持' : '不支持'}${proposal ? ` ${markdownText(proposal.title)}` : ''}。${markdownText(vote.reason)}`)
+    }
+  }
+
+  lines.push('', '## 讨论质量指标', '')
+  for (const metric of qualityMetricRows(details.artifacts.quality)) {
+    lines.push(`- ${metric.label}：${metric.value}`)
+  }
+
+  return `${lines.join('\n').replace(/\n{3,}/g, '\n\n')}\n`
+}
+
+function appendList(lines: string[], label: string, values?: string[]) {
+  const cleaned = values?.map((value) => markdownText(value)).filter(Boolean) ?? []
+  if (cleaned.length === 0) return
+  lines.push(`- ${label}：`)
+  for (const value of cleaned) {
+    lines.push(`  - ${value}`)
+  }
+}
+
+function markdownText(value: string) {
+  return value.replace(/\r\n/g, '\n').trim()
+}
+
+function normalizeText(value: string) {
+  return value.replace(/\s+/g, '').toLowerCase()
+}
+
+function formatPercent(value: number) {
+  return `${Math.round(value * 100)}%`
 }

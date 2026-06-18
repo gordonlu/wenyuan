@@ -12,6 +12,12 @@
       <dd>{{ config.provider_configured ? '是' : '否' }}</dd>
       <dt>当前模型</dt>
       <dd>{{ config.model }}</dd>
+      <dt>谋远席模型</dt>
+      <dd>{{ config.seat_models?.MOUYUAN || config.model }}</dd>
+      <dt>经世席模型</dt>
+      <dd>{{ config.seat_models?.JINGSHI || config.model }}</dd>
+      <dt>持正席模型</dt>
+      <dd>{{ config.seat_models?.CHIZHENG || config.model }}</dd>
       <dt>数据库</dt>
       <dd>{{ config.database_url }}</dd>
       <dt>服务版本</dt>

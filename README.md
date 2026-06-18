@@ -43,6 +43,8 @@ http://127.0.0.1:5173
 
 复制 `.env.example` 为 `.env` 或直接设置环境变量。配置了 `WENYUAN_LLM_BASE_URL` 和 `WENYUAN_LLM_API_KEY` 后会使用 OpenAI-compatible Provider，否则使用 MockProvider。
 
+默认三席共用 `WENYUAN_LLM_MODEL`。如需每席不同模型或 Provider，可设置 `WENYUAN_LLM_MODEL_MOUYUAN`、`WENYUAN_LLM_MODEL_JINGSHI`、`WENYUAN_LLM_MODEL_CHIZHENG`，也可分别覆盖 `WENYUAN_LLM_BASE_URL_*` 和 `WENYUAN_LLM_API_KEY_*`。未设置的席位会回退到全局配置。
+
 Mock 场景通过 `WENYUAN_MOCK_SCENARIO` 控制：
 
 - `success_majority`
