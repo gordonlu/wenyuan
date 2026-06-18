@@ -9,6 +9,7 @@ describe('session domain helpers', () => {
         title: 't',
         topic: 'topic',
         context: '',
+        mode: 'three_seat',
         phase: 'completed',
         result: {
           status: 'majority_reached',
@@ -85,6 +86,7 @@ describe('session domain helpers', () => {
         title: '增长策略',
         topic: '如何提升留存',
         context: '面向新用户',
+        mode: 'three_seat',
         phase: 'completed',
         result: {
           status: 'majority_reached',
@@ -163,7 +165,7 @@ describe('session domain helpers', () => {
 
   it('compares independent ideas with revised proposals', () => {
     const details = {
-      session: { id: 's1', title: 't', topic: 'topic', context: '', phase: 'completed' },
+      session: { id: 's1', title: 't', topic: 'topic', context: '', mode: 'three_seat', phase: 'completed' },
       artifacts: {
         ideas: [
           { id: 'i1', proposed_by: 'mouyuan', title: '宽口径增长', summary: '扩大触达', value: '更多线索' },

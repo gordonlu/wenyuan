@@ -14,6 +14,7 @@ pub enum SeatKind {
 
 impl SeatKind {
     pub const ALL: [SeatKind; 3] = [SeatKind::Mouyuan, SeatKind::Jingshi, SeatKind::Chizheng];
+    pub const SINGLE: [SeatKind; 1] = [SeatKind::Mouyuan];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -22,6 +23,14 @@ impl SeatKind {
             SeatKind::Chizheng => "持正席",
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeliberationMode {
+    #[default]
+    ThreeSeat,
+    SingleAgent,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -49,6 +58,7 @@ impl SessionPhase {
                 | (Revision, Voting)
                 | (Voting, Convergence)
                 | (Voting, Completed)
+                | (Revision, Completed)
                 | (Convergence, Voting)
                 | (Convergence, Completed)
                 | (_, Failed)
@@ -70,6 +80,10 @@ pub enum CoreError {
     ConvergenceAlreadyUsed,
     #[error("vote references unknown proposal {0}")]
     UnknownProposal(Uuid),
+    #[error("{seat:?} vote is incomplete: {reason}")]
+    InvalidVote { seat: SeatKind, reason: String },
+    #[error("{seat:?} raised a blocking issue: {issue}")]
+    RiskVetoed { seat: SeatKind, issue: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -83,17 +97,24 @@ pub enum SeatStatus {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SeatModelConfig {
+    pub model: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
     pub id: Uuid,
     pub title: String,
     pub topic: String,
     pub context: String,
+    pub mode: DeliberationMode,
     pub phase: SessionPhase,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub result: Option<Decision>,
     pub failure_reason: Option<String>,
     pub convergence_used: bool,
+    pub model_config: Option<HashMap<SeatKind, SeatModelConfig>>,
 }
 
 impl Session {
@@ -108,12 +129,37 @@ impl Session {
             title: title.into(),
             topic: topic.into(),
             context: context.into(),
+            mode: DeliberationMode::default(),
             phase: SessionPhase::Draft,
             created_at: now,
             updated_at: now,
             result: None,
             failure_reason: None,
             convergence_used: false,
+            model_config: None,
+        }
+    }
+
+    pub fn new_with_mode(
+        title: impl Into<String>,
+        topic: impl Into<String>,
+        context: impl Into<String>,
+        mode: DeliberationMode,
+    ) -> Self {
+        let now = Utc::now();
+        Self {
+            id: Uuid::new_v4(),
+            title: title.into(),
+            topic: topic.into(),
+            context: context.into(),
+            mode,
+            phase: SessionPhase::Draft,
+            created_at: now,
+            updated_at: now,
+            result: None,
+            failure_reason: None,
+            convergence_used: false,
+            model_config: None,
         }
     }
 
@@ -153,6 +199,19 @@ pub struct ChatMessage {
     pub content: String,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IdeaStatus {
+    #[default]
+    Proposed,
+    Expanded,
+    Challenged,
+    Merged,
+    Shortlisted,
+    Rejected,
+    Adopted,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IdeaCard {
     pub id: Uuid,
@@ -167,6 +226,83 @@ pub struct IdeaCard {
     pub unconventional: bool,
     pub assumptions: Vec<String>,
     pub risks: Vec<String>,
+    #[serde(default)]
+    pub status: IdeaStatus,
+    #[serde(default)]
+    pub challenged_by: Vec<Uuid>,
+    #[serde(default)]
+    pub referenced_by_proposals: Vec<Uuid>,
+    #[serde(default)]
+    pub merged_into: Option<Uuid>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EvidenceKind {
+    #[default]
+    Fact,
+    Inference,
+    Preference,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EvidenceStatus {
+    #[default]
+    Proposed,
+    Verified,
+    Disputed,
+    Rejected,
+    Superseded,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Claim {
+    pub id: Uuid,
+    pub proposed_by: SeatKind,
+    pub content: String,
+    pub context: String,
+    #[serde(default)]
+    pub is_supported: bool,
+    #[serde(default)]
+    pub evidence_ids: Vec<Uuid>,
+    #[serde(default)]
+    pub assessment_ids: Vec<Uuid>,
+    #[serde(default)]
+    pub status: EvidenceStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Evidence {
+    pub id: Uuid,
+    pub proposed_by: SeatKind,
+    pub kind: EvidenceKind,
+    pub content: String,
+    pub source: String,
+    #[serde(default)]
+    pub source_fetched_at: Option<String>,
+    #[serde(default)]
+    pub source_hash: Option<String>,
+    #[serde(default)]
+    pub claim_ids: Vec<Uuid>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Assessment {
+    pub id: Uuid,
+    pub assessor: SeatKind,
+    pub evidence_id: Uuid,
+    pub claim_id: Uuid,
+    pub supports_claim: bool,
+    pub reasoning: String,
+    pub confidence: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClaimEvidenceLink {
+    pub claim_id: Uuid,
+    pub evidence_id: Uuid,
+    pub link_type: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -219,6 +355,10 @@ pub struct Vote {
     pub final_choice: bool,
     pub reason: String,
     pub confidence: f32,
+    #[serde(default)]
+    pub key_evidence: String,
+    #[serde(default)]
+    pub blocking_issue: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -232,6 +372,21 @@ pub struct Decision {
     pub unresolved_questions: Vec<String>,
     pub next_steps: Vec<String>,
     pub self_vote_count: usize,
+    #[serde(default)]
+    pub minority_choices: Vec<MinorityChoice>,
+    #[serde(default)]
+    pub reassessment_conditions: Vec<String>,
+    #[serde(default)]
+    pub has_risk_blocker: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MinorityChoice {
+    pub seat: SeatKind,
+    pub proposal_id: Uuid,
+    pub reason: String,
+    pub reassessment_condition: String,
+    pub has_risk_warning: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -241,15 +396,32 @@ pub enum DecisionStatus {
     NoMajority,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VoteStrategy {
+    #[default]
+    SimpleMajority,
+    RiskVeto,
+    Unanimous,
+    ConditionalPass,
+    WeightedScore,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VotePolicy {
     pub allow_self_vote: bool,
+    #[serde(default)]
+    pub strategy: VoteStrategy,
+    #[serde(default)]
+    pub min_score_threshold: u8,
 }
 
 impl Default for VotePolicy {
     fn default() -> Self {
         Self {
             allow_self_vote: true,
+            strategy: VoteStrategy::SimpleMajority,
+            min_score_threshold: 0,
         }
     }
 }
@@ -282,6 +454,7 @@ pub fn tally_votes(
     let proposal_authors: HashMap<Uuid, SeatKind> =
         proposals.iter().map(|p| (p.id, p.proposed_by)).collect();
     let mut final_votes: HashMap<Uuid, usize> = HashMap::new();
+    let mut weighted_scores: HashMap<Uuid, f64> = HashMap::new();
     let mut valid_votes = 0usize;
 
     for vote in votes.iter().filter(|vote| vote.final_choice) {
@@ -291,9 +464,37 @@ pub fn tally_votes(
         if !policy.allow_self_vote && *author == vote.voter {
             continue;
         }
+        if vote.reason.trim().is_empty() {
+            return Err(CoreError::InvalidVote {
+                seat: vote.voter,
+                reason: "投票理由为空".into(),
+            });
+        }
+        if vote.confidence < 0.1 || vote.confidence > 1.0 {
+            return Err(CoreError::InvalidVote {
+                seat: vote.voter,
+                reason: format!("置信度不在有效范围: {}", vote.confidence),
+            });
+        }
+        if !vote.blocking_issue.trim().is_empty() && policy.strategy == VoteStrategy::RiskVeto {
+            return Err(CoreError::RiskVetoed {
+                seat: vote.voter,
+                issue: vote.blocking_issue.clone(),
+            });
+        }
         valid_votes += 1;
         *final_votes.entry(vote.proposal_id).or_default() += 1;
+        *weighted_scores.entry(vote.proposal_id).or_default() += vote.value_score as f64
+            + vote.novelty_score as f64
+            + vote.feasibility_score as f64
+            + vote.roi_score as f64
+            - vote.risk_score as f64;
     }
+
+    let majority_threshold = match policy.strategy {
+        VoteStrategy::Unanimous => 3,
+        _ => 2,
+    };
 
     if valid_votes < 3 {
         return Ok(if convergence_used {
@@ -303,7 +504,18 @@ pub fn tally_votes(
         });
     }
 
-    if let Some((proposal_id, _)) = final_votes.into_iter().find(|(_, count)| *count >= 2) {
+    if policy.strategy == VoteStrategy::WeightedScore
+        && let Some((proposal_id, _)) = weighted_scores
+            .into_iter()
+            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+    {
+        return Ok(VoteOutcome::Majority(proposal_id));
+    }
+
+    if let Some((proposal_id, _)) = final_votes
+        .into_iter()
+        .find(|(_, count)| *count >= majority_threshold)
+    {
         Ok(VoteOutcome::Majority(proposal_id))
     } else if convergence_used {
         Ok(VoteOutcome::NoMajority)
@@ -361,21 +573,159 @@ pub fn build_decision(
         .map(|vote| vote.reason.clone())
         .collect();
 
+    let minority_choices: Vec<MinorityChoice> = votes
+        .iter()
+        .filter(|vote| {
+            vote.final_choice
+                && selected_proposal
+                    .as_ref()
+                    .is_none_or(|proposal| vote.proposal_id != proposal.id)
+        })
+        .map(|vote| MinorityChoice {
+            seat: vote.voter,
+            proposal_id: vote.proposal_id,
+            reason: vote.reason.clone(),
+            reassessment_condition: if vote.blocking_issue.trim().is_empty() {
+                "当多数方案实施后效果不达预期时应重新评估".into()
+            } else {
+                format!("当以下问题解决后应重新评估：{}", vote.blocking_issue)
+            },
+            has_risk_warning: !vote.blocking_issue.trim().is_empty(),
+        })
+        .collect();
+
+    let has_risk_blocker = minority_choices.iter().any(|m| m.has_risk_warning);
+
+    let mut reassessment_conditions: Vec<String> = minority_choices
+        .iter()
+        .map(|m| m.reassessment_condition.clone())
+        .collect();
+
+    if let Some(selected) = &selected_proposal {
+        for vote in votes
+            .iter()
+            .filter(|v| v.final_choice && v.proposal_id == selected.id)
+        {
+            if !vote.blocking_issue.trim().is_empty() {
+                reassessment_conditions.push(format!("多数方也有关注：{}", vote.blocking_issue));
+            }
+        }
+    }
+
+    let adoption_conditions = selected_proposal
+        .as_ref()
+        .map(|proposal| {
+            let mut conditions: Vec<String> = proposal
+                .risks
+                .iter()
+                .map(|risk| format!("需控制风险：{risk}"))
+                .collect();
+            if policy.strategy == VoteStrategy::ConditionalPass {
+                conditions.push("通过有条件多数决，需持续监控实施效果".into());
+            }
+            if conditions.is_empty() {
+                conditions.push("多数策案已形成，建议优先执行".into());
+            }
+            conditions
+        })
+        .unwrap_or_default();
+
+    let unresolved_questions = votes
+        .iter()
+        .filter(|vote| !vote.key_evidence.trim().is_empty())
+        .map(|vote| format!("{} 认为关键证据：{}", vote.voter.label(), vote.key_evidence))
+        .collect();
+
     Ok(Decision {
         status,
         selected_proposal,
         vote_count: votes.iter().filter(|vote| vote.final_choice).count(),
         majority_reasons,
         minority_opinion,
-        adoption_conditions: vec!["先以 Mock 模式验证完整讨论链路".to_string()],
-        unresolved_questions: vec!["真实模型输出稳定性需要继续观察".to_string()],
+        adoption_conditions,
+        unresolved_questions,
         next_steps: vec!["把多数方案拆成最小可执行清单".to_string()],
         self_vote_count: if policy.allow_self_vote {
             self_vote_count
         } else {
             0
         },
+        minority_choices,
+        reassessment_conditions,
+        has_risk_blocker,
     })
+}
+
+pub fn generate_merged_proposal(proposals: &[Proposal], common_idea_ids: &[Uuid]) -> Proposal {
+    let titles: Vec<&str> = proposals.iter().map(|p| p.title.as_str()).collect();
+    let merged_title = format!("合案：{}", titles.join(" + "));
+    let summaries: Vec<&str> = proposals.iter().map(|p| p.summary.as_str()).collect();
+    let merged_summary = summaries.join("；");
+
+    let mut all_adopted = Vec::new();
+    let mut all_risks = Vec::new();
+    let mut all_metrics = Vec::new();
+    let mut all_implementation = Vec::new();
+    let mut all_value = Vec::new();
+
+    for proposal in proposals {
+        all_adopted.extend(proposal.adopted_points.iter().cloned());
+        all_risks.extend(proposal.risks.iter().cloned());
+        all_metrics.extend(proposal.success_metrics.iter().cloned());
+        all_implementation.push(proposal.implementation_path.clone());
+        all_value.push(proposal.user_value.clone());
+    }
+
+    // Divergence analysis: identify disagreements
+    let mut divergence_notes: Vec<String> = Vec::new();
+    for (i, a) in proposals.iter().enumerate() {
+        for b in proposals.iter().skip(i + 1) {
+            let a_title = &a.title;
+            let b_title = &b.title;
+            if a.summary != b.summary {
+                divergence_notes.push(format!(
+                    "「{}」与「{}」策略方向不同：前者侧重「{}」，后者侧重「{}」",
+                    a_title,
+                    b_title,
+                    a.summary.chars().take(30).collect::<String>(),
+                    b.summary.chars().take(30).collect::<String>()
+                ));
+            }
+            let a_risks: HashSet<&str> = a.risks.iter().map(|s| s.as_str()).collect();
+            let b_risks: HashSet<&str> = b.risks.iter().map(|s| s.as_str()).collect();
+            let unique_a: Vec<&&str> = a_risks.difference(&b_risks).collect();
+            let unique_b: Vec<&&str> = b_risks.difference(&a_risks).collect();
+            if !unique_a.is_empty() || !unique_b.is_empty() {
+                divergence_notes.push(format!("「{}」与「{}」风险认知有差异", a_title, b_title));
+            }
+        }
+    }
+
+    let mut changes = vec!["合案复议：合并三席策案的共同部分".into()];
+    if !divergence_notes.is_empty() {
+        changes.push("核心分歧：".to_string());
+        changes.extend(divergence_notes);
+    }
+
+    Proposal {
+        id: Uuid::new_v4(),
+        proposed_by: proposals
+            .first()
+            .map(|p| p.proposed_by)
+            .unwrap_or(SeatKind::Mouyuan),
+        title: merged_title,
+        summary: merged_summary,
+        source_idea_ids: common_idea_ids.to_vec(),
+        adopted_points: all_adopted,
+        rejected_points: vec![],
+        rejection_reasons: vec![],
+        changes_from_initial: changes,
+        user_value: all_value.join("；"),
+        implementation_path: all_implementation.join("；"),
+        risks: all_risks,
+        success_metrics: all_metrics,
+        confidence: proposals.iter().map(|p| p.confidence).sum::<f32>() / proposals.len() as f32,
+    }
 }
 
 #[cfg(test)]
@@ -521,6 +871,288 @@ mod tests {
             final_choice: true,
             reason: "reason".into(),
             confidence: 0.8,
+            key_evidence: String::new(),
+            blocking_issue: String::new(),
         }
+    }
+
+    #[test]
+    fn idea_status_default_is_proposed() {
+        assert_eq!(IdeaStatus::default(), IdeaStatus::Proposed);
+    }
+
+    #[test]
+    fn idea_card_default_status_is_proposed() {
+        let card = IdeaCard {
+            id: Uuid::new_v4(),
+            proposed_by: SeatKind::Mouyuan,
+            source_seats: vec![SeatKind::Mouyuan],
+            title: "test".into(),
+            summary: "test".into(),
+            value: "test".into(),
+            mechanism: "test".into(),
+            unconventional: false,
+            assumptions: vec![],
+            risks: vec![],
+            status: IdeaStatus::default(),
+            challenged_by: vec![],
+            referenced_by_proposals: vec![],
+            merged_into: None,
+        };
+        assert_eq!(card.status, IdeaStatus::Proposed);
+    }
+
+    #[test]
+    fn evidence_kind_default_is_fact() {
+        assert_eq!(EvidenceKind::default(), EvidenceKind::Fact);
+    }
+
+    #[test]
+    fn claim_evidence_links_roundtrip() {
+        let claim_id = Uuid::new_v4();
+        let evidence_id = Uuid::new_v4();
+        let link = ClaimEvidenceLink {
+            claim_id,
+            evidence_id,
+            link_type: "supports".into(),
+        };
+        assert_eq!(link.claim_id, claim_id);
+        assert_eq!(link.evidence_id, evidence_id);
+        assert_eq!(link.link_type, "supports");
+    }
+
+    #[test]
+    fn unanimous_requires_three_votes() {
+        let p1 = proposal(SeatKind::Mouyuan);
+        let proposals = vec![p1.clone()];
+        let votes = vec![
+            vote(SeatKind::Mouyuan, p1.id),
+            vote(SeatKind::Jingshi, p1.id),
+        ];
+        let policy = VotePolicy {
+            allow_self_vote: true,
+            strategy: VoteStrategy::Unanimous,
+            min_score_threshold: 0,
+        };
+        assert_eq!(
+            tally_votes(&proposals, &votes, &policy, false).unwrap(),
+            VoteOutcome::NeedsConvergence
+        );
+    }
+
+    #[test]
+    fn unanimous_passes_with_three_same_votes() {
+        let p1 = proposal(SeatKind::Mouyuan);
+        let proposals = vec![p1.clone()];
+        let votes = vec![
+            vote(SeatKind::Mouyuan, p1.id),
+            vote(SeatKind::Jingshi, p1.id),
+            vote(SeatKind::Chizheng, p1.id),
+        ];
+        let policy = VotePolicy {
+            allow_self_vote: true,
+            strategy: VoteStrategy::Unanimous,
+            min_score_threshold: 0,
+        };
+        assert_eq!(
+            tally_votes(&proposals, &votes, &policy, false).unwrap(),
+            VoteOutcome::Majority(p1.id)
+        );
+    }
+
+    #[test]
+    fn risk_veto_rejects_when_blocking_issue_present() {
+        let p1 = proposal(SeatKind::Mouyuan);
+        let proposals = vec![p1.clone()];
+        let votes = vec![
+            Vote {
+                voter: SeatKind::Mouyuan,
+                proposal_id: p1.id,
+                final_choice: true,
+                blocking_issue: "安全合规风险未解决".into(),
+                ..vote(SeatKind::Mouyuan, p1.id)
+            },
+            vote(SeatKind::Jingshi, p1.id),
+            vote(SeatKind::Chizheng, p1.id),
+        ];
+        let policy = VotePolicy {
+            allow_self_vote: true,
+            strategy: VoteStrategy::RiskVeto,
+            min_score_threshold: 0,
+        };
+        assert_eq!(
+            tally_votes(&proposals, &votes, &policy, false).unwrap_err(),
+            CoreError::RiskVetoed {
+                seat: SeatKind::Mouyuan,
+                issue: "安全合规风险未解决".into()
+            }
+        );
+    }
+
+    #[test]
+    fn risk_veto_passes_without_blocking_issue() {
+        let p1 = proposal(SeatKind::Mouyuan);
+        let proposals = vec![p1.clone()];
+        let votes = vec![
+            vote(SeatKind::Mouyuan, p1.id),
+            vote(SeatKind::Jingshi, p1.id),
+            vote(SeatKind::Chizheng, p1.id),
+        ];
+        let policy = VotePolicy {
+            allow_self_vote: true,
+            strategy: VoteStrategy::RiskVeto,
+            min_score_threshold: 0,
+        };
+        assert_eq!(
+            tally_votes(&proposals, &votes, &policy, false).unwrap(),
+            VoteOutcome::Majority(p1.id)
+        );
+    }
+
+    #[test]
+    fn build_decision_includes_minority_choices() {
+        let p1 = proposal(SeatKind::Mouyuan);
+        let p2 = proposal(SeatKind::Jingshi);
+        let proposals = vec![p1.clone(), p2.clone()];
+        let votes = vec![
+            vote(SeatKind::Mouyuan, p1.id),
+            vote(SeatKind::Jingshi, p1.id),
+            Vote {
+                voter: SeatKind::Chizheng,
+                proposal_id: p2.id,
+                final_choice: true,
+                blocking_issue: "数据隐私存疑".into(),
+                reason: "隐私方案不完善".into(),
+                ..vote(SeatKind::Chizheng, p2.id)
+            },
+        ];
+        let decision = build_decision(&proposals, &votes, &VotePolicy::default(), false).unwrap();
+        assert!(decision.selected_proposal.is_some());
+        assert_eq!(decision.selected_proposal.as_ref().unwrap().id, p1.id);
+        assert_eq!(decision.minority_choices.len(), 1);
+        assert_eq!(decision.minority_choices[0].seat, SeatKind::Chizheng);
+        assert!(decision.has_risk_blocker);
+        assert!(!decision.reassessment_conditions.is_empty());
+    }
+
+    #[test]
+    fn generate_merged_proposal_combines_all_proposals() {
+        let p1 = proposal(SeatKind::Mouyuan);
+        let p2 = proposal(SeatKind::Jingshi);
+        let idea_ids = vec![Uuid::new_v4(), Uuid::new_v4()];
+        let merged = generate_merged_proposal(&[p1, p2], &idea_ids);
+        assert!(merged.title.contains("合案"));
+        assert_eq!(merged.source_idea_ids.len(), 2);
+        assert!(!merged.summary.is_empty());
+    }
+
+    #[test]
+    fn conditional_pass_allows_two_third_majority() {
+        let p1 = proposal(SeatKind::Mouyuan);
+        let proposals = vec![p1.clone()];
+        let votes = vec![
+            vote(SeatKind::Mouyuan, p1.id),
+            vote(SeatKind::Jingshi, p1.id),
+            vote(SeatKind::Chizheng, p1.id),
+        ];
+        let policy = VotePolicy {
+            allow_self_vote: true,
+            strategy: VoteStrategy::ConditionalPass,
+            min_score_threshold: 0,
+        };
+        assert_eq!(
+            tally_votes(&proposals, &votes, &policy, false).unwrap(),
+            VoteOutcome::Majority(p1.id)
+        );
+    }
+
+    #[test]
+    fn conditional_pass_adds_monitoring_condition() {
+        let p1 = proposal(SeatKind::Mouyuan);
+        let proposals = vec![p1.clone()];
+        let votes = vec![
+            vote(SeatKind::Mouyuan, p1.id),
+            vote(SeatKind::Jingshi, p1.id),
+            vote(SeatKind::Chizheng, p1.id),
+        ];
+        let policy = VotePolicy {
+            allow_self_vote: true,
+            strategy: VoteStrategy::ConditionalPass,
+            min_score_threshold: 0,
+        };
+        let decision = build_decision(&proposals, &votes, &policy, false).unwrap();
+        assert!(
+            decision
+                .adoption_conditions
+                .iter()
+                .any(|c| c.contains("持续监控"))
+        );
+    }
+
+    #[test]
+    fn tally_votes_rejects_unknown_proposal() {
+        let proposals = vec![proposal(SeatKind::Mouyuan)];
+        let votes = vec![Vote {
+            voter: SeatKind::Mouyuan,
+            proposal_id: Uuid::new_v4(),
+            final_choice: true,
+            ..vote(SeatKind::Mouyuan, Uuid::new_v4())
+        }];
+        assert_eq!(
+            tally_votes(&proposals, &votes, &VotePolicy::default(), false).unwrap_err(),
+            CoreError::UnknownProposal(votes[0].proposal_id)
+        );
+    }
+
+    #[test]
+    fn build_decision_with_key_evidence_adds_to_unresolved_questions() {
+        let p1 = proposal(SeatKind::Mouyuan);
+        let proposals = vec![p1.clone()];
+        let votes = vec![
+            Vote {
+                voter: SeatKind::Mouyuan,
+                proposal_id: p1.id,
+                final_choice: true,
+                key_evidence: "用户调研数据需补充".into(),
+                ..vote(SeatKind::Mouyuan, p1.id)
+            },
+            vote(SeatKind::Jingshi, p1.id),
+            vote(SeatKind::Chizheng, p1.id),
+        ];
+        let decision = build_decision(&proposals, &votes, &VotePolicy::default(), false).unwrap();
+        assert!(
+            decision
+                .unresolved_questions
+                .iter()
+                .any(|q| q.contains("用户调研数据"))
+        );
+    }
+
+    #[test]
+    fn minority_choice_tracks_reassessment_condition_from_blocking_issue() {
+        let p1 = proposal(SeatKind::Mouyuan);
+        let p2 = proposal(SeatKind::Jingshi);
+        let proposals = vec![p1.clone(), p2.clone()];
+        let votes = vec![
+            vote(SeatKind::Mouyuan, p1.id),
+            vote(SeatKind::Jingshi, p1.id),
+            Vote {
+                voter: SeatKind::Chizheng,
+                proposal_id: p2.id,
+                final_choice: true,
+                blocking_issue: "缺少安全审计".into(),
+                reason: "安全审计未完成".into(),
+                ..vote(SeatKind::Chizheng, p2.id)
+            },
+        ];
+        let decision = build_decision(&proposals, &votes, &VotePolicy::default(), false).unwrap();
+        let chizheng = decision
+            .minority_choices
+            .iter()
+            .find(|m| m.seat == SeatKind::Chizheng)
+            .unwrap();
+        assert!(chizheng.reassessment_condition.contains("缺少安全审计"));
+        assert!(chizheng.has_risk_warning);
+        assert!(decision.has_risk_blocker);
     }
 }

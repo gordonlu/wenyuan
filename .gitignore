@@ -1,4 +1,5 @@
 /target/
+/node_modules/
 /wenyuan.db
 *.db
 /web/node_modules/
@@ -9,3 +10,5 @@
 *.log
 .env
 Agents.md
+/.codex/
+/.agents/

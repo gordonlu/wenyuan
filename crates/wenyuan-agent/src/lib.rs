@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use futures::future::join_all;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::{
     Arc,
@@ -11,8 +12,10 @@ use thiserror::Error;
 use tokio::sync::Notify;
 use uuid::Uuid;
 use wenyuan_core::{
-    ChatMessage, Critique, Decision, IdeaCard, Proposal, SeatKind, SeatStatus, Session,
-    SessionPhase, Vote, VoteOutcome, VotePolicy, build_decision, phase_barrier_completed,
+    Assessment, ChatMessage, Claim, ClaimEvidenceLink, Critique, Decision, DecisionStatus,
+    DeliberationMode, Evidence, IdeaCard, IdeaStatus, Proposal, SeatKind, SeatModelConfig,
+    SeatStatus, Session, SessionPhase, Vote, VoteOutcome, VotePolicy, build_decision,
+    generate_merged_proposal, phase_barrier_completed,
 };
 use wenyuan_provider::{LlmProvider, LlmRequest, LlmResponse, ProviderError};
 
@@ -37,7 +40,7 @@ pub enum AgentError {
     },
     #[error("phase barrier failed: {0}")]
     Barrier(String),
-    #[error("phase {phase:?} failed with {failures} failed seat run(s)")]
+    #[error("phase {phase:?} failed with {failures} failed seat(s)")]
     PhaseFailed {
         phase: SessionPhase,
         failures: usize,
@@ -87,7 +90,7 @@ impl AgentRunner {
     pub fn new(provider: Arc<dyn LlmProvider>) -> Self {
         Self {
             provider,
-            timeout: Duration::from_millis(250),
+            timeout: Duration::from_secs(120),
             policy: VotePolicy::default(),
         }
     }
@@ -111,7 +114,13 @@ impl AgentRunner {
         cancel: CancellationFlag,
         progress: Option<Arc<dyn ProgressSink>>,
     ) -> Result<DiscussionArtifacts, AgentError> {
+        if session.mode == DeliberationMode::SingleAgent {
+            return self.run_single_agent(session, cancel, progress).await;
+        }
+
         let mut artifacts = DiscussionArtifacts::default();
+        let model_config = session.model_config.clone();
+        let mc = model_config.as_ref();
 
         self.ensure_not_cancelled(&cancel)?;
         session
@@ -153,8 +162,9 @@ impl AgentRunner {
         )
         .await;
         let (critiques, traces) = self
-            .run_critiques(session.id, &artifacts.ideas, &cancel, progress.as_ref())
+            .run_critiques(session.id, &artifacts.ideas, &cancel, progress.as_ref(), mc)
             .await?;
+        compute_idea_statuses(&mut artifacts.ideas, &critiques, &[], None);
         artifacts.critiques = critiques;
         artifacts.seat_runs.extend(traces);
         artifacts
@@ -185,8 +195,10 @@ impl AgentRunner {
                 &artifacts.critiques,
                 &cancel,
                 progress.as_ref(),
+                mc,
             )
             .await?;
+        compute_idea_statuses(&mut artifacts.ideas, &[], &proposals, None);
         artifacts.proposals = proposals;
         artifacts.seat_runs.extend(traces);
         artifacts.events.push("phase_completed:revision".into());
@@ -209,7 +221,13 @@ impl AgentRunner {
         )
         .await;
         let (votes, traces) = self
-            .run_voting(session.id, &artifacts.proposals, &cancel, progress.as_ref())
+            .run_voting(
+                session.id,
+                &artifacts.proposals,
+                &cancel,
+                progress.as_ref(),
+                mc,
+            )
             .await?;
         artifacts.votes = votes;
         artifacts.seat_runs.extend(traces);
@@ -246,12 +264,30 @@ impl AgentRunner {
                     serde_json::json!({ "phase": SessionPhase::Convergence }),
                 )
                 .await;
+
+                let all_idea_ids: Vec<Uuid> = artifacts.ideas.iter().map(|i| i.id).collect();
+                let merged = generate_merged_proposal(&artifacts.proposals, &all_idea_ids);
+                let convergence_proposals = vec![
+                    artifacts.proposals[0].clone(),
+                    artifacts.proposals[1].clone(),
+                    artifacts.proposals[2].clone(),
+                    merged,
+                ];
+
                 let (mut second_votes, traces) = self
-                    .run_voting(session.id, &artifacts.proposals, &cancel, progress.as_ref())
+                    .run_voting(
+                        session.id,
+                        &convergence_proposals,
+                        &cancel,
+                        progress.as_ref(),
+                        mc,
+                    )
                     .await?;
                 artifacts.seat_runs.extend(traces);
                 decision_votes = second_votes.clone();
                 artifacts.votes.append(&mut second_votes);
+                artifacts.proposals = convergence_proposals;
+
                 emit_progress(
                     progress.as_ref(),
                     "phase_completed",
@@ -278,6 +314,18 @@ impl AgentRunner {
         .map_err(|err| AgentError::Core(err.to_string()))?;
         session.result = Some(decision.clone());
         artifacts.decision = Some(decision);
+        compute_idea_statuses(
+            &mut artifacts.ideas,
+            &[],
+            &artifacts.proposals,
+            artifacts.decision.as_ref(),
+        );
+        let (claims, evidence, assessments, links) =
+            extract_evidence_pool(&artifacts.ideas, &artifacts.critiques, &artifacts.proposals);
+        artifacts.claims = claims;
+        artifacts.evidence = evidence;
+        artifacts.assessments = assessments;
+        artifacts.claim_evidence_links = links;
         artifacts.quality = DiscussionQualityMetrics::calculate(&artifacts);
         artifacts.session = Some(session);
         artifacts.events.push("session_completed".into());
@@ -296,6 +344,7 @@ impl AgentRunner {
             "context": session.context,
             "rule": "第一轮独议完全隔离，不引用其他席位输出。"
         });
+        let mc = session.model_config.as_ref();
         let run = self
             .run_three::<IndependentOutput>(
                 session.id,
@@ -303,6 +352,7 @@ impl AgentRunner {
                 input,
                 cancel,
                 progress,
+                mc,
             )
             .await?;
         let mut ideas = Vec::new();
@@ -328,6 +378,10 @@ impl AgentRunner {
                     unconventional: idea.unconventional,
                     assumptions: idea.assumptions,
                     risks: idea.risks,
+                    status: IdeaStatus::Proposed,
+                    challenged_by: vec![],
+                    referenced_by_proposals: vec![],
+                    merged_into: None,
                 });
             }
         }
@@ -340,6 +394,7 @@ impl AgentRunner {
         ideas: &[IdeaCard],
         cancel: &CancellationFlag,
         progress: Option<&Arc<dyn ProgressSink>>,
+        model_config: Option<&HashMap<SeatKind, SeatModelConfig>>,
     ) -> Result<(Vec<Critique>, Vec<SeatRunTrace>), AgentError> {
         let input = serde_json::json!({
             "ideas": ideas,
@@ -352,6 +407,7 @@ impl AgentRunner {
                 input,
                 cancel,
                 progress,
+                model_config,
             )
             .await?;
         Ok((
@@ -382,6 +438,7 @@ impl AgentRunner {
         critiques: &[Critique],
         cancel: &CancellationFlag,
         progress: Option<&Arc<dyn ProgressSink>>,
+        model_config: Option<&HashMap<SeatKind, SeatModelConfig>>,
     ) -> Result<(Vec<Proposal>, Vec<SeatRunTrace>), AgentError> {
         let input = serde_json::json!({
             "ideas": ideas,
@@ -395,6 +452,7 @@ impl AgentRunner {
                 input,
                 cancel,
                 progress,
+                model_config,
             )
             .await?;
         Ok((
@@ -427,13 +485,21 @@ impl AgentRunner {
         proposals: &[Proposal],
         cancel: &CancellationFlag,
         progress: Option<&Arc<dyn ProgressSink>>,
+        model_config: Option<&HashMap<SeatKind, SeatModelConfig>>,
     ) -> Result<(Vec<Vote>, Vec<SeatRunTrace>), AgentError> {
         let input = serde_json::json!({
             "proposals": proposals,
             "rule": "对三个策案匿名投票，proposal_ref 使用 proposal_0、proposal_1、proposal_2。"
         });
         let run = self
-            .run_three::<VoteOutput>(session_id, SessionPhase::Voting, input, cancel, progress)
+            .run_three::<VoteOutput>(
+                session_id,
+                SessionPhase::Voting,
+                input,
+                cancel,
+                progress,
+                model_config,
+            )
             .await?;
         let mut votes = Vec::new();
         for (voter, output) in run.outputs {
@@ -457,10 +523,261 @@ impl AgentRunner {
                     final_choice: raw.final_choice,
                     reason: raw.reason,
                     confidence: raw.confidence,
+                    key_evidence: raw.key_evidence.clone(),
+                    blocking_issue: raw.blocking_issue.clone(),
                 });
             }
         }
         Ok((votes, run.traces))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn run_one<T>(
+        &self,
+        session_id: Uuid,
+        seat: SeatKind,
+        phase: SessionPhase,
+        phase_input: serde_json::Value,
+        cancel: &CancellationFlag,
+        progress: Option<&Arc<dyn ProgressSink>>,
+        model_config: Option<&HashMap<SeatKind, SeatModelConfig>>,
+    ) -> Result<(Option<T>, Vec<SeatRunTrace>), AgentError>
+    where
+        T: for<'de> Deserialize<'de> + Send + 'static,
+    {
+        self.ensure_not_cancelled(cancel)?;
+        let result = self
+            .call_and_parse::<T>(
+                session_id,
+                seat,
+                phase,
+                phase_input,
+                cancel,
+                progress,
+                model_config,
+            )
+            .await?;
+        Ok((result.parsed, result.traces))
+    }
+
+    pub async fn run_single_agent(
+        &self,
+        mut session: Session,
+        cancel: CancellationFlag,
+        progress: Option<Arc<dyn ProgressSink>>,
+    ) -> Result<DiscussionArtifacts, AgentError> {
+        let mut artifacts = DiscussionArtifacts::default();
+        let model_config = session.model_config.clone();
+        let mc = model_config.as_ref();
+
+        // Phase 1: IndependentDeliberation (single seat)
+        self.ensure_not_cancelled(&cancel)?;
+        session
+            .transition_to(SessionPhase::IndependentDeliberation)
+            .map_err(|err| AgentError::Core(err.to_string()))?;
+        artifacts
+            .events
+            .push("phase_started:independent_deliberation".into());
+        emit_progress(
+            progress.as_ref(),
+            "phase_started",
+            serde_json::json!({ "phase": SessionPhase::IndependentDeliberation }),
+        )
+        .await;
+        let input = serde_json::json!({
+            "title": session.title,
+            "topic": session.topic,
+            "context": session.context,
+            "rule": "第一轮独议完全隔离，不引用其他席位输出。"
+        });
+        let (ideas_result, traces) = self
+            .run_one::<IndependentOutput>(
+                session.id,
+                SeatKind::Mouyuan,
+                SessionPhase::IndependentDeliberation,
+                input,
+                &cancel,
+                progress.as_ref(),
+                mc,
+            )
+            .await?;
+        let mut ideas = Vec::new();
+        if let Some(output) = ideas_result {
+            for idea in output.ideas.into_iter().take(5) {
+                ideas.push(IdeaCard {
+                    id: Uuid::new_v4(),
+                    proposed_by: SeatKind::Mouyuan,
+                    source_seats: vec![SeatKind::Mouyuan],
+                    title: idea.title,
+                    summary: idea.summary,
+                    value: idea.value,
+                    mechanism: idea.mechanism,
+                    unconventional: idea.unconventional,
+                    assumptions: idea.assumptions,
+                    risks: idea.risks,
+                    status: IdeaStatus::Proposed,
+                    challenged_by: vec![],
+                    referenced_by_proposals: vec![],
+                    merged_into: None,
+                });
+            }
+        }
+        artifacts.ideas = ideas;
+        artifacts.seat_runs.extend(traces);
+        artifacts
+            .events
+            .push("phase_completed:independent_deliberation".into());
+        emit_progress(
+            progress.as_ref(),
+            "phase_completed",
+            serde_json::json!({ "phase": SessionPhase::IndependentDeliberation }),
+        )
+        .await;
+
+        // Phase 2: Self-critique
+        self.ensure_not_cancelled(&cancel)?;
+        session
+            .transition_to(SessionPhase::CrossCritique)
+            .map_err(|err| AgentError::Core(err.to_string()))?;
+        artifacts.events.push("phase_started:self_critique".into());
+        emit_progress(
+            progress.as_ref(),
+            "phase_started",
+            serde_json::json!({ "phase": SessionPhase::CrossCritique, "mode": "self_critique" }),
+        )
+        .await;
+        let critique_input = serde_json::json!({
+            "ideas": artifacts.ideas,
+            "rule": "对你自己的创意进行自我批议，逐条输出结构化批评。"
+        });
+        let (critique_result, traces) = self
+            .run_one::<CritiqueOutput>(
+                session.id,
+                SeatKind::Mouyuan,
+                SessionPhase::CrossCritique,
+                critique_input,
+                &cancel,
+                progress.as_ref(),
+                mc,
+            )
+            .await?;
+        let mut critiques = Vec::new();
+        if let Some(output) = critique_result {
+            for review in output.reviews {
+                critiques.push(Critique {
+                    reviewer: SeatKind::Mouyuan,
+                    target_seat: SeatKind::Mouyuan,
+                    strongest_point: review.strongest_point,
+                    weakest_point: review.weakest_point,
+                    hidden_assumption: review.hidden_assumption,
+                    challenge: review.challenge,
+                    counterexample: review.counterexample,
+                    suggested_improvement: review.suggested_improvement,
+                    evidence_question: review.evidence_question,
+                });
+            }
+        }
+        artifacts.critiques = critiques;
+        artifacts.seat_runs.extend(traces);
+        artifacts
+            .events
+            .push("phase_completed:self_critique".into());
+        emit_progress(
+            progress.as_ref(),
+            "phase_completed",
+            serde_json::json!({ "phase": SessionPhase::CrossCritique, "mode": "self_critique" }),
+        )
+        .await;
+
+        // Phase 3: Revision (single seat)
+        self.ensure_not_cancelled(&cancel)?;
+        session
+            .transition_to(SessionPhase::Revision)
+            .map_err(|err| AgentError::Core(err.to_string()))?;
+        artifacts.events.push("phase_started:revision".into());
+        emit_progress(
+            progress.as_ref(),
+            "phase_started",
+            serde_json::json!({ "phase": SessionPhase::Revision }),
+        )
+        .await;
+        let revision_input = serde_json::json!({
+            "ideas": artifacts.ideas,
+            "critiques": artifacts.critiques,
+            "rule": "根据自我批议形成最终策案，说明采纳、拒绝、修改和置信度。"
+        });
+        let (proposal_result, traces) = self
+            .run_one::<ProposalOutput>(
+                session.id,
+                SeatKind::Mouyuan,
+                SessionPhase::Revision,
+                revision_input,
+                &cancel,
+                progress.as_ref(),
+                mc,
+            )
+            .await?;
+        let mut proposals = Vec::new();
+        if let Some(output) = proposal_result {
+            proposals.push(Proposal {
+                id: Uuid::new_v4(),
+                proposed_by: SeatKind::Mouyuan,
+                title: output.title,
+                summary: output.summary,
+                source_idea_ids: output.source_idea_ids,
+                adopted_points: output.adopted_points,
+                rejected_points: output.rejected_points,
+                rejection_reasons: output.rejection_reasons,
+                changes_from_initial: output.changes_from_initial,
+                user_value: output.user_value,
+                implementation_path: output.implementation_path,
+                risks: output.risks,
+                success_metrics: output.success_metrics,
+                confidence: output.confidence,
+            });
+        }
+        artifacts.proposals = proposals;
+        artifacts.seat_runs.extend(traces);
+        artifacts.events.push("phase_completed:revision".into());
+        emit_progress(
+            progress.as_ref(),
+            "phase_completed",
+            serde_json::json!({ "phase": SessionPhase::Revision }),
+        )
+        .await;
+
+        // Completed (no voting for single agent)
+        session
+            .transition_to(SessionPhase::Completed)
+            .map_err(|err| AgentError::Core(err.to_string()))?;
+
+        // Build decision
+        let decision = Decision {
+            status: DecisionStatus::MajorityReached,
+            selected_proposal: artifacts.proposals.first().cloned(),
+            vote_count: 1,
+            majority_reasons: vec!["单 Agent 独立产出".into()],
+            minority_opinion: vec![],
+            adoption_conditions: vec![],
+            unresolved_questions: vec![],
+            next_steps: vec![],
+            self_vote_count: 0,
+            minority_choices: vec![],
+            reassessment_conditions: vec![],
+            has_risk_blocker: false,
+        };
+        session.result = Some(decision.clone());
+        artifacts.decision = Some(decision);
+        let (claims, evidence, assessments, links) =
+            extract_evidence_pool(&artifacts.ideas, &artifacts.critiques, &artifacts.proposals);
+        artifacts.claims = claims;
+        artifacts.evidence = evidence;
+        artifacts.assessments = assessments;
+        artifacts.claim_evidence_links = links;
+        artifacts.quality = DiscussionQualityMetrics::calculate(&artifacts);
+        artifacts.session = Some(session);
+        artifacts.events.push("session_completed".into());
+        Ok(artifacts)
     }
 
     async fn run_three<T>(
@@ -470,6 +787,7 @@ impl AgentRunner {
         phase_input: serde_json::Value,
         cancel: &CancellationFlag,
         progress: Option<&Arc<dyn ProgressSink>>,
+        model_config: Option<&HashMap<SeatKind, SeatModelConfig>>,
     ) -> Result<PhaseRun<T>, AgentError>
     where
         T: for<'de> Deserialize<'de> + Send + 'static,
@@ -483,6 +801,7 @@ impl AgentRunner {
                 phase_input.clone(),
                 cancel,
                 progress,
+                model_config,
             )
         });
         let results = join_all(futures).await;
@@ -519,9 +838,9 @@ impl AgentRunner {
         }
 
         if let Err(err) = phase_barrier_completed(&statuses) {
-            let failures = traces
+            let failures = statuses
                 .iter()
-                .filter(|trace| trace.status == SeatRunStatus::Failed)
+                .filter(|(_, status)| *status == SeatStatus::Failed)
                 .count();
             if failures > 0 {
                 return Err(AgentError::PhaseFailed {
@@ -536,6 +855,7 @@ impl AgentRunner {
         Ok(PhaseRun { outputs, traces })
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn call_and_parse<T>(
         &self,
         session_id: Uuid,
@@ -544,6 +864,7 @@ impl AgentRunner {
         phase_input: serde_json::Value,
         cancel: &CancellationFlag,
         progress: Option<&Arc<dyn ProgressSink>>,
+        model_config: Option<&HashMap<SeatKind, SeatModelConfig>>,
     ) -> Result<SeatCallResult<T>, AgentError>
     where
         T: for<'de> Deserialize<'de>,
@@ -556,7 +877,17 @@ impl AgentRunner {
             serde_json::json!({ "seat": seat, "phase": phase }),
         )
         .await;
-        let request = self.build_request(session_id, seat, phase, false, &prompt, &phase_input);
+        let request = self.build_request(
+            session_id,
+            seat,
+            phase,
+            false,
+            &prompt,
+            &phase_input,
+            model_config,
+            None,
+            None,
+        );
         let (first, first_duration_ms) = self.call_provider(request, cancel).await;
         let Ok(response) = first else {
             if matches!(first, Err(ProviderError::Cancelled)) {
@@ -580,7 +911,7 @@ impl AgentRunner {
             });
         };
 
-        match serde_json::from_str::<T>(&response.content) {
+        match parse_model_json::<T>(&response.content) {
             Ok(parsed) => {
                 emit_progress(
                     progress,
@@ -604,8 +935,17 @@ impl AgentRunner {
                     &response,
                     err.to_string(),
                 ));
-                let repair_request =
-                    self.build_request(session_id, seat, phase, true, &prompt, &phase_input);
+                let repair_request = self.build_request(
+                    session_id,
+                    seat,
+                    phase,
+                    true,
+                    &prompt,
+                    &phase_input,
+                    model_config,
+                    Some(&err.to_string()),
+                    Some(&response.content),
+                );
                 let (repaired, repair_duration_ms) =
                     self.call_provider(repair_request, cancel).await;
                 let Ok(repaired_response) = repaired else {
@@ -636,7 +976,7 @@ impl AgentRunner {
                         traces,
                     });
                 };
-                match serde_json::from_str::<T>(&repaired_response.content) {
+                match parse_model_json::<T>(&repaired_response.content) {
                     Ok(parsed) => {
                         emit_progress(
                             progress,
@@ -705,6 +1045,7 @@ impl AgentRunner {
         (response, started.elapsed().as_millis())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn build_request(
         &self,
         session_id: Uuid,
@@ -713,18 +1054,33 @@ impl AgentRunner {
         repair_json: bool,
         prompt: &SeatPrompt,
         phase_input: &serde_json::Value,
+        model_config: Option<&HashMap<SeatKind, SeatModelConfig>>,
+        parse_error: Option<&str>,
+        raw_output: Option<&str>,
     ) -> LlmRequest {
         let instruction = if repair_json {
-            "上一轮输出不是合法 JSON。请仅根据同一阶段输入修复格式，并只返回合法 JSON。"
+            "上一轮输出不是合法 JSON。请根据同一阶段输入、解析错误和上一轮原始输出修复格式，并只返回合法 JSON。"
         } else {
             "请执行当前阶段并只返回合法 JSON。"
         };
+        let repair_context = if repair_json {
+            format!(
+                "\n解析错误：{}\n上一轮原始输出：{}",
+                parse_error.unwrap_or("未知解析错误"),
+                truncate_for_repair(raw_output.unwrap_or(""))
+            )
+        } else {
+            String::new()
+        };
+        let schema = phase_schema(phase);
+        let override_model = model_config
+            .and_then(|mc| mc.get(&seat))
+            .and_then(|c| c.model.clone());
         LlmRequest {
             session_id,
             seat,
             phase,
             repair_json,
-            temperature: prompt.temperature,
             max_tokens: prompt.max_tokens,
             prompt_version: prompt.version.to_string(),
             messages: vec![
@@ -735,11 +1091,13 @@ impl AgentRunner {
                 ChatMessage {
                     role: "user".into(),
                     content: format!(
-                        "{instruction}\n阶段：{phase:?}\n输入：{}",
-                        serde_json::to_string(phase_input).unwrap_or_else(|_| "{}".into())
+                        "{instruction}\n\n硬性输出规则：\n- 只输出一个 JSON object。\n- 不要输出 Markdown，不要使用 ```json 代码块。\n- 不要输出解释性文字。\n- 字段名必须与 schema 完全一致。\n- 缺少信息时使用空字符串、空数组或 0，不要省略 schema 字段。\n\n阶段：{phase:?}\n\n必须匹配的 JSON schema 示例：\n{schema}\n\n输入：{}{}",
+                        serde_json::to_string(phase_input).unwrap_or_else(|_| "{}".into()),
+                        repair_context
                     ),
                 },
             ],
+            override_model,
         }
     }
 
@@ -749,6 +1107,78 @@ impl AgentRunner {
         } else {
             Ok(())
         }
+    }
+}
+
+fn phase_schema(phase: SessionPhase) -> &'static str {
+    match phase {
+        SessionPhase::IndependentDeliberation => {
+            r#"{
+  "ideas": [
+    {
+      "title": "",
+      "summary": "",
+      "value": "",
+      "mechanism": "",
+      "unconventional": false,
+      "assumptions": [""],
+      "risks": [""]
+    }
+  ]
+}"#
+        }
+        SessionPhase::CrossCritique => {
+            r#"{
+  "reviews": [
+    {
+      "target_seat": "mouyuan",
+      "strongest_point": "",
+      "weakest_point": "",
+      "hidden_assumption": "",
+      "challenge": "",
+      "counterexample": "",
+      "suggested_improvement": "",
+      "evidence_question": ""
+    }
+  ]
+}"#
+        }
+        SessionPhase::Revision | SessionPhase::Convergence => {
+            r#"{
+  "title": "",
+  "summary": "",
+  "source_idea_ids": [],
+  "adopted_points": [""],
+  "rejected_points": [""],
+  "rejection_reasons": [""],
+  "changes_from_initial": [""],
+  "user_value": "",
+  "implementation_path": "",
+  "risks": [""],
+  "success_metrics": [""],
+  "confidence": 0.0
+}"#
+        }
+        SessionPhase::Voting => {
+            r#"{
+  "votes": [
+    {
+      "proposal_ref": "proposal_0",
+      "value_score": 0,
+      "novelty_score": 0,
+      "feasibility_score": 0,
+      "risk_score": 0,
+      "roi_score": 0,
+      "final_choice": true,
+      "reason": "",
+      "confidence": 0.0,
+      "key_evidence": "",
+      "blocking_issue": ""
+    }
+  ]
+}"#
+        }
+        _ => "{}",
     }
 }
 
@@ -763,6 +1193,14 @@ pub struct DiscussionArtifacts {
     pub decision: Option<Decision>,
     #[serde(default)]
     pub quality: DiscussionQualityMetrics,
+    #[serde(default)]
+    pub claims: Vec<Claim>,
+    #[serde(default)]
+    pub evidence: Vec<Evidence>,
+    #[serde(default)]
+    pub assessments: Vec<Assessment>,
+    #[serde(default)]
+    pub claim_evidence_links: Vec<ClaimEvidenceLink>,
     pub events: Vec<String>,
 }
 
@@ -961,7 +1399,6 @@ impl<'a> TraceContext<'a> {
 struct SeatPrompt {
     version: &'static str,
     content: &'static str,
-    temperature: f32,
     max_tokens: u32,
 }
 
@@ -974,20 +1411,17 @@ fn prompt_config(seat: SeatKind) -> SeatPrompt {
         SeatKind::Mouyuan => SeatPrompt {
             version: "mouyuan-v1",
             content: include_str!("../prompts/mouyuan-v1.md"),
-            temperature: 0.7,
-            max_tokens: 900,
+            max_tokens: 32_000,
         },
         SeatKind::Jingshi => SeatPrompt {
             version: "jingshi-v1",
             content: include_str!("../prompts/jingshi-v1.md"),
-            temperature: 0.4,
-            max_tokens: 800,
+            max_tokens: 32_000,
         },
         SeatKind::Chizheng => SeatPrompt {
             version: "chizheng-v1",
             content: include_str!("../prompts/chizheng-v1.md"),
-            temperature: 0.2,
-            max_tokens: 800,
+            max_tokens: 32_000,
         },
     }
 }
@@ -1001,6 +1435,214 @@ struct SeatCallResult<T> {
     seat: SeatKind,
     parsed: Option<T>,
     traces: Vec<SeatRunTrace>,
+}
+
+fn compute_idea_statuses(
+    ideas: &mut [IdeaCard],
+    critiques: &[Critique],
+    proposals: &[Proposal],
+    final_decision: Option<&Decision>,
+) {
+    let critique_seats: std::collections::HashSet<SeatKind> =
+        critiques.iter().map(|c| c.target_seat).collect();
+    for idea in ideas.iter_mut() {
+        if critique_seats.contains(&idea.proposed_by) {
+            idea.status = IdeaStatus::Challenged;
+        }
+        let critique_ids: Vec<Uuid> = critiques
+            .iter()
+            .filter(|c| c.target_seat == idea.proposed_by)
+            .map(|_| Uuid::new_v4())
+            .collect();
+        idea.challenged_by = critique_ids;
+    }
+
+    for proposal in proposals {
+        for idea in ideas.iter_mut() {
+            if proposal.source_idea_ids.contains(&idea.id) {
+                idea.status = IdeaStatus::Shortlisted;
+                idea.referenced_by_proposals.push(proposal.id);
+            }
+            if proposal
+                .rejected_points
+                .iter()
+                .any(|r| r.contains(&idea.title))
+            {
+                idea.status = IdeaStatus::Rejected;
+            }
+        }
+    }
+
+    if let Some(decision) = final_decision
+        && let Some(selected) = &decision.selected_proposal
+    {
+        for idea in ideas.iter_mut() {
+            if selected.source_idea_ids.contains(&idea.id) {
+                idea.status = IdeaStatus::Adopted;
+            }
+        }
+    }
+}
+
+fn extract_evidence_pool(
+    ideas: &[IdeaCard],
+    critiques: &[Critique],
+    _proposals: &[Proposal],
+) -> (
+    Vec<Claim>,
+    Vec<Evidence>,
+    Vec<Assessment>,
+    Vec<ClaimEvidenceLink>,
+) {
+    let mut claims = Vec::new();
+    let mut evidence = Vec::new();
+    let assessments = Vec::new();
+    let mut links = Vec::new();
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs().to_string())
+        .unwrap_or_default();
+
+    for idea in ideas {
+        // Idea assumptions → Inference evidence
+        for assumption in &idea.assumptions {
+            let claim_id = Uuid::new_v4();
+            let content_hash = Some(short_hash(assumption));
+            claims.push(Claim {
+                id: claim_id,
+                proposed_by: idea.proposed_by,
+                content: assumption.clone(),
+                context: format!("Idea: {}", idea.title),
+                is_supported: false,
+                evidence_ids: vec![],
+                assessment_ids: vec![],
+                status: wenyuan_core::EvidenceStatus::Proposed,
+            });
+            let evidence_id = Uuid::new_v4();
+            evidence.push(Evidence {
+                id: evidence_id,
+                proposed_by: idea.proposed_by,
+                kind: wenyuan_core::EvidenceKind::Inference,
+                content: assumption.clone(),
+                source: format!("{} 独议", idea.proposed_by.label()),
+                source_fetched_at: Some(now.clone()),
+                source_hash: content_hash,
+                claim_ids: vec![claim_id],
+            });
+            links.push(ClaimEvidenceLink {
+                claim_id,
+                evidence_id,
+                link_type: "supports".into(),
+            });
+        }
+        // Idea risks → Claim only (challenge), no direct evidence
+        for risk in &idea.risks {
+            let claim_id = Uuid::new_v4();
+            claims.push(Claim {
+                id: claim_id,
+                proposed_by: idea.proposed_by,
+                content: risk.clone(),
+                context: format!("Risk of Idea: {}", idea.title),
+                is_supported: false,
+                evidence_ids: vec![],
+                assessment_ids: vec![],
+                status: wenyuan_core::EvidenceStatus::Proposed,
+            });
+        }
+        // Idea value + mechanism → Fact evidence
+        if !idea.value.trim().is_empty() {
+            let evidence_id = Uuid::new_v4();
+            evidence.push(Evidence {
+                id: evidence_id,
+                proposed_by: idea.proposed_by,
+                kind: wenyuan_core::EvidenceKind::Fact,
+                content: idea.value.clone(),
+                source: format!("{} 独议 — 用户价值", idea.proposed_by.label()),
+                source_fetched_at: Some(now.clone()),
+                source_hash: Some(short_hash(&idea.value)),
+                claim_ids: vec![],
+            });
+        }
+        if !idea.mechanism.trim().is_empty() {
+            let evidence_id = Uuid::new_v4();
+            evidence.push(Evidence {
+                id: evidence_id,
+                proposed_by: idea.proposed_by,
+                kind: wenyuan_core::EvidenceKind::Fact,
+                content: idea.mechanism.clone(),
+                source: format!("{} 独议 — 实现机制", idea.proposed_by.label()),
+                source_fetched_at: Some(now.clone()),
+                source_hash: Some(short_hash(&idea.mechanism)),
+                claim_ids: vec![],
+            });
+        }
+    }
+
+    for critique in critiques {
+        if !critique.challenge.trim().is_empty() {
+            let claim_id = Uuid::new_v4();
+            claims.push(Claim {
+                id: claim_id,
+                proposed_by: critique.reviewer,
+                content: critique.challenge.clone(),
+                context: format!("Critique of {}", critique.target_seat.label()),
+                is_supported: false,
+                evidence_ids: vec![],
+                assessment_ids: vec![],
+                status: wenyuan_core::EvidenceStatus::Disputed,
+            });
+            // Link challenge to linked evidence via "challenges" type
+            if !critique.evidence_question.trim().is_empty() {
+                let evidence_id = Uuid::new_v4();
+                evidence.push(Evidence {
+                    id: evidence_id,
+                    proposed_by: critique.reviewer,
+                    kind: wenyuan_core::EvidenceKind::Preference,
+                    content: critique.evidence_question.clone(),
+                    source: format!("{} 批议 — 补证请求", critique.reviewer.label()),
+                    source_fetched_at: Some(now.clone()),
+                    source_hash: Some(short_hash(&critique.evidence_question)),
+                    claim_ids: vec![claim_id],
+                });
+                links.push(ClaimEvidenceLink {
+                    claim_id,
+                    evidence_id,
+                    link_type: "challenges".into(),
+                });
+            }
+        }
+        if !critique.evidence_question.trim().is_empty() {
+            let evidence_id = Uuid::new_v4();
+            evidence.push(Evidence {
+                id: evidence_id,
+                proposed_by: critique.reviewer,
+                kind: wenyuan_core::EvidenceKind::Preference,
+                content: critique.evidence_question.clone(),
+                source: format!("{} 批议", critique.reviewer.label()),
+                source_fetched_at: Some(now.clone()),
+                source_hash: Some(short_hash(&critique.evidence_question)),
+                claim_ids: vec![],
+            });
+        }
+    }
+
+    // Compute is_supported: a claim is supported if it has evidence with claim_ids containing it
+    for claim in &mut claims {
+        claim.is_supported = evidence.iter().any(|ev| ev.claim_ids.contains(&claim.id));
+        if claim.is_supported && claim.status == wenyuan_core::EvidenceStatus::Proposed {
+            claim.status = wenyuan_core::EvidenceStatus::Verified;
+        }
+    }
+
+    (claims, evidence, assessments, links)
+}
+
+fn short_hash(value: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    value.hash(&mut hasher);
+    format!("{:x}", hasher.finish())
 }
 
 fn unknown_provider_error() -> ProviderError {
@@ -1091,6 +1733,67 @@ fn normalize_for_metric(value: &str) -> String {
         .collect()
 }
 
+fn truncate_for_repair(value: &str) -> String {
+    const MAX_CHARS: usize = 6000;
+    let mut output = String::new();
+    for ch in value.chars().take(MAX_CHARS) {
+        output.push(ch);
+    }
+    if value.chars().count() > MAX_CHARS {
+        output.push_str("\n...[truncated]");
+    }
+    output
+}
+
+fn parse_model_json<T>(content: &str) -> Result<T, serde_json::Error>
+where
+    T: for<'de> Deserialize<'de>,
+{
+    serde_json::from_str(content).or_else(|_| serde_json::from_str(strip_markdown_json(content)))
+}
+
+fn strip_markdown_json(content: &str) -> &str {
+    let trimmed = content.trim();
+    let Some(rest) = trimmed.strip_prefix("```") else {
+        return trimmed;
+    };
+    let rest = rest
+        .strip_prefix("json")
+        .or_else(|| rest.strip_prefix("JSON"))
+        .unwrap_or(rest)
+        .trim_start_matches(|ch: char| ch.is_whitespace());
+    rest.strip_suffix("```").map(str::trim).unwrap_or(rest)
+}
+
+fn deserialize_uuid_vec_lossy<'de, D>(deserializer: D) -> Result<Vec<Uuid>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let values = Vec::<String>::deserialize(deserializer)?;
+    Ok(values
+        .into_iter()
+        .filter_map(|value| Uuid::parse_str(value.trim()).ok())
+        .collect())
+}
+
+fn deserialize_boolish<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(match value {
+        serde_json::Value::Bool(value) => value,
+        serde_json::Value::Number(value) => value.as_i64().unwrap_or_default() != 0,
+        serde_json::Value::String(value) => {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "true" | "yes" | "y" | "support" | "supported" | "approve" | "approved" | "1"
+            )
+        }
+        _ => false,
+    })
+}
+
 fn token_set(value: &str) -> HashSet<String> {
     value
         .split(|ch: char| ch.is_whitespace() || ch.is_ascii_punctuation())
@@ -1123,6 +1826,7 @@ struct CritiqueOutput {
 
 #[derive(Debug, Deserialize)]
 struct RawCritique {
+    #[serde(alias = "seat")]
     target_seat: SeatKind,
     strongest_point: String,
     weakest_point: String,
@@ -1137,9 +1841,11 @@ struct RawCritique {
 
 #[derive(Debug, Deserialize)]
 struct ProposalOutput {
-    title: String,
-    summary: String,
     #[serde(default)]
+    title: String,
+    #[serde(default)]
+    summary: String,
+    #[serde(default, deserialize_with = "deserialize_uuid_vec_lossy")]
     source_idea_ids: Vec<Uuid>,
     #[serde(default)]
     adopted_points: Vec<String>,
@@ -1149,9 +1855,13 @@ struct ProposalOutput {
     rejection_reasons: Vec<String>,
     #[serde(default)]
     changes_from_initial: Vec<String>,
+    #[serde(default, alias = "value", alias = "user_benefit")]
     user_value: String,
+    #[serde(default, alias = "implementation_plan", alias = "action_plan")]
     implementation_path: String,
+    #[serde(default)]
     risks: Vec<String>,
+    #[serde(default, alias = "metrics", alias = "success_criteria")]
     success_metrics: Vec<String>,
     #[serde(default)]
     confidence: f32,
@@ -1164,15 +1874,28 @@ struct VoteOutput {
 
 #[derive(Debug, Deserialize)]
 struct RawVote {
+    #[serde(alias = "proposal_id", alias = "proposal", alias = "choice")]
     proposal_ref: String,
+    #[serde(default)]
     value_score: u8,
+    #[serde(default)]
     novelty_score: u8,
+    #[serde(default)]
     feasibility_score: u8,
+    #[serde(default)]
     risk_score: u8,
+    #[serde(default)]
     roi_score: u8,
+    #[serde(default, deserialize_with = "deserialize_boolish")]
     final_choice: bool,
+    #[serde(default)]
     reason: String,
+    #[serde(default)]
     confidence: f32,
+    #[serde(default)]
+    key_evidence: String,
+    #[serde(default)]
+    blocking_issue: String,
 }
 
 pub fn has_duplicate_phase_start(events: &[String], phase: &str) -> bool {
@@ -1271,7 +1994,7 @@ mod tests {
     fn prompt_versions_are_seat_specific() {
         let prompts = SeatKind::ALL.map(prompt_config);
         assert_eq!(prompts[0].version, "mouyuan-v1");
-        assert_eq!(prompts[1].temperature, 0.4);
+        assert_eq!(prompts[1].max_tokens, 32_000);
         assert!(prompts[2].content.contains("持正席"));
     }
 
@@ -1449,5 +2172,173 @@ mod tests {
             &artifacts.events,
             "independent_deliberation"
         ));
+    }
+
+    #[tokio::test]
+    async fn mock_discussion_sets_idea_statuses() {
+        let artifacts = runner(MockScenario::SuccessMajority)
+            .run_session(
+                Session::new("title", "topic", ""),
+                CancellationFlag::default(),
+            )
+            .await
+            .unwrap();
+        let ideas = &artifacts.ideas;
+        assert!(!ideas.is_empty());
+        for idea in ideas {
+            assert!(
+                matches!(
+                    idea.status,
+                    IdeaStatus::Challenged
+                        | IdeaStatus::Shortlisted
+                        | IdeaStatus::Adopted
+                        | IdeaStatus::Rejected
+                ),
+                "unexpected status {:?} for idea '{}'",
+                idea.status,
+                idea.title
+            );
+            if idea.status == IdeaStatus::Adopted {
+                assert!(!idea.referenced_by_proposals.is_empty());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn mock_discussion_publishes_evidence_pool() {
+        let artifacts = runner(MockScenario::SuccessMajority)
+            .run_session(
+                Session::new("title", "topic", ""),
+                CancellationFlag::default(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            !artifacts.claims.is_empty(),
+            "claims should be extracted from ideas"
+        );
+        assert!(
+            !artifacts.evidence.is_empty(),
+            "evidence should be extracted"
+        );
+        for claim in &artifacts.claims {
+            assert!(!claim.content.trim().is_empty());
+            assert!(!claim.context.trim().is_empty());
+        }
+        for ev in &artifacts.evidence {
+            assert!(!ev.content.trim().is_empty());
+            assert!(matches!(
+                ev.kind,
+                wenyuan_core::EvidenceKind::Fact
+                    | wenyuan_core::EvidenceKind::Inference
+                    | wenyuan_core::EvidenceKind::Preference
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn smoke_test_five_complete_runs_with_phase4_data() {
+        for index in 0..5 {
+            let artifacts = runner(MockScenario::SuccessMajority)
+                .run_session(
+                    Session::new(format!("smoke {index}"), "topic", ""),
+                    CancellationFlag::default(),
+                )
+                .await
+                .unwrap();
+            assert!(
+                artifacts.decision.is_some(),
+                "run {index}: missing decision"
+            );
+            assert!(!artifacts.ideas.is_empty(), "run {index}: no ideas");
+            assert!(!artifacts.claims.is_empty(), "run {index}: no claims");
+            assert!(!artifacts.evidence.is_empty(), "run {index}: no evidence");
+
+            let adopted = artifacts
+                .ideas
+                .iter()
+                .filter(|i| matches!(i.status, IdeaStatus::Adopted))
+                .count();
+            let shortlisted = artifacts
+                .ideas
+                .iter()
+                .filter(|i| matches!(i.status, IdeaStatus::Shortlisted))
+                .count();
+            let challenged = artifacts
+                .ideas
+                .iter()
+                .filter(|i| matches!(i.status, IdeaStatus::Challenged))
+                .count();
+            assert!(
+                adopted + shortlisted + challenged == artifacts.ideas.len()
+                    || artifacts
+                        .ideas
+                        .iter()
+                        .any(|i| matches!(i.status, IdeaStatus::Rejected)),
+                "run {index}: ideas should be in a valid lifecycle state (adopted={adopted}, shortlisted={shortlisted}, challenged={challenged}, total={})",
+                artifacts.ideas.len()
+            );
+
+            let proposal_ids: Vec<Uuid> = artifacts.proposals.iter().map(|p| p.id).collect();
+            for idea in &artifacts.ideas {
+                if !idea.referenced_by_proposals.is_empty() {
+                    for ref_id in &idea.referenced_by_proposals {
+                        assert!(
+                            proposal_ids.contains(ref_id),
+                            "run {index}: idea references unknown proposal {ref_id}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn split_then_convergence_merges_with_minority_choices() {
+        let artifacts = runner(MockScenario::SplitThenConvergence)
+            .run_session(
+                Session::new("title", "topic", ""),
+                CancellationFlag::default(),
+            )
+            .await
+            .unwrap();
+        let decision = artifacts.decision.unwrap();
+        assert_eq!(decision.status, DecisionStatus::NoMajority);
+        assert!(decision.minority_choices.len() >= 2);
+        let chizheng = decision
+            .minority_choices
+            .iter()
+            .find(|m| m.seat == SeatKind::Chizheng)
+            .expect("持正席 should be in minority");
+        assert!(!chizheng.reassessment_condition.is_empty());
+        assert!(chizheng.has_risk_warning);
+        assert!(!decision.reassessment_conditions.is_empty());
+        let has_merged = artifacts
+            .proposals
+            .iter()
+            .any(|p| p.title.contains("合案") || p.source_idea_ids.len() >= 2);
+        assert!(has_merged, "convergence should produce a merged proposal");
+    }
+
+    #[tokio::test]
+    async fn smoke_test_five_runs_voting_strategy_fields() {
+        for index in 0..5 {
+            let artifacts = runner(MockScenario::SuccessMajority)
+                .run_session(
+                    Session::new(format!("phase5-smoke {index}"), "topic", ""),
+                    CancellationFlag::default(),
+                )
+                .await
+                .unwrap();
+            let decision = artifacts.decision.unwrap();
+            assert!(
+                decision.minority_choices.is_empty(),
+                "unanimous majority should have no minority in run {index}"
+            );
+            assert!(
+                !decision.has_risk_blocker,
+                "no risk blocker expected in run {index}"
+            );
+        }
     }
 }

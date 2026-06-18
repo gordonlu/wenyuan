@@ -6,7 +6,7 @@ use std::str::FromStr;
 use thiserror::Error;
 use uuid::Uuid;
 use wenyuan_agent::{DiscussionArtifacts, SeatRunStatus, SeatRunTrace, system_prompt};
-use wenyuan_core::{ChatMessage, SeatKind, Session, SessionPhase};
+use wenyuan_core::{ChatMessage, DeliberationMode, SeatKind, Session, SessionPhase};
 
 #[derive(Debug, Error)]
 pub enum StoreError {
@@ -39,6 +39,7 @@ impl Store {
         store.ensure_session_execution_columns().await?;
         store.ensure_seat_conversation_columns().await?;
         store.ensure_seat_run_trace_columns().await?;
+        store.ensure_model_config_column().await?;
         Ok(store)
     }
 
@@ -162,6 +163,22 @@ impl Store {
         Ok(())
     }
 
+    async fn ensure_model_config_column(&self) -> Result<(), StoreError> {
+        let rows = sqlx::query("pragma table_info(sessions)")
+            .fetch_all(&self.pool)
+            .await?;
+        let columns: std::collections::HashSet<String> = rows
+            .into_iter()
+            .filter_map(|row| row.try_get::<String, _>("name").ok())
+            .collect();
+        if !columns.contains("model_config") {
+            sqlx::query("alter table sessions add column model_config text")
+                .execute(&self.pool)
+                .await?;
+        }
+        Ok(())
+    }
+
     pub async fn create_session(&self, session: &Session) -> Result<(), StoreError> {
         self.create_session_with_provider_refs(session, &HashMap::new())
             .await
@@ -175,13 +192,14 @@ impl Store {
         let mut tx = self.pool.begin().await?;
         sqlx::query(
             "insert into sessions
-            (id, title, topic, context, phase, created_at, updated_at, result_json, failure_reason, convergence_used, artifacts_json, recovery_state)
-            values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            (id, title, topic, context, mode, phase, created_at, updated_at, result_json, failure_reason, convergence_used, artifacts_json, recovery_state, model_config)
+            values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
         )
         .bind(session.id.to_string())
         .bind(&session.title)
         .bind(&session.topic)
         .bind(&session.context)
+        .bind(mode_to_string(session.mode))
         .bind(phase_to_string(session.phase))
         .bind(session.created_at.to_rfc3339())
         .bind(session.updated_at.to_rfc3339())
@@ -190,9 +208,14 @@ impl Store {
         .bind(session.convergence_used)
         .bind(serde_json::to_string(&DiscussionArtifacts::default())?)
         .bind("idle")
+        .bind(optional_json(&session.model_config)?)
         .execute(&mut *tx)
         .await?;
-        for seat in SeatKind::ALL {
+        let seats: &[SeatKind] = match session.mode {
+            DeliberationMode::SingleAgent => &SeatKind::SINGLE,
+            DeliberationMode::ThreeSeat => &SeatKind::ALL,
+        };
+        for &seat in seats {
             let conversation = vec![ChatMessage {
                 role: "system".into(),
                 content: system_prompt(seat).to_string(),
@@ -228,8 +251,15 @@ impl Store {
     }
 
     pub async fn update_session(&self, session: &Session) -> Result<(), StoreError> {
+        // Read current phase to detect transition
+        let old_phase: String = sqlx::query_scalar("select phase from sessions where id = ?1")
+            .bind(session.id.to_string())
+            .fetch_optional(&self.pool)
+            .await?
+            .unwrap_or_default();
+
         sqlx::query(
-            "update sessions set phase = ?2, updated_at = ?3, result_json = ?4, failure_reason = ?5, convergence_used = ?6 where id = ?1",
+            "update sessions set phase = ?2, updated_at = ?3, result_json = ?4, failure_reason = ?5, convergence_used = ?6, model_config = ?7 where id = ?1",
         )
         .bind(session.id.to_string())
         .bind(phase_to_string(session.phase))
@@ -237,7 +267,47 @@ impl Store {
         .bind(optional_json(&session.result)?)
         .bind(&session.failure_reason)
         .bind(session.convergence_used)
+        .bind(optional_json(&session.model_config)?)
         .execute(&self.pool)
+        .await?;
+
+        let new_phase = phase_to_string(session.phase);
+        if old_phase != new_phase {
+            self.append_event(
+                session.id,
+                "phase_changed",
+                serde_json::json!({"from": old_phase, "to": new_phase}),
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    pub async fn update_session_phase(
+        &self,
+        session_id: Uuid,
+        phase: SessionPhase,
+    ) -> Result<(), StoreError> {
+        let old_phase: String = sqlx::query_scalar("select phase from sessions where id = ?1")
+            .bind(session_id.to_string())
+            .fetch_optional(&self.pool)
+            .await?
+            .unwrap_or_default();
+        let new_phase = phase_to_string(phase);
+        if old_phase == new_phase {
+            return Ok(());
+        }
+        sqlx::query("update sessions set phase = ?2, updated_at = ?3 where id = ?1")
+            .bind(session_id.to_string())
+            .bind(new_phase)
+            .bind(Utc::now().to_rfc3339())
+            .execute(&self.pool)
+            .await?;
+        self.append_event(
+            session_id,
+            "phase_changed",
+            serde_json::json!({"from": old_phase, "to": new_phase}),
+        )
         .await?;
         Ok(())
     }
@@ -261,6 +331,22 @@ impl Store {
             .execute(&mut *tx)
             .await?;
         sqlx::query("delete from votes where session_id = ?1")
+            .bind(session_id.to_string())
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("delete from claims where session_id = ?1")
+            .bind(session_id.to_string())
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("delete from evidence where session_id = ?1")
+            .bind(session_id.to_string())
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("delete from assessments where session_id = ?1")
+            .bind(session_id.to_string())
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("delete from claim_evidence_links where session_id = ?1")
             .bind(session_id.to_string())
             .execute(&mut *tx)
             .await?;
@@ -299,6 +385,42 @@ impl Store {
                 .bind(format!("{:?}", vote.voter))
                 .bind(vote.proposal_id.to_string())
                 .bind(serde_json::to_string(vote)?)
+                .execute(&mut *tx)
+                .await?;
+        }
+        for claim in &artifacts.claims {
+            sqlx::query("insert into claims (id, session_id, proposed_by, data_json) values (?1, ?2, ?3, ?4)")
+                .bind(claim.id.to_string())
+                .bind(session_id.to_string())
+                .bind(format!("{:?}", claim.proposed_by))
+                .bind(serde_json::to_string(claim)?)
+                .execute(&mut *tx)
+                .await?;
+        }
+        for ev in &artifacts.evidence {
+            sqlx::query("insert into evidence (id, session_id, proposed_by, data_json) values (?1, ?2, ?3, ?4)")
+                .bind(ev.id.to_string())
+                .bind(session_id.to_string())
+                .bind(format!("{:?}", ev.proposed_by))
+                .bind(serde_json::to_string(ev)?)
+                .execute(&mut *tx)
+                .await?;
+        }
+        for assessment in &artifacts.assessments {
+            sqlx::query("insert into assessments (id, session_id, assessor, data_json) values (?1, ?2, ?3, ?4)")
+                .bind(assessment.id.to_string())
+                .bind(session_id.to_string())
+                .bind(format!("{:?}", assessment.assessor))
+                .bind(serde_json::to_string(assessment)?)
+                .execute(&mut *tx)
+                .await?;
+        }
+        for link in &artifacts.claim_evidence_links {
+            sqlx::query("insert into claim_evidence_links (claim_id, evidence_id, session_id, link_type) values (?1, ?2, ?3, ?4)")
+                .bind(link.claim_id.to_string())
+                .bind(link.evidence_id.to_string())
+                .bind(session_id.to_string())
+                .bind(&link.link_type)
                 .execute(&mut *tx)
                 .await?;
         }
@@ -383,7 +505,16 @@ impl Store {
         .bind(Utc::now().to_rfc3339())
         .execute(&mut *tx)
         .await?;
-        for table in ["ideas", "critiques", "proposals", "votes"] {
+        for table in [
+            "ideas",
+            "critiques",
+            "proposals",
+            "votes",
+            "claims",
+            "evidence",
+            "assessments",
+            "claim_evidence_links",
+        ] {
             let statement = format!("delete from {table} where session_id = ?1");
             sqlx::query(&statement)
                 .bind(session_id.to_string())
@@ -579,7 +710,7 @@ impl Store {
 
     pub async fn list_sessions(&self) -> Result<Vec<SessionSummary>, StoreError> {
         let rows = sqlx::query(
-            "select id, title, phase, created_at, updated_at, result_json from sessions order by created_at desc",
+            "select id, title, mode, phase, created_at, updated_at, result_json from sessions order by created_at desc",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -593,17 +724,34 @@ impl Store {
             .await?
             .ok_or(StoreError::NotFound)?;
         let artifacts_json: Option<String> = row.try_get("artifacts_json")?;
+        let mut artifacts: DiscussionArtifacts = artifacts_json
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()?
+            .unwrap_or_default();
+        artifacts.seat_runs = self.seat_runs(id).await?;
         Ok(SessionDetails {
             session: session_from_row(&row)?,
-            artifacts: artifacts_json
-                .as_deref()
-                .map(serde_json::from_str)
-                .transpose()?
-                .unwrap_or_default(),
+            artifacts,
             seats: self.seats(id).await?,
             execution: self.execution_info(id).await?,
             events: self.events(id).await?,
         })
+    }
+
+    pub async fn seat_runs(&self, session_id: Uuid) -> Result<Vec<SeatRunTrace>, StoreError> {
+        let rows = sqlx::query(
+            "select id, session_id, seat_kind, phase, status, raw_output, error,
+                    prompt_version, repair_attempted, duration_ms, prompt_tokens,
+                    completion_tokens, total_tokens, upstream_status
+             from seat_runs
+             where session_id = ?1
+             order by rowid asc",
+        )
+        .bind(session_id.to_string())
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(seat_run_from_row).collect()
     }
 
     pub async fn seats(&self, session_id: Uuid) -> Result<Vec<SeatRecord>, StoreError> {
@@ -665,12 +813,155 @@ impl Store {
         .await?;
         rows.into_iter().map(event_from_row).collect()
     }
+
+    pub async fn pause_session(&self, id: Uuid) -> Result<(), StoreError> {
+        sqlx::query(
+            "update sessions
+             set execution_token = null,
+                 lease_expires_at = null,
+                 recovery_state = 'paused',
+                 updated_at = ?2
+             where id = ?1",
+        )
+        .bind(id.to_string())
+        .bind(Utc::now().to_rfc3339())
+        .execute(&self.pool)
+        .await?;
+        self.append_event(id, "session_paused", serde_json::json!({}))
+            .await?;
+        Ok(())
+    }
+
+    pub async fn resume_session(&self, id: Uuid) -> Result<(), StoreError> {
+        sqlx::query("update sessions set recovery_state = 'idle', updated_at = ?2 where id = ?1")
+            .bind(id.to_string())
+            .bind(Utc::now().to_rfc3339())
+            .execute(&self.pool)
+            .await?;
+        self.append_event(id, "session_resumed", serde_json::json!({}))
+            .await?;
+        Ok(())
+    }
+
+    pub async fn update_session_context(&self, id: Uuid, context: &str) -> Result<(), StoreError> {
+        sqlx::query("update sessions set context = ?2, updated_at = ?3 where id = ?1")
+            .bind(id.to_string())
+            .bind(context)
+            .bind(Utc::now().to_rfc3339())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn retry_seat(&self, session_id: Uuid, seat: SeatKind) -> Result<(), StoreError> {
+        sqlx::query(
+            "update seats set status = 'pending', last_error = null where session_id = ?1 and seat_kind = ?2",
+        )
+        .bind(session_id.to_string())
+        .bind(seat_to_string(seat))
+        .execute(&self.pool)
+        .await?;
+        self.append_event(
+            session_id,
+            "seat_retry_prepared",
+            serde_json::json!({"seat": seat}),
+        )
+        .await?;
+        Ok(())
+    }
+
+    pub async fn retry_phase(&self, session_id: Uuid) -> Result<(), StoreError> {
+        let row = sqlx::query("select mode from sessions where id = ?1")
+            .bind(session_id.to_string())
+            .fetch_optional(&self.pool)
+            .await?
+            .ok_or(StoreError::NotFound)?;
+        let mode: String = row.try_get("mode")?;
+        let seats: &[SeatKind] = if mode == "single_agent" {
+            &SeatKind::SINGLE
+        } else {
+            &SeatKind::ALL
+        };
+        let empty_artifacts = serde_json::to_string(&DiscussionArtifacts::default())?;
+        sqlx::query(
+            "update sessions
+             set phase = 'draft',
+                 result_json = null,
+                 failure_reason = null,
+                 convergence_used = 0,
+                 artifacts_json = ?2,
+                 execution_token = null,
+                 lease_expires_at = null,
+                 recovery_state = 'idle',
+                 updated_at = ?3
+             where id = ?1",
+        )
+        .bind(session_id.to_string())
+        .bind(empty_artifacts)
+        .bind(Utc::now().to_rfc3339())
+        .execute(&self.pool)
+        .await?;
+        for &seat in seats {
+            sqlx::query(
+                "update seats set status = 'pending', last_error = null where session_id = ?1 and seat_kind = ?2",
+            )
+            .bind(session_id.to_string())
+            .bind(seat_to_string(seat))
+            .execute(&self.pool)
+            .await?;
+        }
+        self.append_event(
+            session_id,
+            "phase_retry_prepared",
+            serde_json::json!({"mode": mode}),
+        )
+        .await?;
+        Ok(())
+    }
+
+    pub async fn manual_revision_trigger(&self, id: Uuid) -> Result<(), StoreError> {
+        let empty_artifacts = serde_json::to_string(&DiscussionArtifacts::default())?;
+        sqlx::query(
+            "update sessions
+             set phase = 'revision',
+                 artifacts_json = ?2,
+                 updated_at = ?3
+             where id = ?1
+               and phase in ('independent_deliberation', 'cross_critique')",
+        )
+        .bind(id.to_string())
+        .bind(empty_artifacts)
+        .bind(Utc::now().to_rfc3339())
+        .execute(&self.pool)
+        .await?;
+        self.append_event(id, "manual_revision_triggered", serde_json::json!({}))
+            .await?;
+        Ok(())
+    }
+
+    pub async fn phase_trajectory(
+        &self,
+        session_id: Uuid,
+    ) -> Result<Vec<SessionEvent>, StoreError> {
+        let rows = sqlx::query(
+            "select id, session_id, event_type, payload_json, created_at
+             from session_events
+             where session_id = ?1
+               and event_type like 'phase_%'
+             order by id asc",
+        )
+        .bind(session_id.to_string())
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(event_from_row).collect()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionSummary {
     pub id: Uuid,
     pub title: String,
+    pub mode: DeliberationMode,
     pub phase: SessionPhase,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -719,6 +1010,7 @@ create table if not exists sessions (
     title text not null,
     topic text not null,
     context text not null,
+    mode text not null default 'three_seat',
     phase text not null,
     created_at text not null,
     updated_at text not null,
@@ -794,6 +1086,31 @@ create table if not exists session_events (
     payload_json text not null,
     created_at text not null
 );
+create table if not exists claims (
+    id text primary key,
+    session_id text not null,
+    proposed_by text not null,
+    data_json text not null
+);
+create table if not exists evidence (
+    id text primary key,
+    session_id text not null,
+    proposed_by text not null,
+    data_json text not null
+);
+create table if not exists assessments (
+    id text primary key,
+    session_id text not null,
+    assessor text not null,
+    data_json text not null
+);
+create table if not exists claim_evidence_links (
+    claim_id text not null,
+    evidence_id text not null,
+    session_id text not null,
+    link_type text not null,
+    primary key (claim_id, evidence_id)
+);
 "#;
 
 fn optional_json<T: Serialize>(value: &Option<T>) -> Result<Option<String>, serde_json::Error> {
@@ -828,6 +1145,20 @@ fn parse_phase(value: &str) -> SessionPhase {
     }
 }
 
+fn mode_to_string(mode: DeliberationMode) -> &'static str {
+    match mode {
+        DeliberationMode::ThreeSeat => "three_seat",
+        DeliberationMode::SingleAgent => "single_agent",
+    }
+}
+
+fn parse_mode(value: &str) -> DeliberationMode {
+    match value {
+        "single_agent" => DeliberationMode::SingleAgent,
+        _ => DeliberationMode::ThreeSeat,
+    }
+}
+
 fn seat_to_string(seat: SeatKind) -> &'static str {
     match seat {
         SeatKind::Mouyuan => "mouyuan",
@@ -850,12 +1181,14 @@ fn parse_time(value: String) -> Result<DateTime<Utc>, StoreError> {
 
 fn session_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Session, StoreError> {
     let result_json: Option<String> = row.try_get("result_json")?;
+    let model_config_json: Option<String> = row.try_get("model_config").ok().flatten();
     Ok(Session {
         id: Uuid::parse_str(&row.try_get::<String, _>("id")?)
             .map_err(|err| sqlx::Error::Decode(Box::new(err)))?,
         title: row.try_get("title")?,
         topic: row.try_get("topic")?,
         context: row.try_get("context")?,
+        mode: parse_mode(&row.try_get::<String, _>("mode").unwrap_or_default()),
         phase: parse_phase(&row.try_get::<String, _>("phase")?),
         created_at: parse_time(row.try_get("created_at")?)?,
         updated_at: parse_time(row.try_get("updated_at")?)?,
@@ -865,6 +1198,10 @@ fn session_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Session, StoreError
             .transpose()?,
         failure_reason: row.try_get("failure_reason")?,
         convergence_used: row.try_get("convergence_used")?,
+        model_config: model_config_json
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()?,
     })
 }
 
@@ -874,6 +1211,7 @@ fn summary_from_row(row: sqlx::sqlite::SqliteRow) -> Result<SessionSummary, Stor
         id: Uuid::parse_str(&row.try_get::<String, _>("id")?)
             .map_err(|err| sqlx::Error::Decode(Box::new(err)))?,
         title: row.try_get("title")?,
+        mode: parse_mode(&row.try_get::<String, _>("mode").unwrap_or_default()),
         phase: parse_phase(&row.try_get::<String, _>("phase")?),
         created_at: parse_time(row.try_get("created_at")?)?,
         updated_at: parse_time(row.try_get("updated_at")?)?,
@@ -908,6 +1246,43 @@ fn seat_from_row(row: sqlx::sqlite::SqliteRow) -> Result<SeatRecord, StoreError>
         system_prompt: row.try_get("system_prompt")?,
         conversation: serde_json::from_str(&conversation_json)?,
         provider_ref: row.try_get("provider_ref")?,
+    })
+}
+
+fn seat_run_from_row(row: sqlx::sqlite::SqliteRow) -> Result<SeatRunTrace, StoreError> {
+    let status = match row.try_get::<String, _>("status")?.as_str() {
+        "completed" => SeatRunStatus::Completed,
+        _ => SeatRunStatus::Failed,
+    };
+    let duration_ms = row
+        .try_get::<Option<String>, _>("duration_ms")?
+        .and_then(|value| value.parse::<u128>().ok())
+        .unwrap_or_default();
+    Ok(SeatRunTrace {
+        id: Uuid::parse_str(&row.try_get::<String, _>("id")?)
+            .map_err(|err| sqlx::Error::Decode(Box::new(err)))?,
+        session_id: Uuid::parse_str(&row.try_get::<String, _>("session_id")?)
+            .map_err(|err| sqlx::Error::Decode(Box::new(err)))?,
+        seat: parse_seat(&row.try_get::<String, _>("seat_kind")?),
+        phase: parse_phase(&row.try_get::<String, _>("phase")?),
+        status,
+        prompt_version: row.try_get("prompt_version")?,
+        repair_attempted: row.try_get::<i64, _>("repair_attempted")? != 0,
+        raw_output: row.try_get("raw_output")?,
+        error: row.try_get("error")?,
+        duration_ms,
+        prompt_tokens: row
+            .try_get::<Option<i64>, _>("prompt_tokens")?
+            .map(|value| value as u32),
+        completion_tokens: row
+            .try_get::<Option<i64>, _>("completion_tokens")?
+            .map(|value| value as u32),
+        total_tokens: row
+            .try_get::<Option<i64>, _>("total_tokens")?
+            .map(|value| value as u32),
+        upstream_status: row
+            .try_get::<Option<i64>, _>("upstream_status")?
+            .map(|value| value as u16),
     })
 }
 
@@ -1228,6 +1603,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pause_clears_active_execution_without_marking_failed() {
+        let store = Store::connect("sqlite::memory:").await.unwrap();
+        let session = Session::new("议题", "暂停清理 lease", "");
+        let id = session.id;
+        store.create_session(&session).await.unwrap();
+        let token = store.try_acquire_execution(id, 60).await.unwrap().unwrap();
+
+        store.pause_session(id).await.unwrap();
+        let details = store.get_session(id).await.unwrap();
+
+        assert!(!store.is_execution_active(id, token).await.unwrap());
+        assert_eq!(details.session.phase, SessionPhase::Draft);
+        assert!(!details.execution.running);
+        assert_eq!(details.execution.recovery_state, "paused");
+    }
+
+    #[tokio::test]
+    async fn retry_phase_resets_session_to_runnable_draft() {
+        let store = Store::connect("sqlite::memory:").await.unwrap();
+        let session = Session::new("议题", "重试阶段", "");
+        let id = session.id;
+        store.create_session(&session).await.unwrap();
+        store.fail_session(id, None, "mock failure").await.unwrap();
+
+        store.retry_phase(id).await.unwrap();
+        let details = store.get_session(id).await.unwrap();
+
+        assert_eq!(details.session.phase, SessionPhase::Draft);
+        assert!(details.session.failure_reason.is_none());
+        assert!(!details.execution.running);
+        assert_eq!(details.execution.recovery_state, "idle");
+    }
+
+    #[tokio::test]
     async fn failed_raw_outputs_can_be_persisted_for_diagnostics() {
         let store = Store::connect("sqlite::memory:").await.unwrap();
         let session = Session::new("议题", "保存失败原始输出", "");
@@ -1278,5 +1687,126 @@ mod tests {
         assert!(details.session.failure_reason.is_none());
         assert_eq!(store.count_seat_runs(id).await.unwrap(), previous_runs);
         assert!(store.try_acquire_execution(id, 60).await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn evidence_pool_is_persisted_and_reloaded() {
+        let store = Store::connect("sqlite::memory:").await.unwrap();
+        let session = Session::new("证据池持久化", "验证 claims/evidence 写入读取", "");
+        let id = session.id;
+        store.create_session(&session).await.unwrap();
+        let runner = AgentRunner::new(Arc::new(MockProvider::new(MockScenario::SuccessMajority)));
+        let artifacts = runner
+            .run_session(session, CancellationFlag::default())
+            .await
+            .unwrap();
+        assert!(
+            !artifacts.claims.is_empty(),
+            "claims should exist before persistence"
+        );
+
+        store.save_artifacts(id, &artifacts).await.unwrap();
+        let details = store.get_session(id).await.unwrap();
+
+        assert!(
+            !details.artifacts.claims.is_empty(),
+            "claims should be reloaded"
+        );
+        assert!(
+            !details.artifacts.evidence.is_empty(),
+            "evidence should be reloaded"
+        );
+        assert_eq!(
+            details.artifacts.claims.len(),
+            artifacts.claims.len(),
+            "claim count should match after reload"
+        );
+        assert_eq!(
+            details.artifacts.evidence.len(),
+            artifacts.evidence.len(),
+            "evidence count should match after reload"
+        );
+
+        for claim in &details.artifacts.claims {
+            assert!(!claim.content.trim().is_empty());
+            assert!(!claim.context.trim().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn enhanced_decision_fields_are_persisted_and_reloaded() {
+        let store = Store::connect("sqlite::memory:").await.unwrap();
+        let session = Session::new("决策字段持久化", "验证 Phase5 增强字段读写", "");
+        let id = session.id;
+        store.create_session(&session).await.unwrap();
+        let runner = AgentRunner::new(Arc::new(MockProvider::new(
+            MockScenario::SplitThenConvergence,
+        )));
+        let artifacts = runner
+            .run_session(session, CancellationFlag::default())
+            .await
+            .unwrap();
+        let decision = artifacts.decision.as_ref().unwrap();
+        assert!(
+            !decision.minority_choices.is_empty(),
+            "minority_choices should exist"
+        );
+
+        store.save_artifacts(id, &artifacts).await.unwrap();
+        let details = store.get_session(id).await.unwrap();
+        let reloaded = details.artifacts.decision.unwrap();
+
+        assert_eq!(
+            reloaded.minority_choices.len(),
+            decision.minority_choices.len(),
+            "minority_choices count should match after reload"
+        );
+        assert_eq!(
+            reloaded.has_risk_blocker, decision.has_risk_blocker,
+            "has_risk_blocker should match after reload"
+        );
+        assert_eq!(
+            reloaded.reassessment_conditions.len(),
+            decision.reassessment_conditions.len(),
+            "reassessment_conditions count should match after reload"
+        );
+        assert_eq!(
+            reloaded.unresolved_questions.len(),
+            decision.unresolved_questions.len(),
+            "unresolved_questions count should match after reload"
+        );
+
+        if !reloaded.minority_choices.is_empty() {
+            let first = &reloaded.minority_choices[0];
+            assert!(!first.reason.is_empty(), "minority reason should persist");
+            assert!(
+                !first.reassessment_condition.is_empty(),
+                "minority reassessment_condition should persist"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn phase_transitions_are_logged_as_events() {
+        let store = Store::connect("sqlite::memory:").await.unwrap();
+
+        // Verify update_session logs phase_changed events
+        let mut s2 = Session::new("阶段变更日志", "", "");
+        store.create_session(&s2).await.unwrap();
+        s2.phase = SessionPhase::IndependentDeliberation;
+        store.update_session(&s2).await.unwrap();
+        s2.phase = SessionPhase::Completed;
+        store.update_session(&s2).await.unwrap();
+
+        let events = store.events(s2.id).await.unwrap();
+        let changed: Vec<_> = events
+            .iter()
+            .filter(|e| e.event_type == "phase_changed")
+            .collect();
+        assert_eq!(changed.len(), 2, "should log 2 phase_changed events");
+
+        // Verify the session row matches the final phase
+        let details = store.get_session(s2.id).await.unwrap();
+        assert_eq!(details.session.phase, SessionPhase::Completed);
     }
 }

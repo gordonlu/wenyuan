@@ -3,7 +3,7 @@
     <aside class="side">
       <RouterLink class="brand" to="/">
         <span class="brand-mark">文</span>
-        <span>
+        <span class="brand-text">
           <strong>文渊阁</strong>
           <small>三席合议</small>
         </span>

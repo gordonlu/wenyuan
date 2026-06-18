@@ -2510,6 +2510,7 @@ dependencies = [
  "async-stream",
  "async-trait",
  "axum",
+ "dotenvy",
  "serde",
  "serde_json",
  "tokio",

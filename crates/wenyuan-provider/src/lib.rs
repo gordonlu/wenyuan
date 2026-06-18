@@ -17,9 +17,10 @@ pub struct LlmRequest {
     pub phase: SessionPhase,
     pub messages: Vec<ChatMessage>,
     pub repair_json: bool,
-    pub temperature: f32,
     pub max_tokens: u32,
     pub prompt_version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub override_model: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -122,7 +123,6 @@ impl OpenAiCompatibleProvider {
 struct OpenAiRequest<'a> {
     model: &'a str,
     messages: &'a [ChatMessage],
-    temperature: f32,
     max_tokens: u32,
 }
 
@@ -140,14 +140,17 @@ struct OpenAiChoice {
 #[async_trait]
 impl LlmProvider for OpenAiCompatibleProvider {
     async fn complete(&self, request: LlmRequest) -> Result<LlmResponse, ProviderError> {
+        let model = request
+            .override_model
+            .as_deref()
+            .unwrap_or(&self.config.model);
         let url = format!(
             "{}/chat/completions",
             self.config.base_url.trim_end_matches('/')
         );
         let body = OpenAiRequest {
-            model: &self.config.model,
+            model,
             messages: &request.messages,
-            temperature: request.temperature,
             max_tokens: request.max_tokens,
         };
         let response = self
@@ -346,6 +349,13 @@ fn vote_json(seat: SeatKind, scenario: MockScenario) -> String {
         },
         _ => "proposal_0",
     };
+    let (key_evidence, blocking_issue) = match (scenario, seat) {
+        (MockScenario::SplitThenConvergence, SeatKind::Chizheng) => (
+            "数据隐私和合规风险需优先评估".to_string(),
+            "多数策案未充分处理数据隐私问题".to_string(),
+        ),
+        _ => (String::new(), String::new()),
+    };
     serde_json::json!({
         "votes": [
             {
@@ -357,7 +367,9 @@ fn vote_json(seat: SeatKind, scenario: MockScenario) -> String {
                 "roi_score": 4,
                 "final_choice": true,
                 "reason": format!("{}认为该策案更容易形成闭环", seat.label()),
-                "confidence": 0.82
+                "confidence": 0.82,
+                "key_evidence": key_evidence,
+                "blocking_issue": blocking_issue
             }
         ]
     })
@@ -388,10 +400,32 @@ mod tests {
             phase: SessionPhase::IndependentDeliberation,
             messages: vec![],
             repair_json: false,
-            temperature: 0.7,
             max_tokens: 800,
             prompt_version: "test".into(),
+            override_model: None,
         }
+    }
+
+    #[tokio::test]
+    async fn per_request_model_override_is_used() {
+        let provider = OpenAiCompatibleProvider::new(OpenAiCompatibleConfig {
+            base_url: "http://127.0.0.1:1/v1".into(),
+            api_key: "test".into(),
+            model: "default-model".into(),
+        });
+        let request = LlmRequest {
+            session_id: Uuid::new_v4(),
+            seat: SeatKind::Mouyuan,
+            phase: SessionPhase::IndependentDeliberation,
+            messages: vec![],
+            repair_json: false,
+            max_tokens: 800,
+            prompt_version: "test".into(),
+            override_model: Some("override-model".into()),
+        };
+        // The request will fail due to connection refused, that's expected
+        let result = provider.complete(request).await;
+        assert!(result.is_err(), "should fail with connection error");
     }
 
     #[tokio::test]
@@ -422,9 +456,9 @@ mod tests {
                 phase: SessionPhase::IndependentDeliberation,
                 messages: vec![],
                 repair_json: false,
-                temperature: 0.7,
                 max_tokens: 800,
                 prompt_version: "test".into(),
+                override_model: None,
             })
             .await
             .unwrap();
@@ -441,9 +475,9 @@ mod tests {
                 phase: SessionPhase::IndependentDeliberation,
                 messages: vec![],
                 repair_json: false,
-                temperature: 0.7,
                 max_tokens: 800,
                 prompt_version: "test".into(),
+                override_model: None,
             })
             .await
             .unwrap();
@@ -455,9 +489,9 @@ mod tests {
                 phase: SessionPhase::IndependentDeliberation,
                 messages: vec![],
                 repair_json: true,
-                temperature: 0.7,
                 max_tokens: 800,
                 prompt_version: "test".into(),
+                override_model: None,
             })
             .await
             .unwrap();

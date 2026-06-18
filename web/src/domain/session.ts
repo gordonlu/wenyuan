@@ -37,6 +37,15 @@ export interface Decision {
   unresolved_questions: string[]
   next_steps: string[]
   self_vote_count: number
+  minority_choices?: Array<{
+    seat: SeatKind
+    proposal_id: string
+    reason: string
+    reassessment_condition: string
+    has_risk_warning: boolean
+  }>
+  reassessment_conditions?: string[]
+  has_risk_blocker?: boolean
 }
 
 export interface SessionRecord {
@@ -44,6 +53,7 @@ export interface SessionRecord {
   title: string
   topic: string
   context: string
+  mode: 'three_seat' | 'single_agent'
   phase: SessionPhase
   result?: Decision | null
   failure_reason?: string | null
@@ -52,6 +62,7 @@ export interface SessionRecord {
 export interface SessionSummary {
   id: string
   title: string
+  mode: 'three_seat' | 'single_agent'
   phase: SessionPhase
   created_at: string
   updated_at: string
@@ -65,35 +76,87 @@ export interface SessionEvent {
   created_at: string
 }
 
+export type IdeaStatus = 'proposed' | 'expanded' | 'challenged' | 'merged' | 'shortlisted' | 'rejected' | 'adopted'
+
+export type Critique = {
+  reviewer: SeatKind
+  target_seat: SeatKind
+  strongest_point?: string
+  weakest_point?: string
+  hidden_assumption?: string
+  challenge: string
+  counterexample?: string
+  suggested_improvement: string
+  evidence_question?: string
+}
+
+export type IdeaCard = {
+  id: string
+  proposed_by: SeatKind
+  source_seats?: SeatKind[]
+  title: string
+  summary: string
+  value: string
+  mechanism?: string
+  unconventional?: boolean
+  assumptions?: string[]
+  risks?: string[]
+  status?: IdeaStatus
+  challenged_by?: string[]
+  referenced_by_proposals?: string[]
+  merged_into?: string | null
+}
+
+export type Vote = {
+  voter: SeatKind
+  proposal_id: string
+  final_choice: boolean
+  reason: string
+  key_evidence?: string
+  blocking_issue?: string
+}
+
 export interface DiscussionArtifacts {
-  ideas: Array<{
-    id: string
-    proposed_by: SeatKind
-    source_seats?: SeatKind[]
-    title: string
-    summary: string
-    value: string
-    mechanism?: string
-    unconventional?: boolean
-    assumptions?: string[]
-    risks?: string[]
-  }>
-  critiques: Array<{
-    reviewer: SeatKind
-    target_seat: SeatKind
-    strongest_point?: string
-    weakest_point?: string
-    hidden_assumption?: string
-    challenge: string
-    counterexample?: string
-    suggested_improvement: string
-    evidence_question?: string
-  }>
+  ideas: IdeaCard[]
+  critiques: Critique[]
   proposals: Proposal[]
-  votes: Array<{ voter: SeatKind; proposal_id: string; final_choice: boolean; reason: string }>
+  votes: Vote[]
   seat_runs: SeatRunTrace[]
   decision?: Decision | null
   quality?: DiscussionQualityMetrics
+  claims?: Array<{
+    id: string
+    proposed_by: SeatKind
+    content: string
+    context: string
+    is_supported: boolean
+    evidence_ids?: string[]
+    assessment_ids?: string[]
+  }>
+  evidence?: Array<{
+    id: string
+    proposed_by: SeatKind
+    kind: 'fact' | 'inference' | 'preference'
+    content: string
+    source: string
+    source_fetched_at?: string | null
+    source_hash?: string | null
+    claim_ids?: string[]
+  }>
+  assessments?: Array<{
+    id: string
+    assessor: SeatKind
+    evidence_id: string
+    claim_id: string
+    supports_claim: boolean
+    reasoning: string
+    confidence: number
+  }>
+  claim_evidence_links?: Array<{
+    claim_id: string
+    evidence_id: string
+    link_type: string
+  }>
   events: string[]
 }
 
@@ -168,15 +231,33 @@ export interface ConfigStatus {
   provider_configured: boolean
   provider_kind: string
   model: string
-  seat_models?: Record<string, string>
+  seat_models: Record<string, string>
   database_url: string
   version: string
+  available_models: Array<{ value: string; label: string }>
+  seat_available_models: Record<string, Array<{ value: string; label: string }>>
 }
 
 export const seatLabels: Record<SeatKind, string> = {
   mouyuan: '谋远席',
   jingshi: '经世席',
   chizheng: '持正席',
+}
+
+export const ideaStatusLabels: Record<string, string> = {
+  proposed: '已提出',
+  expanded: '已扩展',
+  challenged: '受质疑',
+  merged: '已合并',
+  shortlisted: '入围策案',
+  rejected: '已拒绝',
+  adopted: '已采纳',
+}
+
+export const evidenceKindLabels: Record<string, string> = {
+  fact: '事实',
+  inference: '推断',
+  preference: '偏好',
 }
 
 export const phaseLabels: Record<SessionPhase, string> = {
@@ -191,21 +272,36 @@ export const phaseLabels: Record<SessionPhase, string> = {
   cancelled: '已取消',
 }
 
-export function seatStatus(phase: SessionPhase, seat: SeatKind, events: SessionEvent[] = []) {
+export const modeLabels: Record<string, string> = {
+  three_seat: '三席合议',
+  single_agent: '单 Agent',
+}
+
+export function seatStatus(phase: SessionPhase, seat: SeatKind, events: SessionEvent[] = [], running = false) {
   const latest = [...events]
     .reverse()
     .find((event) => ['seat_started', 'seat_completed', 'seat_failed'].includes(event.event_type) && eventPayloadIncludesSeat(event.payload, seat))
   if (latest?.event_type === 'seat_failed') return '失败'
-  if (latest?.event_type === 'seat_started') return '进行中'
+  if (latest?.event_type === 'seat_started') return running ? '思考中' : '进行中'
   if (latest?.event_type === 'seat_completed') return '已完成'
   if (phase === 'cancelled') return '已取消'
   if (phase === 'draft') return '待陈策'
+  if (running && ['independent_deliberation', 'cross_critique', 'revision', 'voting', 'convergence'].includes(phase)) return '等待'
   if (phase === 'independent_deliberation') return '陈策中'
   if (phase === 'cross_critique') return '批议中'
   if (phase === 'revision') return '已复议'
   if (phase === 'voting' || phase === 'convergence') return '已投策'
   if (phase === 'completed') return '已投策'
   return '失败'
+}
+
+export function seatStatusClass(phase: SessionPhase, seat: SeatKind, events: SessionEvent[] = [], running = false) {
+  const status = seatStatus(phase, seat, events, running)
+  if (status === '思考中') return 'active'
+  if (status === '等待' || status.endsWith('中')) return 'pending'
+  if (status === '已完成' || status === '已复议' || status === '已投策') return 'ok'
+  if (status === '失败' || status === '已取消') return 'danger'
+  return ''
 }
 
 function eventPayloadIncludesSeat(payload: unknown, seat: SeatKind) {
@@ -226,6 +322,7 @@ export function seatRunStats(runs: SeatRunTrace[]) {
       repaired: scoped.filter((run) => run.repair_attempted && run.status === 'completed').length,
       durationMs: scoped.reduce((sum, run) => sum + Number(run.duration_ms || 0), 0),
       tokens: scoped.reduce((sum, run) => sum + (run.total_tokens ?? 0), 0),
+      hasUsage: scoped.some((run) => typeof run.total_tokens === 'number'),
       promptVersions: Array.from(new Set(scoped.map((run) => run.prompt_version))).join(', '),
     }
   })
@@ -258,7 +355,7 @@ export function revisionDiffs(details: SessionDetails): RevisionDiff[] {
   })
 }
 
-export function qualityMetricRows(metrics?: DiscussionQualityMetrics) {
+export function qualityMetricRows(metrics?: DiscussionQualityMetrics, hasUsage = true) {
   const safe = metrics ?? {
     idea_duplicate_rate: 0,
     seat_similarity: 0,
@@ -280,7 +377,7 @@ export function qualityMetricRows(metrics?: DiscussionQualityMetrics) {
     { label: '自投率', value: formatPercent(safe.self_vote_rate) },
     { label: '票数集中度', value: formatPercent(safe.vote_concentration) },
     { label: '少数留议率', value: formatPercent(safe.minority_retention_rate) },
-    { label: '平均 token', value: String(Math.round(safe.average_tokens)) },
+    { label: '平均 token', value: hasUsage ? String(Math.round(safe.average_tokens)) : '暂无' },
     { label: '平均耗时', value: `${Math.round(safe.average_duration_ms)} ms` },
   ]
 }
@@ -291,6 +388,7 @@ export function exportSessionMarkdown(details: SessionDetails) {
     `# ${markdownText(details.session.title)}`,
     '',
     `- 阶段：${phaseLabels[details.session.phase]}`,
+    `- 模式：${modeLabels[details.session.mode]}`,
     `- Session：${details.session.id}`,
     '',
     '## 原始议题',
@@ -347,11 +445,21 @@ export function exportSessionMarkdown(details: SessionDetails) {
     lines.push(`- 状态：${decision.status === 'majority_reached' ? '形成多数' : '未形成多数'}`)
     lines.push(`- 有效票数：${decision.vote_count}`)
     lines.push(`- 自投数：${decision.self_vote_count}`)
+    if (decision.has_risk_blocker) lines.push('- 存在风险阻塞')
     if (decision.selected_proposal) {
       lines.push(`- 多数策案：${seatLabels[decision.selected_proposal.proposed_by]} - ${markdownText(decision.selected_proposal.title)}`)
     }
     appendList(lines, '多数理由', decision.majority_reasons)
     appendList(lines, '少数留议', decision.minority_opinion)
+    if (decision.minority_choices?.length) {
+      lines.push('', '### 少数方详情', '')
+      for (const choice of decision.minority_choices) {
+        lines.push(`- ${seatLabels[choice.seat]}：${markdownText(choice.reason)}`)
+        lines.push(`  - 重新评估条件：${markdownText(choice.reassessment_condition)}`)
+        if (choice.has_risk_warning) lines.push('  - 含风险提醒')
+      }
+    }
+    appendList(lines, '重新评估条件', decision.reassessment_conditions)
     appendList(lines, '采纳条件', decision.adoption_conditions)
     appendList(lines, '未决问题', decision.unresolved_questions)
     appendList(lines, '下一步', decision.next_steps)
@@ -368,7 +476,8 @@ export function exportSessionMarkdown(details: SessionDetails) {
   }
 
   lines.push('', '## 讨论质量指标', '')
-  for (const metric of qualityMetricRows(details.artifacts.quality)) {
+  const hasUsage = details.artifacts.seat_runs.some((run) => typeof run.total_tokens === 'number')
+  for (const metric of qualityMetricRows(details.artifacts.quality, hasUsage)) {
     lines.push(`- ${metric.label}：${metric.value}`)
   }
 

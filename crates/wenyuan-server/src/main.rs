@@ -10,14 +10,18 @@ use axum::{
     routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, env, net::SocketAddr, sync::Arc};
+use std::{collections::HashMap, env, net::SocketAddr, sync::Arc, time::Duration};
 use tokio::sync::{Mutex, broadcast};
 use tokio_stream::{Stream, StreamExt};
-use tower_http::{cors::CorsLayer, services::ServeDir, trace::TraceLayer};
+use tower_http::{
+    cors::CorsLayer,
+    services::{ServeDir, ServeFile},
+    trace::TraceLayer,
+};
 use tracing::{error, info};
 use uuid::Uuid;
 use wenyuan_agent::{AgentError, AgentRunner, CancellationFlag, ProgressSink};
-use wenyuan_core::{SeatKind, Session, SessionPhase};
+use wenyuan_core::{DeliberationMode, SeatKind, SeatModelConfig, Session, SessionPhase};
 use wenyuan_provider::{
     LlmProvider, MockProvider, MockScenario, OpenAiCompatibleConfig, OpenAiCompatibleProvider,
     SeatRoutedProvider,
@@ -42,6 +46,17 @@ struct StoreProgressSink {
 #[async_trait]
 impl ProgressSink for StoreProgressSink {
     async fn emit(&self, event_type: &str, payload: serde_json::Value) {
+        if event_type == "phase_started"
+            && let Some(phase) = payload
+                .get("phase")
+                .and_then(|value| serde_json::from_value(value.clone()).ok())
+            && let Err(err) = self
+                .store
+                .update_session_phase(self.session_id, phase)
+                .await
+        {
+            error!("failed to update session phase: {err}");
+        }
         if let Err(err) = self
             .store
             .append_event(self.session_id, event_type, payload)
@@ -55,6 +70,12 @@ impl ProgressSink for StoreProgressSink {
 }
 
 #[derive(Debug, Clone, Serialize)]
+struct ModelOption {
+    value: String,
+    label: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
 struct ConfigStatus {
     provider_configured: bool,
     provider_kind: String,
@@ -62,6 +83,8 @@ struct ConfigStatus {
     seat_models: HashMap<String, String>,
     database_url: String,
     version: String,
+    available_models: Vec<ModelOption>,
+    seat_available_models: HashMap<String, Vec<ModelOption>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -69,6 +92,15 @@ struct CreateSessionRequest {
     title: String,
     topic: String,
     context: Option<String>,
+    mode: Option<DeliberationMode>,
+    model_config: Option<HashMap<SeatKind, SeatModelConfig>>,
+}
+
+#[derive(Debug, Serialize)]
+struct TestTopic {
+    category: String,
+    topic: String,
+    context: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -78,6 +110,8 @@ struct HealthResponse {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let _ = dotenvy::dotenv();
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -96,7 +130,7 @@ async fn main() -> anyhow::Result<()> {
     let (provider, config) = provider_from_env(&database_url);
     let state = AppState {
         store,
-        runner: AgentRunner::new(provider),
+        runner: AgentRunner::new(provider).with_timeout(provider_timeout_from_env()),
         running: Arc::new(Mutex::new(HashMap::new())),
         event_tx: broadcast::channel(128).0,
         config,
@@ -110,6 +144,15 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+fn provider_timeout_from_env() -> Duration {
+    env::var("WENYUAN_LLM_TIMEOUT_SECS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|seconds| *seconds > 0)
+        .map(Duration::from_secs)
+        .unwrap_or_else(|| Duration::from_secs(120))
+}
+
 fn app(state: AppState) -> Router {
     Router::new()
         .route("/api/health", get(health))
@@ -119,8 +162,16 @@ fn app(state: AppState) -> Router {
         .route("/api/sessions/{id}/start", post(start_session))
         .route("/api/sessions/{id}/retry", post(retry_session))
         .route("/api/sessions/{id}/cancel", post(cancel_session))
+        .route("/api/sessions/{id}/pause", post(pause_session))
+        .route("/api/sessions/{id}/resume", post(resume_session))
+        .route("/api/sessions/{id}/context", post(update_context))
+        .route("/api/sessions/{id}/retry-seat/{seat}", post(retry_seat))
+        .route("/api/sessions/{id}/retry-phase", post(retry_phase))
+        .route("/api/sessions/{id}/manual-revision", post(manual_revision))
+        .route("/api/sessions/{id}/trajectory", get(phase_trajectory))
         .route("/api/sessions/{id}/events", get(events_sse))
-        .fallback_service(ServeDir::new("web/dist").fallback(ServeDir::new("web/dist")))
+        .route("/api/test-topics", get(test_topics))
+        .fallback_service(ServeDir::new("web/dist").fallback(ServeFile::new("web/dist/index.html")))
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
         .with_state(state)
@@ -130,14 +181,16 @@ fn provider_from_env(database_url: &str) -> (Arc<dyn LlmProvider>, ConfigStatus)
     let base_url = env::var("WENYUAN_LLM_BASE_URL").unwrap_or_default();
     let api_key = env::var("WENYUAN_LLM_API_KEY").unwrap_or_default();
     let model = env::var("WENYUAN_LLM_MODEL").unwrap_or_else(|_| "mock-model".into());
-    let provider_kind = if !base_url.is_empty() && !api_key.is_empty() {
+    let global_provider_configured = !base_url.is_empty() && !api_key.is_empty();
+    let seat_provider_configured = SeatKind::ALL.into_iter().any(seat_provider_configured);
+    let provider_kind = if global_provider_configured || seat_provider_configured {
         "openai-compatible".to_string()
     } else {
         "mock".to_string()
     };
     let (provider, seat_models): (Arc<dyn LlmProvider>, HashMap<String, String>) =
         if provider_kind == "openai-compatible" {
-            openai_provider_from_env(base_url, api_key, model.clone())
+            routed_provider_from_env(base_url.clone(), api_key.clone(), model.clone())
         } else {
             (
                 Arc::new(MockProvider::new(mock_scenario_from_env())),
@@ -147,31 +200,90 @@ fn provider_from_env(database_url: &str) -> (Arc<dyn LlmProvider>, ConfigStatus)
                     .collect(),
             )
         };
+    let available_models = parse_available_models();
+    let seat_available_models = HashMap::from([
+        ("MOUYUAN".to_string(), parse_available_models_for("MOUYUAN")),
+        ("JINGSHI".to_string(), parse_available_models_for("JINGSHI")),
+        (
+            "CHIZHENG".to_string(),
+            parse_available_models_for("CHIZHENG"),
+        ),
+    ]);
     (
         provider,
         ConfigStatus {
-            provider_configured: provider_kind != "openai-compatible"
-                || env::var("WENYUAN_LLM_API_KEY").is_ok(),
+            provider_configured: provider_kind == "mock"
+                || global_provider_configured
+                || seat_provider_configured,
             provider_kind,
             model,
             seat_models,
             database_url: database_url.to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),
+            available_models,
+            seat_available_models,
         },
     )
 }
 
-fn openai_provider_from_env(
+fn seat_provider_configured(seat: SeatKind) -> bool {
+    let suffix = seat_env_key(seat);
+    let base_url = env::var(format!("WENYUAN_LLM_BASE_URL_{suffix}")).unwrap_or_default();
+    let api_key = env::var(format!("WENYUAN_LLM_API_KEY_{suffix}")).unwrap_or_default();
+    !base_url.is_empty() && !api_key.is_empty()
+}
+
+fn parse_available_models_for(suffix: &str) -> Vec<ModelOption> {
+    let key = format!("WENYUAN_AVAILABLE_MODELS_{suffix}");
+    if let Ok(val) = env::var(&key) {
+        parse_model_list(&val)
+    } else {
+        vec![]
+    }
+}
+
+fn parse_available_models() -> Vec<ModelOption> {
+    parse_model_list(&env::var("WENYUAN_AVAILABLE_MODELS").unwrap_or_default())
+}
+
+fn parse_model_list(input: &str) -> Vec<ModelOption> {
+    input
+        .split(',')
+        .filter_map(|entry| {
+            let entry = entry.trim();
+            if entry.is_empty() {
+                return None;
+            }
+            if let Some((value, label)) = entry.split_once(':') {
+                Some(ModelOption {
+                    value: value.trim().to_string(),
+                    label: label.trim().to_string(),
+                })
+            } else {
+                Some(ModelOption {
+                    value: entry.to_string(),
+                    label: entry.to_string(),
+                })
+            }
+        })
+        .collect()
+}
+
+fn routed_provider_from_env(
     default_base_url: String,
     default_api_key: String,
     default_model: String,
 ) -> (Arc<dyn LlmProvider>, HashMap<String, String>) {
-    let default_provider: Arc<dyn LlmProvider> =
+    let has_default_provider = !default_base_url.is_empty() && !default_api_key.is_empty();
+    let default_provider: Arc<dyn LlmProvider> = if has_default_provider {
         Arc::new(OpenAiCompatibleProvider::new(OpenAiCompatibleConfig {
             base_url: default_base_url.clone(),
             api_key: default_api_key.clone(),
             model: default_model.clone(),
-        }));
+        }))
+    } else {
+        Arc::new(MockProvider::new(mock_scenario_from_env()))
+    };
     let mut routed = SeatRoutedProvider::new(default_provider);
     let mut seat_models = HashMap::new();
 
@@ -183,15 +295,30 @@ fn openai_provider_from_env(
             env::var(format!("WENYUAN_LLM_API_KEY_{suffix}")).unwrap_or(default_api_key.clone());
         let model = env::var(format!("WENYUAN_LLM_MODEL_{suffix}"))
             .unwrap_or_else(|_| default_model.clone());
-        seat_models.insert(suffix.to_string(), model.clone());
+        let display_model = if model.is_empty() {
+            "mock-model".to_string()
+        } else {
+            model.clone()
+        };
+        seat_models.insert(suffix.to_string(), display_model);
 
-        if base_url != default_base_url || api_key != default_api_key || model != default_model {
+        if !base_url.is_empty()
+            && !api_key.is_empty()
+            && (!has_default_provider
+                || base_url != default_base_url
+                || api_key != default_api_key
+                || model != default_model)
+        {
             routed = routed.with_seat_provider(
                 seat,
                 Arc::new(OpenAiCompatibleProvider::new(OpenAiCompatibleConfig {
                     base_url,
                     api_key,
-                    model,
+                    model: if model.is_empty() {
+                        default_model.clone()
+                    } else {
+                        model
+                    },
                 })),
             );
         }
@@ -223,6 +350,62 @@ fn mock_scenario_from_env() -> MockScenario {
     }
 }
 
+const TEST_TOPICS: &[(&str, &str, &str)] = &[
+    (
+        "产品方向",
+        "我们的产品是一个面向开发者的API管理工具，目前月活5万。团队正在争论应该深耕现有用户做企业版，还是横向扩展做一个面向非技术用户的低代码版本。现有用户反馈企业版需求强烈，但新市场可能更大。团队只有10人，资源有限。",
+        "使用三年数据：API调用量年增40%，但免费用户流失率60%。企业用户续费率95%，平均客单价$2000/月。低代码市场预计年增25%，但需要全新的UI和文档体系。",
+    ),
+    (
+        "系统架构",
+        "一个日活200万的社交阅读应用，后端是单体Ruby on Rails架构，数据库PostgreSQL单实例。最近频繁出现性能瓶颈：首页加载>3秒，热门内容时段CPU到90%，数据库连接池经常打满。需要决定是继续优化单体还是开始拆微服务。",
+        "当前服务器配置：4台8核32G。MySQL只读副本已启用但效果有限。团队5人，Rails经验丰富但无人有Kubernetes经验。2024年Q2目标是将首页加载降到1秒以内。",
+    ),
+    (
+        "技术选型",
+        "团队需要为新的实时协作编辑器选择技术方案。候选：A) 自研基于OT/CRDT的方案；B) 基于Yjs + WebSocket；C) 直接嵌入成熟编辑器（如Liveblocks、Cocalc）。需要支持100人同时编辑同一文档，离线编辑，版本历史和冲突解决。",
+        "团队有3名全栈工程师，2月内需要交付MVP。已有Node.js和PostgreSQL基础设施。用户预期类比Google Docs的协作体验。没有WebSocket运维经验。",
+    ),
+    (
+        "隐私与安全",
+        "一个面向学校的学生数据分析平台，需要决定数据留存策略。法规要求数据保留至少3年，但家长组织要求最小化留存。同时需要支持AI驱动的学习建议，这需要足够的历史数据训练模型。",
+        "平台现有10万学生数据。计划明年扩展到50万。安全审计显示当前日志系统将原始请求记录到文本文件。没有专门的安全工程师。",
+    ),
+    (
+        "功能优先级",
+        "开发团队产能只够在下一季度完成3个重要功能之一：A) 实时协作白板（预期提升用户粘性30%）；B) AI驱动的智能搜索（预期提升内容发现率20%）；C) 第三方集成市场（预期提升付费转化率15%）。请给出优先级排序和理由。",
+        "当前用户日均使用时长12分钟，搜索使用率35%，付费转化率2.1%。竞品已经上线了白板和AI搜索功能。",
+    ),
+    (
+        "商业模式",
+        "一个开源的开发者工具项目，GitHub 15k stars，月下载量50万。目前靠捐赠和个人维护。需要决定是否商业化以及如何商业化。可选：A) 提供托管云服务；B) 开源核心+企业功能；C) 保持纯开源，通过咨询和培训盈利。",
+        "项目已持续4年，核心贡献者3人。企业用户占比20%但贡献了80%的使用量。竞品SaaS定价$29/月起。社区对商业化反应敏感。",
+    ),
+    (
+        "开源项目路线",
+        "一个Python数据可视化库，面临核心API设计过时、性能瓶颈和新兴竞争（如Observable Plot、Vega-Lite）。需要制定下一年的路线图：是进行大规模API重构（可能破坏向后兼容），还是增量改进性能，还是转向新的核心技术方向。",
+        "项目有200+贡献者，依赖者超过1000个库。每年新增issue 500+。核心维护者只有2人有时间进行大规模重构。社区在GitHub Discussion中47%支持重构，32%担心兼容性。",
+    ),
+    (
+        "故障根因分析",
+        "线上服务在过去两周出现了3次间歇性的500错误，每次持续5-15分钟，然后自动恢复。监控显示错误期间CPU和内存正常，但数据库连接数异常增加。最近唯一的生产变更是将ORM从ActiveRecord切换到了Sequel。",
+        "服务部署在AWS ECS Fargate，自动扩缩容。数据库是Aurora PostgreSQL。慢查询日志没有异常。错误日志中出现了connection pool timeout和occasional deadlocks。回滚ORM变更后问题消失。",
+    ),
+];
+
+async fn test_topics() -> Json<Vec<TestTopic>> {
+    Json(
+        TEST_TOPICS
+            .iter()
+            .map(|(category, topic, context)| TestTopic {
+                category: category.to_string(),
+                topic: topic.to_string(),
+                context: context.to_string(),
+            })
+            .collect(),
+    )
+}
+
 async fn health() -> Json<HealthResponse> {
     Json(HealthResponse { ok: true })
 }
@@ -235,7 +418,13 @@ async fn create_session(
     State(state): State<AppState>,
     Json(input): Json<CreateSessionRequest>,
 ) -> Result<Json<Session>, ApiError> {
-    let session = Session::new(input.title, input.topic, input.context.unwrap_or_default());
+    let mut session = Session::new_with_mode(
+        input.title,
+        input.topic,
+        input.context.unwrap_or_default(),
+        input.mode.unwrap_or_default(),
+    );
+    session.model_config = input.model_config;
     state
         .store
         .create_session_with_provider_refs(&session, &seat_provider_refs(&state.config))
@@ -332,6 +521,17 @@ async fn start_session(
                 }
             }
             Err(err) => {
+                if matches!(err, AgentError::Cancelled) {
+                    let active = store
+                        .is_execution_active(id, execution_token)
+                        .await
+                        .unwrap_or(false);
+                    if !active {
+                        let _ = event_tx.send(id);
+                        running_map.lock().await.remove(&id);
+                        return;
+                    }
+                }
                 error!("session failed: {err}");
                 if let AgentError::PhaseFailed { traces, .. } = &err
                     && let Err(save_err) = store.save_seat_runs(id, traces).await
@@ -371,6 +571,81 @@ async fn cancel_session(
     state.store.cancel_session(id).await?;
     let _ = state.event_tx.send(id);
     Ok(Json(state.store.get_session(id).await?))
+}
+
+async fn pause_session(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<SessionDetails>, ApiError> {
+    if let Some(cancel) = state.running.lock().await.remove(&id) {
+        cancel.cancel();
+    }
+    state.store.pause_session(id).await?;
+    let _ = state.event_tx.send(id);
+    Ok(Json(state.store.get_session(id).await?))
+}
+
+async fn resume_session(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<SessionDetails>, ApiError> {
+    state.store.resume_session(id).await?;
+    let _ = state.event_tx.send(id);
+    start_session(State(state), Path(id)).await
+}
+
+#[derive(Deserialize)]
+struct ContextBody {
+    context: String,
+}
+
+async fn update_context(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(body): Json<ContextBody>,
+) -> Result<Json<SessionDetails>, ApiError> {
+    state
+        .store
+        .update_session_context(id, &body.context)
+        .await?;
+    Ok(Json(state.store.get_session(id).await?))
+}
+
+async fn retry_seat(
+    State(state): State<AppState>,
+    Path((id, seat)): Path<(Uuid, String)>,
+) -> Result<Json<SessionDetails>, ApiError> {
+    let seat_kind: SeatKind = serde_json::from_value(serde_json::json!(seat))
+        .map_err(|_| ApiError::bad_request(format!("invalid seat: {seat}")))?;
+    state.store.retry_seat(id, seat_kind).await?;
+    Ok(Json(state.store.get_session(id).await?))
+}
+
+async fn retry_phase(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<SessionDetails>, ApiError> {
+    if state.running.lock().await.contains_key(&id) {
+        return Err(ApiError::conflict("session is running, cancel first"));
+    }
+    state.store.retry_phase(id).await?;
+    start_session(State(state), Path(id)).await
+}
+
+async fn manual_revision(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<SessionDetails>, ApiError> {
+    state.store.manual_revision_trigger(id).await?;
+    let _ = state.event_tx.send(id);
+    Ok(Json(state.store.get_session(id).await?))
+}
+
+async fn phase_trajectory(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Vec<wenyuan_store::SessionEvent>>, ApiError> {
+    Ok(Json(state.store.phase_trajectory(id).await?))
 }
 
 async fn events_sse(
@@ -422,6 +697,13 @@ impl ApiError {
     fn conflict(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::CONFLICT,
+            message: message.into(),
+        }
+    }
+
+    fn bad_request(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
             message: message.into(),
         }
     }
