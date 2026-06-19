@@ -74,12 +74,16 @@ function seatLabel(key: string) {
   display: grid;
   grid-template-columns: 100px repeat(auto-fit, minmax(200px, 1fr));
   gap: 1px;
-  background: var(--color-border);
+  background: #d8dfd9;
+  border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
   overflow: hidden;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.62);
 }
 .compare-header {
-  background: var(--color-surface-alt);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.88), rgba(238, 243, 239, 0.88)),
+    #eef3ef;
   padding: 12px;
   font-weight: 600;
   font-size: 13px;
@@ -92,16 +96,22 @@ function seatLabel(key: string) {
   justify-content: center;
 }
 .compare-label {
-  background: var(--color-surface-alt);
+  background: #f3f6f2;
   padding: 10px 12px;
   font-size: 12px;
   color: var(--color-text-muted);
+  font-weight: 700;
   white-space: nowrap;
 }
 .compare-cell {
-  background: var(--color-surface);
+  background: rgba(255, 255, 255, 0.72);
   padding: 10px 12px;
   font-size: 13px;
   line-height: 1.5;
+  color: var(--color-text);
+}
+
+.compare-cell:nth-child(odd) {
+  background: rgba(250, 252, 249, 0.78);
 }
 </style>

@@ -1,5 +1,5 @@
 <template>
-  <section v-if="details" class="page workspace">
+  <section v-if="details" :class="['page', 'workspace', { 'report-mode': viewMode === 'report' }]">
     <header class="page-head row-head">
       <div>
         <p class="phase-label">{{ phaseLabels[details.session.phase] }}</p>
@@ -7,6 +7,26 @@
         <span class="badge flat" style="margin-top: 4px">{{ modeLabels[details.session.mode] }}</span>
       </div>
       <div class="actions workspace-actions">
+        <div class="view-switch" role="tablist" aria-label="视图模式">
+          <button
+            :class="{ active: viewMode === 'workbench' }"
+            type="button"
+            role="tab"
+            :aria-selected="viewMode === 'workbench'"
+            @click="setViewMode('workbench')"
+          >
+            工作台
+          </button>
+          <button
+            :class="{ active: viewMode === 'report' }"
+            type="button"
+            role="tab"
+            :aria-selected="viewMode === 'report'"
+            @click="setViewMode('report')"
+          >
+            报告
+          </button>
+        </div>
         <button title="复制最终方案" :disabled="!canCopyDecision" @click="copyDecision">
           <Copy :size="18" />
           复制
@@ -34,31 +54,46 @@
             <button @click="downloadMarkdown('audit')">审计全文</button>
           </div>
         </div>
-        <button v-if="details.execution.running" class="icon" title="暂停" @click="pause">
-          <Pause :size="18" />
-        </button>
-        <button v-else-if="details.execution.recovery_state === 'paused'" class="icon" title="继续" @click="resume">
-          <Play :size="18" />
-        </button>
-        <button v-if="canManualRevision" class="icon" title="手动触发复议" @click="manualRevision">
-          <RotateCw :size="18" />
-        </button>
-        <button v-if="!details.execution.running && details.execution.recovery_state !== 'paused'" class="retry-phase" title="重试当前阶段" @click="retryCurrentPhase">
-          <RefreshCw :size="18" />
-          当前阶段
-        </button>
-        <button class="retry-session" title="重试整个议题" @click="retry">
-          <RotateCw :size="18" />
-          整个议题
-        </button>
-        <button class="icon danger" title="取消" @click="cancel">
-          <Ban :size="18" />
-        </button>
+        <template v-if="viewMode === 'workbench'">
+          <button v-if="details.execution.running" class="icon" title="暂停" @click="pause">
+            <Pause :size="18" />
+          </button>
+          <button v-else-if="details.execution.recovery_state === 'paused'" class="icon" title="继续" @click="resume">
+            <Play :size="18" />
+          </button>
+          <button v-if="canManualRevision" class="icon" title="让三席重新修订方案" @click="manualRevision">
+            <RotateCw :size="18" />
+          </button>
+          <button v-if="!details.execution.running && details.execution.recovery_state !== 'paused'" class="retry-phase" title="重试当前阶段" @click="retryCurrentPhase">
+            <RefreshCw :size="18" />
+            重试阶段
+          </button>
+          <button class="retry-session" title="重试整个议题" @click="retry">
+            <RotateCw :size="18" />
+            重新开议
+          </button>
+          <button class="icon danger" title="取消" @click="cancel">
+            <Ban :size="18" />
+          </button>
+        </template>
       </div>
     </header>
 
+    <template v-if="viewMode === 'workbench'">
     <PhaseProgressBar :phase="details.session.phase" />
-    <SeatStatusStrip :phase="details.session.phase" :events="details.events" :running="details.execution.running" />
+    <section class="role-card-row" aria-label="三席状态">
+      <SeatRoleCard
+        v-for="seat in seats"
+        :key="seat"
+        :seat="seat"
+        :phase="details.session.phase"
+        :events="details.events"
+        :running="details.execution.running"
+        :runs="details.artifacts.seat_runs"
+        :provider-ref="seatProviderRef(seat)"
+        @retry="retrySeat"
+      />
+    </section>
 
     <ApiErrorState :message="error" />
     <ApiErrorState v-if="details.session.failure_reason" :message="`失败原因：${details.session.failure_reason}`" />
@@ -80,6 +115,8 @@
     <p v-else-if="details.execution.running" class="notice" role="status">
       当前议题正在执行中。席位状态会实时更新；如果长时间没有变化，可以暂停或取消后重试。
     </p>
+
+    <DecisionSummary v-if="primaryDecision" :decision="primaryDecision" />
 
     <section class="panel">
       <div class="row-head">
@@ -205,8 +242,6 @@
       </div>
     </section>
 
-    <DecisionSummary :decision="details.session.result ?? details.artifacts.decision" />
-
     <section class="panel">
       <div class="row-head timeline-head">
         <h2>事件时间线</h2>
@@ -234,6 +269,72 @@
         </div>
       </div>
     </section>
+    </template>
+
+    <template v-else>
+      <div class="report-meta">
+        <span>{{ phaseLabels[details.session.phase] }}</span>
+        <span>{{ modeLabels[details.session.mode] }}</span>
+        <span>{{ details.session.id }}</span>
+      </div>
+
+      <section class="panel report-topic">
+        <h2>议题</h2>
+        <p>{{ details.session.topic }}</p>
+        <p v-if="details.session.context" class="muted">{{ details.session.context }}</p>
+      </section>
+
+      <DecisionSummary v-if="primaryDecision" :decision="primaryDecision" />
+
+      <section class="role-card-row report-seat-row" aria-label="三席报告">
+        <SeatRoleCard
+          v-for="seat in seats"
+          :key="seat"
+          :seat="seat"
+          :phase="details.session.phase"
+          :events="details.events"
+          :running="false"
+          :runs="details.artifacts.seat_runs"
+          :provider-ref="seatProviderRef(seat)"
+          report-mode
+        />
+      </section>
+
+      <ProposalCompare :proposals="details.artifacts.proposals" />
+
+      <VoteDisplay :votes="details.artifacts.votes" :proposals="details.artifacts.proposals" />
+
+      <VoteChanges :votes="details.artifacts.votes" :proposals="details.artifacts.proposals" />
+
+      <section class="panel">
+        <h2>讨论质量</h2>
+        <div class="stat-grid">
+          <article v-for="metric in qualityMetricRows(details.artifacts.quality, hasTokenUsage)" :key="metric.label" class="stat">
+            <span>{{ metric.label }}</span>
+            <strong>{{ metric.value }}</strong>
+          </article>
+        </div>
+      </section>
+
+      <section v-if="details.artifacts.claims?.length" class="panel">
+        <h2>证据与待核验判断</h2>
+        <div class="item-grid">
+          <article v-for="claim in details.artifacts.claims" :key="claim.id" class="item">
+            <div class="item-head">
+              <span>{{ seatLabels[claim.proposed_by] }}</span>
+              <span :class="['badge', claim.is_supported ? 'ok' : 'warn']">
+                {{ claim.is_supported ? '已有依据' : '仍需核验' }}
+              </span>
+            </div>
+            <p>{{ claim.content }}</p>
+            <p class="muted">来源：{{ claim.context }}</p>
+            <p v-if="detailEvidence(claim.evidence_ids)" class="muted">
+              证据：{{ detailEvidence(claim.evidence_ids)?.map((ev) => evidenceKindLabels[ev.kind] + ': ' + ev.content).join(' | ') }}
+            </p>
+          </article>
+        </div>
+      </section>
+    </template>
   </section>
   <section v-else class="page">
     <ApiErrorState :message="error || '加载中'" />
@@ -242,7 +343,7 @@
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { Ban, ChevronDown, Copy, Download, FileText, Pause, Pen, Play, RefreshCw, RotateCw } from '@lucide/vue'
 import { api } from '../api'
 import ApiErrorState from '../components/ApiErrorState.vue'
@@ -251,13 +352,17 @@ import DecisionSummary from '../components/DecisionSummary.vue'
 import IdeaCard from '../components/IdeaCard.vue'
 import PhaseProgressBar from '../components/PhaseProgressBar.vue'
 import ProposalCompare from '../components/ProposalCompare.vue'
-import SeatStatusStrip from '../components/SeatStatusStrip.vue'
+import SeatRoleCard from '../components/SeatRoleCard.vue'
 import VoteChanges from '../components/VoteChanges.vue'
 import VoteDisplay from '../components/VoteDisplay.vue'
+import { useViewMode } from '../composables/useViewMode'
 import { exportSessionMarkdown, ideaStatusLabels, evidenceKindLabels, modeLabels, phaseLabels, qualityMetricRows, revisionDiffs, seatLabels, seatRunStats, type SeatKind, type SessionDetails } from '../domain/session'
 
 const route = useRoute()
+const router = useRouter()
+const { viewMode, setViewMode } = useViewMode({ route, router })
 const id = computed(() => String(route.params.id))
+const seats: SeatKind[] = ['mouyuan', 'jingshi', 'chizheng']
 const details = ref<SessionDetails | null>(null)
 const error = ref('')
 const editingContext = ref(false)
@@ -283,10 +388,15 @@ const recentFailedRuns = computed(() =>
     .reverse(),
 )
 const hasTokenUsage = computed(() => (details.value?.artifacts.seat_runs ?? []).some((run) => typeof run.total_tokens === 'number'))
+const primaryDecision = computed(() => details.value?.session.result ?? details.value?.artifacts.decision ?? null)
 const timelineEvents = computed(() => [...(details.value?.events ?? [])].reverse())
 const trajectoryEvents = computed(() => [...trajectory.value].reverse())
 let source: EventSource | null = null
 let timer: number | undefined
+
+function seatProviderRef(seat: SeatKind) {
+  return details.value?.seats?.find((item) => item.seat === seat)?.provider_ref ?? ''
+}
 
 function detailEvidence(evidenceIds?: string[]) {
   if (!evidenceIds?.length || !details.value?.artifacts.evidence?.length) return []

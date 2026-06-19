@@ -2,16 +2,28 @@
   <div class="shell">
     <aside class="side">
       <RouterLink class="brand" to="/">
-        <span class="brand-mark">文</span>
         <span class="brand-text">
           <strong>文渊阁</strong>
-          <small>三席合议</small>
+          <small>WENYUAN COUNCIL</small>
         </span>
       </RouterLink>
       <nav>
-        <RouterLink to="/">新建议题</RouterLink>
-        <RouterLink to="/history">历史议题</RouterLink>
-        <RouterLink to="/config">配置状态</RouterLink>
+        <RouterLink to="/">
+          <PlusCircle :size="17" />
+          <span>新建议题</span>
+        </RouterLink>
+        <RouterLink to="/history">
+          <History :size="17" />
+          <span>历史议题</span>
+        </RouterLink>
+        <RouterLink to="/prompt-library">
+          <Library :size="17" />
+          <span>提示词模板</span>
+        </RouterLink>
+        <RouterLink to="/config">
+          <Settings :size="17" />
+          <span>配置状态</span>
+        </RouterLink>
       </nav>
     </aside>
     <main class="main">
@@ -19,3 +31,7 @@
     </main>
   </div>
 </template>
+
+<script setup lang="ts">
+import { History, Library, PlusCircle, Settings } from '@lucide/vue'
+</script>

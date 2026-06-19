@@ -1,9 +1,9 @@
 <template>
   <section class="panel decision">
     <header class="section-head">
-      <h2>表决结果</h2>
+      <h2>决策结论</h2>
       <div class="phase-labels">
-        <span v-if="decision?.has_risk_blocker" class="badge danger">风险阻塞</span>
+        <span v-if="decision?.has_risk_blocker" class="badge danger">有风险阻塞</span>
         <span :class="['badge', decision?.status === 'conditionally_adopted' ? 'warn' : decision?.status === 'majority_reached' ? 'ok' : 'warn']">
           {{ decision?.status === 'majority_reached' ? '形成多数' : decision?.status === 'conditionally_adopted' ? '有条件通过' : '未形成多数' }}
         </span>
@@ -12,11 +12,11 @@
     <div v-if="decision?.selected_proposal" class="result-block">
       <h3>{{ decision.selected_proposal.title }}</h3>
       <p>{{ decision.selected_proposal.summary }}</p>
-      <p v-if="decision.status === 'conditionally_adopted'" class="muted" style="font-size: 13px">多数已形成但存在风险阻塞，需满足采纳条件后方可执行</p>
+      <p v-if="decision.status === 'conditionally_adopted'" class="muted" style="font-size: 13px">三席已有倾向，但还需要先处理采纳条件。</p>
       <dl>
         <dt>有效票数</dt>
         <dd>{{ decision.vote_count }}</dd>
-        <dt>自投记录</dt>
+        <dt>自投数</dt>
         <dd>{{ decision.self_vote_count }}</dd>
       </dl>
     </div>
@@ -28,14 +28,14 @@
     </div>
     <div class="columns">
       <div>
-        <h3>多数理由</h3>
+        <h3>为什么选择它</h3>
         <p v-if="!decision?.majority_reasons?.length" class="muted">暂无</p>
         <ul>
           <li v-for="reason in decision?.majority_reasons" :key="reason">{{ reason }}</li>
         </ul>
       </div>
       <div>
-        <h3>少数留议</h3>
+        <h3>少数意见</h3>
         <p v-if="!decision?.minority_opinion?.length" class="muted">暂无</p>
         <ul>
           <li v-for="opinion in decision?.minority_opinion" :key="opinion">{{ opinion }}</li>
@@ -43,11 +43,11 @@
       </div>
     </div>
     <div v-if="decision?.minority_choices?.length" class="minority-detail">
-      <h3>少数方详情</h3>
+      <h3>少数方说明</h3>
       <div v-for="choice in decision.minority_choices" :key="choice.seat" class="minority-card">
         <p>
           <strong>{{ seatLabels[choice.seat] }}</strong>：{{ choice.reason }}
-          <span v-if="choice.has_risk_warning" class="badge danger" style="margin-left: 8px">含风险提醒</span>
+          <span v-if="choice.has_risk_warning" class="badge danger" style="margin-left: 8px">提示风险</span>
         </p>
         <p v-if="choice.reassessment_condition" class="muted">重新评估条件：{{ choice.reassessment_condition }}</p>
       </div>
