@@ -3,6 +3,7 @@
     <header class="section-head">
       <h2>决策结论</h2>
       <div class="phase-labels">
+        <span v-if="votePolicy" class="badge flat">{{ voteStrategyLabel }}</span>
         <span v-if="decision?.has_risk_blocker" class="badge danger">有风险阻塞</span>
         <span :class="['badge', decision?.status === 'conditionally_adopted' ? 'warn' : decision?.status === 'majority_reached' ? 'ok' : 'warn']">
           {{ decision?.status === 'majority_reached' ? '形成多数' : decision?.status === 'conditionally_adopted' ? '有条件通过' : '未形成多数' }}
@@ -74,10 +75,16 @@
 </template>
 
 <script setup lang="ts">
-import { seatLabels } from '../domain/session'
-import type { Decision } from '../domain/session'
+import { computed } from 'vue'
+import { seatLabels, voteStrategyLabels } from '../domain/session'
+import type { Decision, VotePolicy } from '../domain/session'
 
-defineProps<{
+const props = defineProps<{
   decision?: Decision | null
+  votePolicy?: VotePolicy | null
 }>()
+
+const voteStrategyLabel = computed(() =>
+  props.votePolicy ? (voteStrategyLabels[props.votePolicy.strategy] ?? props.votePolicy.strategy) : ''
+)
 </script>

@@ -10,6 +10,14 @@ export type SessionPhase =
   | 'failed'
   | 'cancelled'
 
+export type VoteStrategy = 'simple_majority' | 'risk_veto' | 'unanimous' | 'conditional_pass' | 'weighted_score'
+
+export interface VotePolicy {
+  allow_self_vote: boolean
+  strategy: VoteStrategy
+  min_score_threshold?: number
+}
+
 export interface Proposal {
   id: string
   proposed_by: SeatKind
@@ -48,6 +56,13 @@ export interface Decision {
   has_risk_blocker?: boolean
 }
 
+export interface ScribeReport {
+  consensus_summary: string
+  structural_gaps: string[]
+  unresolved_conflicts: string[]
+  final_report: string
+}
+
 export interface SessionRecord {
   id: string
   title: string
@@ -57,6 +72,9 @@ export interface SessionRecord {
   phase: SessionPhase
   result?: Decision | null
   failure_reason?: string | null
+  vote_policy?: VotePolicy | null
+  scribe_enabled?: boolean
+  search_enabled?: boolean
 }
 
 export interface SessionSummary {
@@ -158,6 +176,7 @@ export interface DiscussionArtifacts {
     link_type: string
   }>
   events: string[]
+  scribe_report?: ScribeReport | null
 }
 
 export interface DiscussionQualityMetrics {
@@ -270,6 +289,22 @@ export const phaseLabels: Record<SessionPhase, string> = {
   completed: '已完成',
   failed: '失败',
   cancelled: '已取消',
+}
+
+export const voteStrategyLabels: Record<VoteStrategy, string> = {
+  simple_majority: '普通多数（2/3）',
+  risk_veto: '风险否决',
+  unanimous: '全票通过（3/3）',
+  conditional_pass: '有条件通过',
+  weighted_score: '加权评分',
+}
+
+export const voteStrategyDescriptions: Record<VoteStrategy, string> = {
+  simple_majority: '两席以上同意即形成多数',
+  risk_veto: '任何一席提出阻塞问题即否决',
+  unanimous: '需要三席全部同意',
+  conditional_pass: '同普通多数，但增加持续监控条件',
+  weighted_score: '按五项评分加权总分决定',
 }
 
 export const modeLabels: Record<string, string> = {

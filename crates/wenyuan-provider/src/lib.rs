@@ -213,6 +213,9 @@ impl MockProvider {
     }
 
     fn content_for(&self, request: &LlmRequest) -> String {
+        if request.prompt_version == "scribe-v1" {
+            return scribe_json();
+        }
         match request.phase {
             SessionPhase::IndependentDeliberation => independent_json(request.seat),
             SessionPhase::CrossCritique => critique_json(request.seat),
@@ -375,6 +378,22 @@ fn vote_json(seat: SeatKind, scenario: MockScenario) -> String {
     })
     .to_string()
 }
+
+fn scribe_json() -> String {
+    serde_json::json!({
+      "consensus_summary": "三席均认同需要先完成最小闭环验证",
+      "structural_gaps": ["缺少明确的成功指标"],
+      "unresolved_conflicts": ["先做企业版还是低代码版本未达成一致"],
+      "final_report": "三席合议后，谋远席和经世席支持优先完成内测版，持正席建议补充隐私影响评估。\n\n共识：最小闭环方案应包含明确的验收标准和失败边界。\n\n后续：建议先收集5个内测用户反馈后再决定是否扩展。"
+    })
+    .to_string()
+}
+
+pub mod search;
+pub use search::{
+    BingBackend, CustomSearchBackend, DoubaoBackend, DuckDuckGoBackend,
+    GoogleCustomSearchBackend, SearchPool, SearXNGSearchBackend, TavilyBackend, WikipediaBackend,
+};
 
 #[cfg(test)]
 mod tests {

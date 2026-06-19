@@ -15,7 +15,7 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
 }
 
 export const api = {
-  createSession(input: { title: string; topic: string; context: string; mode?: 'three_seat' | 'single_agent'; model_config?: Record<string, { model: string }> }) {
+  createSession(input: { title: string; topic: string; context: string; mode?: 'three_seat' | 'single_agent'; model_config?: Record<string, { model: string }>; vote_policy?: { allow_self_vote: boolean; strategy: string; min_score_threshold?: number }; scribe_enabled?: boolean; search_enabled?: boolean }) {
     return request<SessionRecord>('/api/sessions', {
       method: 'POST',
       body: JSON.stringify(input),

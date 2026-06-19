@@ -5,6 +5,9 @@
         <p class="phase-label">{{ phaseLabels[details.session.phase] }}</p>
         <h1>{{ details.session.title }}</h1>
         <span class="badge flat" style="margin-top: 4px">{{ modeLabels[details.session.mode] }}</span>
+        <span v-if="details.session.vote_policy" class="badge flat" style="margin-top: 4px; margin-left: 6px">
+          {{ voteStrategyLabels[details.session.vote_policy.strategy] }}
+        </span>
       </div>
       <div class="actions workspace-actions">
         <div class="view-switch" role="tablist" aria-label="视图模式">
@@ -116,7 +119,7 @@
       当前议题正在执行中。席位状态会实时更新；如果长时间没有变化，可以暂停或取消后重试。
     </p>
 
-    <DecisionSummary v-if="primaryDecision" :decision="primaryDecision" />
+    <DecisionSummary v-if="primaryDecision" :decision="primaryDecision" :vote-policy="details.session.vote_policy" />
 
     <section class="panel">
       <div class="row-head">
@@ -202,6 +205,30 @@
       </div>
     </section>
 
+    <section v-if="details.artifacts.scribe_report" class="panel">
+      <h2>书记官报告</h2>
+      <div class="scribe-report">
+        <h3>共识总结</h3>
+        <p>{{ details.artifacts.scribe_report.consensus_summary }}</p>
+        <div v-if="details.artifacts.scribe_report.structural_gaps.length">
+          <h3>结构缺失</h3>
+          <ul>
+            <li v-for="gap in details.artifacts.scribe_report.structural_gaps" :key="gap">{{ gap }}</li>
+          </ul>
+        </div>
+        <div v-if="details.artifacts.scribe_report.unresolved_conflicts.length">
+          <h3>未解决分歧</h3>
+          <ul>
+            <li v-for="conflict in details.artifacts.scribe_report.unresolved_conflicts" :key="conflict">{{ conflict }}</li>
+          </ul>
+        </div>
+        <details>
+          <summary>完整报告</summary>
+          <div class="scribe-final-report">{{ details.artifacts.scribe_report.final_report }}</div>
+        </details>
+      </div>
+    </section>
+
     <section v-if="details.artifacts.claims?.length" class="panel">
       <h2>证据池</h2>
       <div class="item-grid">
@@ -284,7 +311,7 @@
         <p v-if="details.session.context" class="muted">{{ details.session.context }}</p>
       </section>
 
-      <DecisionSummary v-if="primaryDecision" :decision="primaryDecision" />
+    <DecisionSummary v-if="primaryDecision" :decision="primaryDecision" :vote-policy="details.session.vote_policy" />
 
       <section class="role-card-row report-seat-row" aria-label="三席报告">
         <SeatRoleCard
@@ -356,7 +383,7 @@ import SeatRoleCard from '../components/SeatRoleCard.vue'
 import VoteChanges from '../components/VoteChanges.vue'
 import VoteDisplay from '../components/VoteDisplay.vue'
 import { useViewMode } from '../composables/useViewMode'
-import { exportSessionMarkdown, ideaStatusLabels, evidenceKindLabels, modeLabels, phaseLabels, qualityMetricRows, revisionDiffs, seatLabels, seatRunStats, type SeatKind, type SessionDetails } from '../domain/session'
+import { exportSessionMarkdown, ideaStatusLabels, evidenceKindLabels, modeLabels, phaseLabels, qualityMetricRows, revisionDiffs, seatLabels, seatRunStats, voteStrategyLabels, type SeatKind, type SessionDetails } from '../domain/session'
 
 const route = useRoute()
 const router = useRouter()
@@ -609,3 +636,32 @@ onBeforeUnmount(() => {
   if (timer) window.clearInterval(timer)
 })
 </script>
+
+<style scoped>
+.scribe-report h3 {
+  margin-top: 16px;
+  margin-bottom: 6px;
+  font-size: 14px;
+  color: var(--color-text-muted);
+}
+.scribe-report ul {
+  padding-left: 20px;
+  margin-bottom: 12px;
+}
+.scribe-report details {
+  margin-top: 12px;
+}
+.scribe-report details summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+.scribe-final-report {
+  margin-top: 8px;
+  padding: 12px;
+  background: var(--color-bg-subtle);
+  border-radius: var(--radius-sm);
+  white-space: pre-wrap;
+  font-size: 14px;
+  line-height: 1.7;
+}
+</style>

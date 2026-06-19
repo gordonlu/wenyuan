@@ -1,0 +1,812 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>文渊阁 UI 预览</title>
+  <style>
+    :root {
+      --bg: #ecefeb;
+      --ink: #17191c;
+      --muted: #5f6870;
+      --line: #cfd7d1;
+      --paper: #fbfbf8;
+      --dark: #0c1017;
+      --teal: #0f8aa1;
+      --amber: #c77a00;
+      --rose: #b62662;
+      font-family: "Microsoft YaHei", "Noto Sans SC", system-ui, sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      color: var(--ink);
+      background:
+        linear-gradient(90deg, rgba(18,20,23,.04) 1px, transparent 1px),
+        linear-gradient(180deg, rgba(18,20,23,.035) 1px, transparent 1px),
+        var(--bg);
+      background-size: 28px 28px;
+    }
+
+    .shell {
+      min-height: 100vh;
+      display: grid;
+      grid-template-columns: 236px 1fr;
+    }
+
+    aside {
+      position: sticky;
+      top: 0;
+      height: 100vh;
+      padding: 32px 24px;
+      background: linear-gradient(180deg, rgba(255,255,255,.035), transparent 34%), var(--dark);
+      color: white;
+      border-right: 1px solid rgba(212,226,236,.12);
+    }
+
+    .brand {
+      display: grid;
+      gap: 4px;
+      padding-bottom: 18px;
+      border-bottom: 1px solid rgba(212,226,236,.12);
+    }
+
+    .brand strong {
+      font-size: 24px;
+      letter-spacing: 1px;
+    }
+
+    .brand span {
+      color: #8ddbd1;
+      font-family: ui-monospace, Consolas, monospace;
+      font-size: 10px;
+      letter-spacing: 1.4px;
+    }
+
+    nav {
+      display: grid;
+      gap: 6px;
+      margin-top: 28px;
+    }
+
+    nav a {
+      color: #a8b3bd;
+      padding: 10px 12px;
+      border-left: 3px solid transparent;
+      text-decoration: none;
+      font-size: 14px;
+    }
+
+    nav a.active {
+      color: white;
+      border-left-color: var(--teal);
+      background: linear-gradient(90deg, rgba(15,138,161,.28), rgba(255,255,255,.055)), rgba(255,255,255,.04);
+      font-weight: 600;
+    }
+
+    main {
+      padding: 30px 34px 44px;
+    }
+
+    .page {
+      max-width: 1280px;
+      margin: 0 auto;
+    }
+
+    .top {
+      display: flex;
+      justify-content: space-between;
+      gap: 20px;
+      align-items: flex-start;
+      margin-bottom: 20px;
+      padding-bottom: 18px;
+      border-bottom: 1px solid rgba(212,226,236,.09);
+    }
+
+    .phase {
+      margin: 0;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 1px;
+    }
+
+    h1 {
+      margin: 4px 0 8px;
+      font-size: 28px;
+      line-height: 1.25;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      border: 1px solid rgba(15,143,127,.24);
+      border-radius: 999px;
+      padding: 4px 9px;
+      font-size: 11px;
+      font-weight: 700;
+      color: #31534d;
+      background: linear-gradient(180deg, rgba(255,255,255,.86), rgba(238,245,241,.72)), rgba(15,143,127,.06);
+      box-shadow: inset 0 1px 0 rgba(255,255,255,.72), 0 1px 2px rgba(18,20,23,.04);
+    }
+
+    .badge::before {
+      content: "";
+      width: 5px;
+      height: 5px;
+      border-radius: 999px;
+      background: currentColor;
+      opacity: .58;
+    }
+
+    .actions {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+
+    button {
+      min-height: 38px;
+      border: 1px solid rgba(95,226,208,.34);
+      border-radius: 4px;
+      background: linear-gradient(180deg, rgba(255,255,255,.055), rgba(255,255,255,.01)), rgba(12,18,26,.82);
+      color: #b8fff4;
+      padding: 0 14px;
+      font: inherit;
+      font-size: 14px;
+      cursor: pointer;
+      box-shadow: inset 0 1px 0 rgba(255,255,255,.07);
+    }
+
+    .progress {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 30px;
+      padding: 16px 18px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: linear-gradient(180deg, rgba(255,255,255,.78), transparent 56%), rgba(251,251,248,.82);
+      color: var(--muted);
+      font-size: 14px;
+      font-weight: 700;
+    }
+
+    .dot {
+      width: 42px;
+      height: 42px;
+      display: grid;
+      place-items: center;
+      border-radius: 999px;
+      border: 2px solid #0f8f7f;
+      background: #2fb7a5;
+      color: #04100e;
+      font-size: 15px;
+    }
+
+    .line {
+      width: 52px;
+      height: 3px;
+      background: #0f8f7f;
+    }
+
+    .role-row {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 16px;
+      align-items: stretch;
+      margin: 4px 0 32px;
+      padding-bottom: 10px;
+    }
+
+    .card {
+      --role-main: var(--teal);
+      --role-deep: #063f55;
+      --pointer-x: 76%;
+      --pointer-y: 24%;
+      --tilt-x: 0deg;
+      --tilt-y: 0deg;
+      position: relative;
+      overflow: hidden;
+      min-height: 256px;
+      padding: 18px;
+      border: 0;
+      border-radius: 8px;
+      background:
+        radial-gradient(circle at 18% 10%, rgba(255, 255, 255, 0.42), transparent 28%),
+        linear-gradient(145deg, color-mix(in srgb, var(--role-main) 82%, #ffffff), var(--role-main) 46%, var(--role-deep));
+      box-shadow:
+        0 0 0 5px rgba(255,255,255,.3),
+        0 20px 42px rgba(16, 24, 40, 0.18),
+        inset 0 0 0 1px rgba(0, 0, 0, 0.18),
+        inset 0 1px 0 rgba(255, 255, 255, 0.42);
+      color: white;
+      isolation: isolate;
+      transform: perspective(900px) rotateX(var(--tilt-x)) rotateY(var(--tilt-y));
+      transform-style: preserve-3d;
+      transition: transform 180ms ease-out, box-shadow 180ms ease-out;
+      will-change: transform;
+    }
+
+    .card:hover {
+      box-shadow:
+        0 0 0 5px rgba(255,255,255,.3),
+        0 26px 54px rgba(16, 24, 40, 0.24),
+        inset 0 0 0 1px rgba(0, 0, 0, 0.18),
+        inset 0 1px 0 rgba(255, 255, 255, 0.52);
+    }
+
+    .card:nth-child(2) {
+      --role-main: var(--amber);
+      --role-deep: #6f3f00;
+    }
+
+    .card:nth-child(3) {
+      --role-main: var(--rose);
+      --role-deep: #641536;
+    }
+
+    .holo {
+      position: absolute;
+      inset: -10px;
+      z-index: 1;
+      pointer-events: none;
+      background-repeat: no-repeat;
+      transition: opacity 160ms ease-out, filter 160ms ease-out, mask-image 160ms ease-out;
+    }
+
+    .holo-full {
+      opacity: .06;
+      background:
+        url('/role-holo-full-art.png'),
+        linear-gradient(118deg, rgba(255,70,218,.26) 0%, rgba(83,255,233,.42) 24%, rgba(255,234,74,.32) 45%, rgba(97,126,255,.36) 68%, rgba(255,84,210,.26) 100%),
+        radial-gradient(circle at var(--pointer-x) var(--pointer-y), rgba(255,255,255,.16), transparent 34%);
+      background-size: cover, 100% 100%, 100% 100%;
+      background-position:
+        center,
+        center,
+        0 0;
+      mix-blend-mode: screen;
+      filter: saturate(1.4) contrast(1.02);
+    }
+
+    .holo-gallery {
+      opacity: .03;
+      background:
+        url('/role-holo-gallery.png'),
+        repeating-linear-gradient(118deg, rgba(255,255,255,0) 0 13px, rgba(255,255,255,.1) 14px 15px),
+        radial-gradient(circle at var(--pointer-x) var(--pointer-y), rgba(255,255,255,.14), transparent 26%),
+        conic-gradient(from 140deg at var(--pointer-x) var(--pointer-y), rgba(91,255,237,.3), rgba(255,88,220,.2), rgba(255,238,82,.28), rgba(91,124,255,.2), rgba(91,255,237,.3));
+      background-size: cover, 240px 240px, 100% 100%, 100% 100%;
+      background-position:
+        center,
+        center,
+        0 0,
+        0 0;
+      mix-blend-mode: screen;
+      filter: saturate(1.55) contrast(1.03);
+    }
+
+    .holo-reverse {
+      opacity: .015;
+      background:
+        url('/role-holo-reverse.png'),
+        linear-gradient(105deg, transparent 20%, rgba(255,255,255,.18) 48%, transparent 72%);
+      background-size: cover, 100% 100%;
+      background-position:
+        center,
+        0 0;
+      mix-blend-mode: screen;
+      filter: saturate(1.2) brightness(1.08);
+    }
+
+    .card:hover .holo-full {
+      opacity: .5;
+      filter: saturate(2.65) contrast(1.12);
+      mask-image: radial-gradient(circle 190px at var(--pointer-x) var(--pointer-y), rgba(0,0,0,.9) 0 18%, rgba(0,0,0,.56) 50%, rgba(0,0,0,.16) 82%, transparent 100%);
+    }
+
+    .card:hover .holo-gallery {
+      opacity: .36;
+      filter: saturate(2.9) contrast(1.12);
+      mask-image: radial-gradient(circle 212px at var(--pointer-x) var(--pointer-y), rgba(0,0,0,.88) 0 16%, rgba(0,0,0,.5) 50%, rgba(0,0,0,.14) 82%, transparent 100%);
+    }
+
+    .card:hover .holo-reverse {
+      opacity: .1;
+      mask-image: radial-gradient(circle 166px at var(--pointer-x) var(--pointer-y), rgba(0,0,0,.72) 0 16%, rgba(0,0,0,.38) 50%, rgba(0,0,0,.1) 82%, transparent 100%);
+    }
+
+    .ink {
+      position: absolute;
+      inset: -10px -6px;
+      background-position: 98% center;
+      background-repeat: no-repeat;
+      background-size: 90% auto;
+      opacity: .15;
+      filter: contrast(1.04) saturate(.92);
+      mix-blend-mode: multiply;
+      z-index: 0;
+      pointer-events: none;
+    }
+
+    .card:nth-child(2) .ink {
+      background-size: 80% auto;
+    }
+
+    .role-head,
+    .summary,
+    .metrics,
+    .foot {
+      position: relative;
+      z-index: 3;
+    }
+
+    .role-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    .kicker {
+      color: rgba(255,255,255,.76);
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .role-head h2 {
+      margin: 2px 0 0;
+      font-size: 25px;
+    }
+
+    .status {
+      min-width: 66px;
+      height: 26px;
+      justify-content: center;
+      border-color: rgba(255,255,255,.32);
+      background: rgba(255,255,255,.18);
+      color: white;
+      white-space: nowrap;
+    }
+
+    .summary {
+      min-height: 52px;
+      margin: 78px 0 14px;
+      color: rgba(255,255,255,.88);
+      font-size: 13px;
+      line-height: 1.55;
+      text-shadow: 0 1px 10px rgba(0,0,0,.2);
+    }
+
+    .metrics {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 0;
+      overflow: hidden;
+      border: 1px solid rgba(255,255,255,.2);
+      border-radius: 4px;
+      background: rgba(9,14,20,.24);
+      backdrop-filter: blur(10px);
+    }
+
+    .metrics div {
+      padding: 9px 10px;
+      border-right: 1px solid rgba(255,255,255,.14);
+      border-bottom: 1px solid rgba(255,255,255,.14);
+    }
+
+    .metrics div:nth-child(2n) {
+      border-right: 0;
+    }
+
+    .metrics div:nth-last-child(-n + 2) {
+      border-bottom: 0;
+    }
+
+    .metrics span {
+      display: block;
+      color: rgba(255,255,255,.58);
+      font-size: 11px;
+    }
+
+    .metrics strong {
+      display: block;
+      margin-top: 2px;
+      color: white;
+      font-size: 13px;
+    }
+
+    .panel {
+      margin-bottom: 18px;
+      padding: 24px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: linear-gradient(180deg, rgba(255,255,255,.72), transparent 48%), var(--paper);
+      box-shadow: 0 10px 28px rgba(18,20,23,.06);
+    }
+
+    .workspace-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1.5fr) minmax(320px, 0.8fr);
+      gap: 18px;
+      align-items: start;
+    }
+
+    .stack {
+      display: grid;
+      gap: 18px;
+    }
+
+    .decision {
+      color: white;
+      border-color: rgba(95,226,208,.28);
+      background: radial-gradient(circle at 18% 0%, rgba(47,183,165,.18), transparent 32%), linear-gradient(135deg, rgba(15,23,32,.98), rgba(8,13,19,.96)), #0c1118;
+    }
+
+    .decision h2,
+    .panel h2 {
+      margin: 0 0 12px;
+      font-size: 18px;
+    }
+
+    .decision-grid,
+    .stat-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .decision-item,
+    .stat {
+      padding: 14px;
+      border: 1px solid rgba(255,255,255,.12);
+      border-radius: 6px;
+      background: rgba(255,255,255,.06);
+      font-size: 13px;
+      line-height: 1.5;
+    }
+
+    .stat {
+      border-color: var(--line);
+      background: #f1f3ef;
+    }
+
+    .stat strong {
+      display: block;
+      margin-bottom: 4px;
+      color: #064e45;
+      font-family: ui-monospace, Consolas, monospace;
+      font-size: 24px;
+      font-variant-numeric: tabular-nums;
+      line-height: 1.05;
+    }
+
+    .table {
+      display: grid;
+      gap: 0;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #d8dfd9;
+    }
+
+    .table-row {
+      display: grid;
+      grid-template-columns: 120px repeat(3, minmax(0, 1fr));
+      border-bottom: 1px solid var(--line);
+      background: rgba(255,255,255,.72);
+    }
+
+    .table-row:last-child {
+      border-bottom: 0;
+    }
+
+    .table-row > div {
+      padding: 12px;
+      border-right: 1px solid var(--line);
+      font-size: 13px;
+      line-height: 1.5;
+    }
+
+    .table-row > div:last-child {
+      border-right: 0;
+    }
+
+    .table-head > div,
+    .table-label {
+      background: #f3f6f2;
+      color: #5f6870;
+      font-weight: 700;
+    }
+
+    .critique-list,
+    .timeline {
+      display: grid;
+      gap: 10px;
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .critique-list li,
+    .timeline li {
+      padding: 11px 0;
+      border-bottom: 1px solid var(--line);
+      font-size: 13px;
+      line-height: 1.55;
+    }
+
+    .critique-list li:last-child,
+    .timeline li:last-child {
+      border-bottom: 0;
+    }
+
+    .meta-line {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      margin-bottom: 6px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .vote-row {
+      display: grid;
+      grid-template-columns: 72px 56px minmax(0, 1fr);
+      gap: 10px;
+      padding: 10px 0;
+      border-bottom: 1px solid var(--line);
+      font-size: 13px;
+      line-height: 1.5;
+    }
+
+    .vote-row:last-child {
+      border-bottom: 0;
+    }
+
+    @media (max-width: 900px) {
+      .shell { grid-template-columns: 1fr; }
+      aside { display: none; }
+      main { padding: 18px; }
+      .top, .role-row, .decision-grid, .stat-grid, .workspace-grid, .table-row { grid-template-columns: 1fr; display: grid; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .card {
+        transform: none;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <aside>
+      <div class="brand">
+        <strong>文渊阁</strong>
+        <span>WENYUAN COUNCIL</span>
+      </div>
+      <nav>
+        <a class="active" href="#">新建议题</a>
+        <a href="#">历史议题</a>
+        <a href="#">配置状态</a>
+      </nav>
+    </aside>
+
+    <main>
+      <section class="page">
+        <header class="top">
+          <div>
+            <p class="phase">复议中</p>
+            <h1>是否为桌面助手加入多 Agent 讨论能力</h1>
+            <span class="badge">三席合议</span>
+          </div>
+          <div class="actions">
+            <button>复制结论</button>
+            <button>导出</button>
+            <button>暂停</button>
+            <button>重试阶段</button>
+          </div>
+        </header>
+
+        <div class="progress" aria-label="合议阶段进度">
+          <span class="dot">1</span><span class="line"></span>
+          <span class="dot">2</span><span class="line"></span>
+          <span class="dot">3</span><span class="line"></span>
+          <span class="dot">4</span><span class="line"></span>
+          <span>表决</span>
+        </div>
+
+        <section class="role-row" aria-label="三席状态">
+          <article class="card">
+            <div class="ink" style="background-image: url('/role-ink/mouyuan-ink.png')"></div>
+            <div class="holo holo-full"></div>
+            <div class="holo holo-gallery"></div>
+            <div class="holo holo-reverse"></div>
+            <div class="role-head">
+              <div><span class="kicker">找新路径</span><h2>谋远席</h2></div>
+              <span class="badge status">思考中</span>
+            </div>
+            <p class="summary">负责提出备选方向、机会窗口和不寻常的解法。</p>
+            <div class="metrics">
+              <div><span>模型</span><strong>默认配置</strong></div>
+              <div><span>调用</span><strong>4 次</strong></div>
+              <div><span>耗时</span><strong>8200 ms</strong></div>
+              <div><span>失败</span><strong>0 次</strong></div>
+            </div>
+          </article>
+
+          <article class="card">
+            <div class="ink" style="background-image: url('/role-ink/jingshi-ink.png')"></div>
+            <div class="holo holo-full"></div>
+            <div class="holo holo-gallery"></div>
+            <div class="holo holo-reverse"></div>
+            <div class="role-head">
+              <div><span class="kicker">看落地</span><h2>经世席</h2></div>
+              <span class="badge status">已完成</span>
+            </div>
+            <p class="summary">负责把方案落到资源、成本、节奏和执行条件上。</p>
+            <div class="metrics">
+              <div><span>模型</span><strong>默认配置</strong></div>
+              <div><span>调用</span><strong>4 次</strong></div>
+              <div><span>耗时</span><strong>7600 ms</strong></div>
+              <div><span>失败</span><strong>0 次</strong></div>
+            </div>
+          </article>
+
+          <article class="card">
+            <div class="ink" style="background-image: url('/role-ink/chizheng-ink.png')"></div>
+            <div class="holo holo-full"></div>
+            <div class="holo holo-gallery"></div>
+            <div class="holo holo-reverse"></div>
+            <div class="role-head">
+              <div><span class="kicker">守边界</span><h2>持正席</h2></div>
+              <span class="badge status">等待</span>
+            </div>
+            <p class="summary">负责检查风险、证据、反例和不可接受的代价。</p>
+            <div class="metrics">
+              <div><span>模型</span><strong>默认配置</strong></div>
+              <div><span>调用</span><strong>3 次</strong></div>
+              <div><span>耗时</span><strong>6900 ms</strong></div>
+              <div><span>失败</span><strong>0 次</strong></div>
+            </div>
+          </article>
+        </section>
+
+        <section class="panel decision">
+          <h2>决策结论</h2>
+          <div class="decision-grid">
+            <div class="decision-item">多数倾向：先做最小闭环，不直接扩大到完整 Agent 市场。</div>
+            <div class="decision-item">主要理由：能验证价值，同时控制复杂度和成本。</div>
+            <div class="decision-item">少数意见：需要保留可回滚路径和更清晰的失败诊断。</div>
+          </div>
+        </section>
+
+        <section class="workspace-grid">
+          <div class="stack">
+            <section class="panel">
+              <h2>议题</h2>
+              <p style="margin: 0; line-height: 1.7;">是否应该为桌面助手加入多 Agent 讨论能力？需要判断用户价值、实现成本、风险边界，以及第一版应该做到什么程度。</p>
+            </section>
+
+            <section class="panel">
+              <h2>策案对比</h2>
+              <div class="table">
+                <div class="table-row table-head">
+                  <div>维度</div>
+                  <div>谋远席</div>
+                  <div>经世席</div>
+                  <div>持正席</div>
+                </div>
+                <div class="table-row">
+                  <div class="table-label">主张</div>
+                  <div>先做开放式多 Agent 探索。</div>
+                  <div>先收敛成可复用的审议流程。</div>
+                  <div>先补齐失败诊断和回滚机制。</div>
+                </div>
+                <div class="table-row">
+                  <div class="table-label">价值</div>
+                  <div>扩大复杂问题的解法空间。</div>
+                  <div>提高真实任务的完成稳定性。</div>
+                  <div>降低误导、幻觉和不可控风险。</div>
+                </div>
+                <div class="table-row">
+                  <div class="table-label">风险</div>
+                  <div>范围容易膨胀。</div>
+                  <div>初期体验可能不够惊艳。</div>
+                  <div>上线速度会变慢。</div>
+                </div>
+              </div>
+            </section>
+
+            <section class="panel">
+              <h2>批议摘要</h2>
+              <ul class="critique-list">
+                <li>
+                  <div class="meta-line"><span>持正席 → 谋远席</span><span class="badge">补证</span></div>
+                  开放探索方向需要明确失败边界，否则用户很难判断什么时候应该停止继续生成。
+                </li>
+                <li>
+                  <div class="meta-line"><span>经世席 → 持正席</span><span class="badge">反驳</span></div>
+                  如果所有风险都前置解决，第一版会变成诊断系统，而不是可用的决策工具。
+                </li>
+                <li>
+                  <div class="meta-line"><span>谋远席 → 经世席</span><span class="badge">扩展</span></div>
+                  最小闭环也要保留一定探索空间，否则三席差异会被流程压平。
+                </li>
+              </ul>
+            </section>
+          </div>
+
+          <div class="stack">
+            <section class="panel">
+              <h2>投票记录</h2>
+              <div class="vote-row">
+                <strong>谋远席</strong><span class="badge">支持</span><span>支持经世席方案，但要求保留探索入口。</span>
+              </div>
+              <div class="vote-row">
+                <strong>经世席</strong><span class="badge">支持</span><span>支持最小闭环，先验证真实用户任务。</span>
+              </div>
+              <div class="vote-row">
+                <strong>持正席</strong><span class="badge">条件</span><span>需要增加风险阻塞和失败恢复提示。</span>
+              </div>
+            </section>
+
+            <section class="panel">
+              <h2>讨论质量</h2>
+              <div class="stat-grid" style="grid-template-columns: 1fr 1fr;">
+                <div class="stat"><strong>18%</strong><span>观点重复率</span></div>
+                <div class="stat"><strong>67%</strong><span>批议有效率</span></div>
+                <div class="stat"><strong>42%</strong><span>复议修改率</span></div>
+                <div class="stat"><strong>0 次</strong><span>模型失败</span></div>
+              </div>
+            </section>
+
+            <section class="panel">
+              <h2>事件时间线</h2>
+              <ol class="timeline">
+                <li><div class="meta-line">14:02</div>谋远席完成独议。</li>
+                <li><div class="meta-line">14:04</div>经世席提交落地路径。</li>
+                <li><div class="meta-line">14:07</div>持正席提出风险阻塞。</li>
+                <li><div class="meta-line">14:11</div>三席进入复议阶段。</li>
+              </ol>
+            </section>
+          </div>
+        </section>
+      </section>
+    </main>
+  </div>
+  <script>
+    const cards = document.querySelectorAll('.card')
+
+    function resetCard(card) {
+      card.style.setProperty('--pointer-x', '76%')
+      card.style.setProperty('--pointer-y', '24%')
+      card.style.setProperty('--tilt-x', '0deg')
+      card.style.setProperty('--tilt-y', '0deg')
+    }
+
+    cards.forEach((card) => {
+      resetCard(card)
+      card.addEventListener('pointermove', (event) => {
+        const rect = card.getBoundingClientRect()
+        const x = (event.clientX - rect.left) / rect.width
+        const y = (event.clientY - rect.top) / rect.height
+        const tiltY = (x - 0.5) * 10
+        const tiltX = (0.5 - y) * 8
+
+        card.style.setProperty('--pointer-x', `${Math.round(x * 100)}%`)
+        card.style.setProperty('--pointer-y', `${Math.round(y * 100)}%`)
+        card.style.setProperty('--tilt-x', `${tiltX.toFixed(2)}deg`)
+        card.style.setProperty('--tilt-y', `${tiltY.toFixed(2)}deg`)
+      })
+      card.addEventListener('pointerleave', () => resetCard(card))
+    })
+  </script>
+</body>
+</html>

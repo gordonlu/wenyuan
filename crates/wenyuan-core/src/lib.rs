@@ -115,6 +115,9 @@ pub struct Session {
     pub failure_reason: Option<String>,
     pub convergence_used: bool,
     pub model_config: Option<HashMap<SeatKind, SeatModelConfig>>,
+    pub vote_policy: Option<VotePolicy>,
+    pub scribe_enabled: bool,
+    pub search_enabled: bool,
 }
 
 impl Session {
@@ -137,6 +140,9 @@ impl Session {
             failure_reason: None,
             convergence_used: false,
             model_config: None,
+            vote_policy: None,
+            scribe_enabled: false,
+            search_enabled: false,
         }
     }
 
@@ -160,6 +166,9 @@ impl Session {
             failure_reason: None,
             convergence_used: false,
             model_config: None,
+            vote_policy: None,
+            scribe_enabled: false,
+            search_enabled: false,
         }
     }
 
@@ -731,6 +740,30 @@ pub fn generate_merged_proposal(proposals: &[Proposal], common_idea_ids: &[Uuid]
         success_metrics: all_metrics,
         confidence: proposals.iter().map(|p| p.confidence).sum::<f32>() / proposals.len() as f32,
     }
+}
+
+// --- Search types ---
+
+#[derive(Debug, Error)]
+pub enum SearchError {
+    #[error("search request failed: {0}")]
+    Request(String),
+    #[error("search backend {0} returned error: {1}")]
+    Backend(&'static str, String),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SearchResult {
+    pub title: String,
+    pub snippet: String,
+    pub url: String,
+    pub source: String,
+}
+
+#[async_trait::async_trait]
+pub trait SearchBackend: Send + Sync {
+    fn name(&self) -> &'static str;
+    async fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>, SearchError>;
 }
 
 #[cfg(test)]

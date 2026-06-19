@@ -35,6 +35,42 @@
             <option value="single_agent">单 Agent：初稿、自评、修订</option>
           </select>
         </label>
+        <details class="vote-policy-config" :open="scribeOpen">
+          <summary>书记官</summary>
+          <div class="vote-policy-body">
+            <label class="toggle-row">
+              <input type="checkbox" v-model="scribeEnabled" />
+              <span>启用书记官</span>
+            </label>
+            <p class="scribe-note">书记官不参与投票，负责整理共识、汇总冲突、生成最终报告</p>
+          </div>
+        </details>
+        <details class="vote-policy-config" :open="true">
+          <summary>联网搜索</summary>
+          <div class="vote-policy-body">
+            <label class="toggle-row">
+              <input type="checkbox" v-model="searchEnabled" />
+              <span>启用搜索</span>
+            </label>
+            <p class="scribe-note">在讨论前根据议题内容搜索网络，搜索结果作为证据供各席参考</p>
+          </div>
+        </details>
+        <details class="vote-policy-config" :open="votePolicyOpen">
+          <summary>投票策略</summary>
+          <div class="vote-policy-body">
+            <label>
+              <strong>策略</strong>
+              <select v-model="voteStrategy">
+                <option v-for="s in voteStrategyOptions" :key="s.value" :value="s.value">{{ s.label }}</option>
+              </select>
+              <span class="vote-policy-hint">{{ voteStrategyHint }}</span>
+            </label>
+            <label class="toggle-row">
+              <input type="checkbox" v-model="allowSelfVote" />
+              <span>允许自投</span>
+            </label>
+          </div>
+        </details>
         <details v-if="showModelConfig" class="model-config" :open="hasModelConfig">
           <summary>席位模型</summary>
           <div v-for="seat in activeSeats" :key="seat.key" class="seat-config">
@@ -70,6 +106,12 @@ const title = ref('')
 const topic = ref('')
 const context = ref('')
 const mode = ref<'three_seat' | 'single_agent'>('three_seat')
+const voteStrategy = ref<'simple_majority' | 'risk_veto' | 'unanimous' | 'conditional_pass' | 'weighted_score'>('simple_majority')
+const allowSelfVote = ref(true)
+const scribeEnabled = ref(false)
+const searchEnabled = ref(false)
+const votePolicyOpen = ref(true)
+const scribeOpen = ref(true)
 const loading = ref(false)
 const error = ref('')
 const seatModelsMap = ref<Record<string, Array<{ value: string; label: string }>>>({})
@@ -122,6 +164,25 @@ const hasModelConfig = computed(() =>
   seatConfigs.value.some(s => s.model)
 )
 
+const voteStrategyOptions = [
+  { value: 'simple_majority', label: '普通多数（2/3）' },
+  { value: 'risk_veto', label: '风险否决' },
+  { value: 'unanimous', label: '全票通过（3/3）' },
+  { value: 'conditional_pass', label: '有条件通过' },
+  { value: 'weighted_score', label: '加权评分' },
+]
+
+const voteStrategyHint = computed(() => {
+  const hints: Record<string, string> = {
+    simple_majority: '两席以上同意即形成多数',
+    risk_veto: '任何一席提出阻塞问题即否决',
+    unanimous: '需要三席全部同意',
+    conditional_pass: '同普通多数，但增加持续监控条件',
+    weighted_score: '按五项评分加权总分决定',
+  }
+  return hints[voteStrategy.value] ?? ''
+})
+
 const activeSeats = computed(() =>
   mode.value === 'single_agent'
     ? seatConfigs.value.slice(0, 1)
@@ -136,12 +197,18 @@ async function submit() {
     for (const s of seatConfigs.value) {
       if (s.model) model_config[s.key] = { model: s.model }
     }
+    const votePolicy = voteStrategy.value !== 'simple_majority' || !allowSelfVote.value
+      ? { strategy: voteStrategy.value, allow_self_vote: allowSelfVote.value }
+      : undefined
     const session = await api.createSession({
       title: title.value,
       topic: topic.value,
       context: context.value,
       mode: mode.value,
       model_config: Object.keys(model_config).length > 0 ? model_config : undefined,
+      vote_policy: votePolicy,
+      scribe_enabled: scribeEnabled.value || undefined,
+      search_enabled: searchEnabled.value || undefined,
     })
     await api.startSession(session.id)
     router.push(`/sessions/${session.id}`)
@@ -268,6 +335,7 @@ async function submit() {
   font-size: 24px;
   line-height: 1;
 }
+.vote-policy-config,
 .model-config {
   border: 1px solid rgba(141, 219, 209, 0.18);
   border-radius: var(--radius-sm);
@@ -276,11 +344,42 @@ async function submit() {
     linear-gradient(180deg, rgba(255, 255, 255, 0.06), transparent),
     rgba(255, 255, 255, 0.035);
 }
+.vote-policy-config summary,
 .model-config summary {
   cursor: pointer;
   font-weight: 600;
   user-select: none;
   color: #e8f7f4;
+}
+.vote-policy-body {
+  display: grid;
+  gap: 12px;
+  margin-top: 8px;
+}
+.vote-policy-hint {
+  display: block;
+  margin-top: 4px;
+  font-size: 12px;
+  color: #8db4b4;
+  line-height: 1.4;
+}
+.toggle-row {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  color: #f8fafc;
+}
+.toggle-row input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  accent-color: #8ddbd1;
+}
+.scribe-note {
+  margin: 0;
+  font-size: 12px;
+  color: #8db4b4;
+  line-height: 1.4;
 }
 .seat-config {
   margin-top: 8px;

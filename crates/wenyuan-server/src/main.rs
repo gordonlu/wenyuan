@@ -21,10 +21,14 @@ use tower_http::{
 use tracing::{error, info};
 use uuid::Uuid;
 use wenyuan_agent::{AgentError, AgentRunner, CancellationFlag, ProgressSink};
-use wenyuan_core::{DeliberationMode, SeatKind, SeatModelConfig, Session, SessionPhase};
+use wenyuan_core::{
+    DeliberationMode, SearchBackend, SeatKind, SeatModelConfig, Session, SessionPhase, VotePolicy,
+};
 use wenyuan_provider::{
-    LlmProvider, MockProvider, MockScenario, OpenAiCompatibleConfig, OpenAiCompatibleProvider,
-    SeatRoutedProvider,
+    BingBackend, CustomSearchBackend, DoubaoBackend, DuckDuckGoBackend,
+    GoogleCustomSearchBackend, LlmProvider, MockProvider, MockScenario,
+    OpenAiCompatibleConfig, OpenAiCompatibleProvider, SearchPool, SearXNGSearchBackend,
+    SeatRoutedProvider, TavilyBackend, WikipediaBackend,
 };
 use wenyuan_store::{SessionDetails, Store};
 
@@ -35,6 +39,7 @@ struct AppState {
     running: Arc<Mutex<HashMap<Uuid, CancellationFlag>>>,
     event_tx: broadcast::Sender<Uuid>,
     config: ConfigStatus,
+    search_backend: Option<Arc<dyn SearchBackend>>,
 }
 
 struct StoreProgressSink {
@@ -94,6 +99,9 @@ struct CreateSessionRequest {
     context: Option<String>,
     mode: Option<DeliberationMode>,
     model_config: Option<HashMap<SeatKind, SeatModelConfig>>,
+    vote_policy: Option<VotePolicy>,
+    scribe_enabled: Option<bool>,
+    search_enabled: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -128,12 +136,17 @@ async fn main() -> anyhow::Result<()> {
         info!("marked {recovered} stale session execution(s) as retry_required");
     }
     let (provider, config) = provider_from_env(&database_url);
+    let search_backend = search_backend_from_env();
+    if search_backend.is_some() {
+        info!("search backend configured");
+    }
     let state = AppState {
         store,
         runner: AgentRunner::new(provider).with_timeout(provider_timeout_from_env()),
         running: Arc::new(Mutex::new(HashMap::new())),
         event_tx: broadcast::channel(128).0,
         config,
+        search_backend,
     };
 
     let app = app(state);
@@ -151,6 +164,61 @@ fn provider_timeout_from_env() -> Duration {
         .filter(|seconds| *seconds > 0)
         .map(Duration::from_secs)
         .unwrap_or_else(|| Duration::from_secs(120))
+}
+
+fn search_backend_from_env() -> Option<Arc<dyn SearchBackend>> {
+    let provider = env::var("WENYUAN_SEARCH_PROVIDER")
+        .unwrap_or_default()
+        .to_lowercase();
+    if provider.is_empty() {
+        return None;
+    }
+    let mut backends: Vec<Box<dyn SearchBackend>> = Vec::new();
+    for name in provider.split(',') {
+        match name.trim() {
+            "bing" => backends.push(Box::new(BingBackend::new())),
+            "wikipedia" => backends.push(Box::new(WikipediaBackend::new())),
+            "duckduckgo" => backends.push(Box::new(DuckDuckGoBackend::new())),
+            "custom" => {
+                let url = env::var("WENYUAN_SEARCH_API_URL").unwrap_or_default();
+                if !url.is_empty() {
+                    let key = env::var("WENYUAN_SEARCH_API_KEY").ok();
+                    backends.push(Box::new(CustomSearchBackend::new(url, key)));
+                }
+            }
+            "doubao" => {
+                let key = env::var("WENYUAN_SEARCH_DOUBAO_KEY").unwrap_or_default();
+                if !key.is_empty() {
+                    backends.push(Box::new(DoubaoBackend::new(key)));
+                }
+            }
+            "tavily" => {
+                let key = env::var("WENYUAN_SEARCH_TAVILY_KEY").unwrap_or_default();
+                if !key.is_empty() {
+                    backends.push(Box::new(TavilyBackend::new(key)));
+                }
+            }
+            "google" => {
+                let key = env::var("WENYUAN_SEARCH_GOOGLE_KEY").unwrap_or_default();
+                let cx = env::var("WENYUAN_SEARCH_GOOGLE_CX").unwrap_or_default();
+                if !key.is_empty() && !cx.is_empty() {
+                    backends.push(Box::new(GoogleCustomSearchBackend::new(key, cx)));
+                }
+            }
+            "searxng" => {
+                let url = env::var("WENYUAN_SEARCH_SEARXNG_URL").unwrap_or_default();
+                if !url.is_empty() {
+                    backends.push(Box::new(SearXNGSearchBackend::new(url)));
+                }
+            }
+            _ => info!("unknown search provider: {}", name.trim()),
+        }
+    }
+    if backends.is_empty() {
+        None
+    } else {
+        Some(Arc::new(SearchPool::new(backends)))
+    }
 }
 
 fn app(state: AppState) -> Router {
@@ -425,6 +493,13 @@ async fn create_session(
         input.mode.unwrap_or_default(),
     );
     session.model_config = input.model_config;
+    session.vote_policy = input.vote_policy;
+    if let Some(enabled) = input.scribe_enabled {
+        session.scribe_enabled = enabled;
+    }
+    if let Some(enabled) = input.search_enabled {
+        session.search_enabled = enabled;
+    }
     state
         .store
         .create_session_with_provider_refs(&session, &seat_provider_refs(&state.config))
@@ -485,10 +560,15 @@ async fn start_session(
     drop(running);
 
     let store = state.store.clone();
-    let runner = state.runner.clone();
     let running_map = state.running.clone();
     let event_tx = state.event_tx.clone();
     let session = details.session;
+    let mut runner = state.runner.clone();
+    if session.search_enabled {
+        if let Some(ref search) = state.search_backend {
+            runner = runner.with_search(search.clone());
+        }
+    }
     tokio::spawn(async move {
         let progress = Arc::new(StoreProgressSink {
             session_id: id,

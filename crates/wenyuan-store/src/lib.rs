@@ -40,6 +40,9 @@ impl Store {
         store.ensure_seat_conversation_columns().await?;
         store.ensure_seat_run_trace_columns().await?;
         store.ensure_model_config_column().await?;
+        store.ensure_vote_policy_column().await?;
+        store.ensure_scribe_enabled_column().await?;
+        store.ensure_search_enabled_column().await?;
         Ok(store)
     }
 
@@ -179,6 +182,54 @@ impl Store {
         Ok(())
     }
 
+    async fn ensure_vote_policy_column(&self) -> Result<(), StoreError> {
+        let rows = sqlx::query("pragma table_info(sessions)")
+            .fetch_all(&self.pool)
+            .await?;
+        let columns: std::collections::HashSet<String> = rows
+            .into_iter()
+            .filter_map(|row| row.try_get::<String, _>("name").ok())
+            .collect();
+        if !columns.contains("vote_policy") {
+            sqlx::query("alter table sessions add column vote_policy text")
+                .execute(&self.pool)
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn ensure_scribe_enabled_column(&self) -> Result<(), StoreError> {
+        let rows = sqlx::query("pragma table_info(sessions)")
+            .fetch_all(&self.pool)
+            .await?;
+        let columns: std::collections::HashSet<String> = rows
+            .into_iter()
+            .filter_map(|row| row.try_get::<String, _>("name").ok())
+            .collect();
+        if !columns.contains("scribe_enabled") {
+            sqlx::query("alter table sessions add column scribe_enabled integer not null default 0")
+                .execute(&self.pool)
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn ensure_search_enabled_column(&self) -> Result<(), StoreError> {
+        let rows = sqlx::query("pragma table_info(sessions)")
+            .fetch_all(&self.pool)
+            .await?;
+        let columns: std::collections::HashSet<String> = rows
+            .into_iter()
+            .filter_map(|row| row.try_get::<String, _>("name").ok())
+            .collect();
+        if !columns.contains("search_enabled") {
+            sqlx::query("alter table sessions add column search_enabled integer not null default 0")
+                .execute(&self.pool)
+                .await?;
+        }
+        Ok(())
+    }
+
     pub async fn create_session(&self, session: &Session) -> Result<(), StoreError> {
         self.create_session_with_provider_refs(session, &HashMap::new())
             .await
@@ -192,8 +243,8 @@ impl Store {
         let mut tx = self.pool.begin().await?;
         sqlx::query(
             "insert into sessions
-            (id, title, topic, context, mode, phase, created_at, updated_at, result_json, failure_reason, convergence_used, artifacts_json, recovery_state, model_config)
-            values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+            (id, title, topic, context, mode, phase, created_at, updated_at, result_json, failure_reason, convergence_used, artifacts_json, recovery_state, model_config, vote_policy, scribe_enabled, search_enabled)
+            values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
         )
         .bind(session.id.to_string())
         .bind(&session.title)
@@ -209,6 +260,9 @@ impl Store {
         .bind(serde_json::to_string(&DiscussionArtifacts::default())?)
         .bind("idle")
         .bind(optional_json(&session.model_config)?)
+        .bind(optional_json(&session.vote_policy)?)
+        .bind(session.scribe_enabled)
+        .bind(session.search_enabled)
         .execute(&mut *tx)
         .await?;
         let seats: &[SeatKind] = match session.mode {
@@ -259,7 +313,7 @@ impl Store {
             .unwrap_or_default();
 
         sqlx::query(
-            "update sessions set phase = ?2, updated_at = ?3, result_json = ?4, failure_reason = ?5, convergence_used = ?6, model_config = ?7 where id = ?1",
+            "update sessions set phase = ?2, updated_at = ?3, result_json = ?4, failure_reason = ?5, convergence_used = ?6, model_config = ?7, vote_policy = ?8, scribe_enabled = ?9, search_enabled = ?10 where id = ?1",
         )
         .bind(session.id.to_string())
         .bind(phase_to_string(session.phase))
@@ -268,6 +322,9 @@ impl Store {
         .bind(&session.failure_reason)
         .bind(session.convergence_used)
         .bind(optional_json(&session.model_config)?)
+        .bind(optional_json(&session.vote_policy)?)
+        .bind(session.scribe_enabled)
+        .bind(session.search_enabled)
         .execute(&self.pool)
         .await?;
 
@@ -1182,6 +1239,9 @@ fn parse_time(value: String) -> Result<DateTime<Utc>, StoreError> {
 fn session_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Session, StoreError> {
     let result_json: Option<String> = row.try_get("result_json")?;
     let model_config_json: Option<String> = row.try_get("model_config").ok().flatten();
+    let vote_policy_json: Option<String> = row.try_get("vote_policy").ok().flatten();
+    let scribe_enabled_val: Option<i32> = row.try_get("scribe_enabled").ok();
+    let search_enabled_val: Option<i32> = row.try_get("search_enabled").ok();
     Ok(Session {
         id: Uuid::parse_str(&row.try_get::<String, _>("id")?)
             .map_err(|err| sqlx::Error::Decode(Box::new(err)))?,
@@ -1202,6 +1262,12 @@ fn session_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Session, StoreError
             .as_deref()
             .map(serde_json::from_str)
             .transpose()?,
+        vote_policy: vote_policy_json
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()?,
+        scribe_enabled: scribe_enabled_val.unwrap_or(0) != 0,
+        search_enabled: search_enabled_val.unwrap_or(0) != 0,
     })
 }
 

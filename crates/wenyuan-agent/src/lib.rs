@@ -13,9 +13,9 @@ use tokio::sync::Notify;
 use uuid::Uuid;
 use wenyuan_core::{
     Assessment, ChatMessage, Claim, ClaimEvidenceLink, Critique, Decision, DecisionStatus,
-    DeliberationMode, Evidence, IdeaCard, IdeaStatus, Proposal, SeatKind, SeatModelConfig,
-    SeatStatus, Session, SessionPhase, Vote, VoteOutcome, VotePolicy, build_decision,
-    generate_merged_proposal, phase_barrier_completed,
+    DeliberationMode, Evidence, IdeaCard, IdeaStatus, Proposal, SearchBackend, SearchError,
+    SearchResult, SeatKind, SeatModelConfig, SeatStatus, Session, SessionPhase, Vote,
+    VoteOutcome, VotePolicy, build_decision, generate_merged_proposal, phase_barrier_completed,
 };
 use wenyuan_provider::{LlmProvider, LlmRequest, LlmResponse, ProviderError};
 
@@ -84,6 +84,7 @@ pub struct AgentRunner {
     provider: Arc<dyn LlmProvider>,
     timeout: Duration,
     policy: VotePolicy,
+    search: Option<Arc<dyn SearchBackend>>,
 }
 
 impl AgentRunner {
@@ -92,11 +93,17 @@ impl AgentRunner {
             provider,
             timeout: Duration::from_secs(120),
             policy: VotePolicy::default(),
+            search: None,
         }
     }
 
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
+        self
+    }
+
+    pub fn with_search(mut self, backend: Arc<dyn SearchBackend>) -> Self {
+        self.search = Some(backend);
         self
     }
 
@@ -240,10 +247,12 @@ impl AgentRunner {
         .await;
         let mut decision_votes = artifacts.votes.clone();
 
+        let effective_policy = session.vote_policy.clone().unwrap_or(self.policy.clone());
+
         match wenyuan_core::tally_votes(
             &artifacts.proposals,
             &decision_votes,
-            &self.policy,
+            &effective_policy,
             session.convergence_used,
         )
         .map_err(|err| AgentError::Core(err.to_string()))?
@@ -308,7 +317,7 @@ impl AgentRunner {
         let decision = build_decision(
             &artifacts.proposals,
             &decision_votes,
-            &self.policy,
+            &effective_policy,
             session.convergence_used,
         )
         .map_err(|err| AgentError::Core(err.to_string()))?;
@@ -326,10 +335,160 @@ impl AgentRunner {
         artifacts.evidence = evidence;
         artifacts.assessments = assessments;
         artifacts.claim_evidence_links = links;
+
+        if session.search_enabled {
+            let search_results = self
+                .run_search(&session, &cancel, progress.as_ref())
+                .await;
+            match search_results {
+                Ok(results) => {
+                    for result in &results {
+                        artifacts.evidence.push(Evidence {
+                            id: Uuid::new_v4(),
+                            proposed_by: SeatKind::Mouyuan,
+                            kind: wenyuan_core::EvidenceKind::Fact,
+                            content: format!("{} — {}", result.title, result.snippet),
+                            source: result.url.clone(),
+                            source_fetched_at: Some(chrono::Utc::now().to_rfc3339()),
+                            source_hash: None,
+                            claim_ids: vec![],
+                        });
+                    }
+                    artifacts.events.push(format!("search_completed:{}_results", results.len()));
+                }
+                Err(err) => {
+                    artifacts.events.push(format!("search_failed:{err}"));
+                }
+            }
+        }
+
         artifacts.quality = DiscussionQualityMetrics::calculate(&artifacts);
+
+        if session.scribe_enabled {
+            let scribe_result = self
+                .run_scribe(&session, &artifacts, &cancel, progress.as_ref())
+                .await;
+            match scribe_result {
+                Ok(report) => {
+                    artifacts.scribe_report = Some(report);
+                    artifacts.events.push("scribe_completed".into());
+                }
+                Err(err) => {
+                    artifacts.events.push(format!("scribe_failed: {err}"));
+                }
+            }
+        }
+
         artifacts.session = Some(session);
         artifacts.events.push("session_completed".into());
         Ok(artifacts)
+    }
+
+    async fn run_scribe(
+        &self,
+        session: &Session,
+        artifacts: &DiscussionArtifacts,
+        cancel: &CancellationFlag,
+        progress: Option<&Arc<dyn ProgressSink>>,
+    ) -> Result<ScribeReport, AgentError> {
+        self.ensure_not_cancelled(cancel)?;
+
+        let prompt = scribe_prompt_config();
+        let input = serde_json::json!({
+            "title": session.title,
+            "topic": session.topic,
+            "context": session.context,
+            "ideas": artifacts.ideas,
+            "critiques": artifacts.critiques,
+            "proposals": artifacts.proposals,
+            "votes": artifacts.votes,
+            "decision": artifacts.decision,
+        });
+
+        let request = LlmRequest {
+            session_id: session.id,
+            seat: SeatKind::Mouyuan,
+            phase: SessionPhase::Completed,
+            repair_json: false,
+            max_tokens: prompt.max_tokens,
+            prompt_version: prompt.version.to_string(),
+            messages: vec![
+                ChatMessage {
+                    role: "system".into(),
+                    content: prompt.content.to_string(),
+                },
+                ChatMessage {
+                    role: "user".into(),
+                    content: format!(
+                        "硬性输出规则：\n- 只输出一个 JSON object。\n- 不要输出 Markdown，不要使用 ```json 代码块。\n- 字段名必须与 schema 完全一致。\n\n必须匹配的 JSON schema：\n{{\n  \"consensus_summary\": \"...\",\n  \"structural_gaps\": [\"...\"],\n  \"unresolved_conflicts\": [\"...\"],\n  \"final_report\": \"...\"\n}}\n\n输入：{}",
+                        serde_json::to_string(&input).unwrap_or_else(|_| "{}".into())
+                    ),
+                },
+            ],
+            override_model: None,
+        };
+
+        emit_progress(
+            progress,
+            "phase_started",
+            serde_json::json!({ "phase": "scribe" }),
+        )
+        .await;
+
+        let (response, duration_ms) = self.call_provider(request, cancel).await;
+        let response = response.map_err(|source| AgentError::Provider {
+            seat: SeatKind::Mouyuan,
+            source,
+        })?;
+
+        let raw = response.content;
+        let report: ScribeReport = serde_json::from_str(&raw).map_err(|err| AgentError::Parse {
+            seat: SeatKind::Mouyuan,
+            phase: SessionPhase::Completed,
+            message: format!("书记官输出解析失败: {err}"),
+            raw_output: raw.clone(),
+        })?;
+
+        emit_progress(
+            progress,
+            "phase_completed",
+            serde_json::json!({ "phase": "scribe", "duration_ms": duration_ms }),
+        )
+        .await;
+
+        Ok(report)
+    }
+
+    async fn run_search(
+        &self,
+        session: &Session,
+        cancel: &CancellationFlag,
+        progress: Option<&Arc<dyn ProgressSink>>,
+    ) -> Result<Vec<SearchResult>, AgentError> {
+        self.ensure_not_cancelled(cancel)?;
+        let Some(search) = &self.search else {
+            return Err(AgentError::Core("search not configured".into()));
+        };
+
+        emit_progress(
+            progress,
+            "phase_started",
+            serde_json::json!({ "phase": "search" }),
+        )
+        .await;
+
+        let results = search.search(&session.topic, 5).await.map_err(|err| {
+            AgentError::Core(format!("search failed: {err}"))
+        })?;
+
+        emit_progress(
+            progress,
+            "phase_completed",
+            serde_json::json!({ "phase": "search", "count": results.len() }),
+        )
+        .await;
+
+        Ok(results)
     }
 
     async fn run_independent(
@@ -1202,6 +1361,18 @@ pub struct DiscussionArtifacts {
     #[serde(default)]
     pub claim_evidence_links: Vec<ClaimEvidenceLink>,
     pub events: Vec<String>,
+    #[serde(default)]
+    pub scribe_report: Option<ScribeReport>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScribeReport {
+    pub consensus_summary: String,
+    #[serde(default)]
+    pub structural_gaps: Vec<String>,
+    #[serde(default)]
+    pub unresolved_conflicts: Vec<String>,
+    pub final_report: String,
 }
 
 #[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
@@ -1437,6 +1608,14 @@ fn prompt_config(seat: SeatKind) -> SeatPrompt {
     }
 }
 
+fn scribe_prompt_config() -> SeatPrompt {
+    SeatPrompt {
+        version: "scribe-v1",
+        content: include_str!("../prompts/scribe-v1.md"),
+        max_tokens: 16_000,
+    }
+}
+
 struct PhaseRun<T> {
     outputs: Vec<(SeatKind, T)>,
     traces: Vec<SeatRunTrace>,
@@ -1658,6 +1837,49 @@ fn short_hash(value: &str) -> String {
 
 fn unknown_provider_error() -> ProviderError {
     ProviderError::Request("unknown provider error".to_string())
+}
+
+pub struct MockSearchBackend {
+    pub results: Vec<SearchResult>,
+}
+
+impl MockSearchBackend {
+    pub fn new() -> Self {
+        Self {
+            results: vec![
+                SearchResult {
+                    title: "文渊阁项目介绍".into(),
+                    snippet: "文渊阁是一个本地运行的 AI 合议工作台，把同一个问题交给三个不同立场的席位分别思考、互相批议、修订方案，并通过投票形成最终结论。".into(),
+                    url: "https://github.com/gordonlu/wenyuan".into(),
+                    source: "mock".into(),
+                },
+                SearchResult {
+                    title: "AI 合议与多数决机制".into(),
+                    snippet: "三席合议机制包括独议、批议、复议、阁议四个阶段，支持多数决和少数留议。".into(),
+                    url: "https://example.com/deliberation".into(),
+                    source: "mock".into(),
+                },
+                SearchResult {
+                    title: "三席角色设计：谋远、经世、持正".into(),
+                    snippet: "谋远席负责长期战略和系统性思考，经世席关注落地路径和资源约束，持正席审查风险、伦理和边界条件。".into(),
+                    url: "https://example.com/three-seats".into(),
+                    source: "mock".into(),
+                },
+            ],
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl SearchBackend for MockSearchBackend {
+    fn name(&self) -> &'static str {
+        "mock"
+    }
+
+    async fn search(&self, _query: &str, limit: usize) -> Result<Vec<SearchResult>, SearchError> {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        Ok(self.results.iter().take(limit).cloned().collect())
+    }
 }
 
 async fn emit_progress(
@@ -2361,5 +2583,35 @@ mod tests {
                 "no risk blocker expected in run {index}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn search_enabled_adds_evidence() {
+        let mut session = Session::new("search test", "test topic for deliberation", "");
+        session.search_enabled = true;
+        let artifacts = AgentRunner::new(Arc::new(MockProvider::new(MockScenario::SuccessMajority)))
+            .with_search(Arc::new(MockSearchBackend::new()))
+            .run_session(session, CancellationFlag::default())
+            .await
+            .unwrap();
+        assert!(artifacts.events.iter().any(|e| e.starts_with("search_completed")),
+            "expected search_completed event, got: {:?}", artifacts.events);
+        let evidence_sources: Vec<_> = artifacts.evidence.iter().map(|e| e.source.clone()).collect();
+        assert!(evidence_sources.iter().any(|s| s.contains("github.com")),
+            "expected github source in evidence, got: {:?}", evidence_sources);
+    }
+
+    #[tokio::test]
+    async fn scribe_enabled_produces_report() {
+        let mut session = Session::new("scribe test", "topic", "");
+        session.scribe_enabled = true;
+        let artifacts = runner(MockScenario::SuccessMajority)
+            .run_session(session, CancellationFlag::default())
+            .await
+            .unwrap();
+        let report = artifacts.scribe_report.expect("scribe should produce a report");
+        assert!(!report.consensus_summary.is_empty());
+        assert!(!report.final_report.is_empty());
+        assert!(artifacts.events.iter().any(|e| e == "scribe_completed"));
     }
 }
