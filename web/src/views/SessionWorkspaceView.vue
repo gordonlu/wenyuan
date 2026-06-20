@@ -45,6 +45,9 @@
             <button @click="downloadAndClose('html')">HTML</button>
           </div>
         </div>
+        <button title="分享审议结果" @click="showShare = true">
+          <Share2 :size="18" />
+        </button>
         <div class="menu-wrap">
           <button title="导出 Markdown" @click="showMdMenu = !showMdMenu">
             <FileText :size="18" />
@@ -109,15 +112,26 @@
         </li>
       </ul>
     </section>
-    <p v-if="details.execution.recovery_state === 'retry_required'" class="notice" role="status">
-      上次执行未正常完成，请使用重试继续。
-    </p>
-    <p v-else-if="details.execution.recovery_state === 'paused'" class="notice" role="status">
-      已暂停。你可以补充背景信息后继续。
-    </p>
-    <p v-else-if="details.execution.running" class="notice" role="status">
-      当前议题正在执行中。席位状态会实时更新；如果长时间没有变化，可以暂停或取消后重试。
-    </p>
+    <div v-if="details.execution.recovery_state === 'retry_required'" class="status-bar status-bar-warn" role="status">
+      <span class="status-bar-icon">&#9888;</span>
+      <span>上次执行未正常完成，请使用重试继续。</span>
+    </div>
+    <div v-else-if="details.execution.recovery_state === 'paused'" class="status-bar status-bar-warn" role="status">
+      <span class="status-bar-icon">&#9208;</span>
+      <span>已暂停。你可以补充背景信息后继续。</span>
+    </div>
+    <div v-else-if="details.execution.running" class="status-bar status-bar-live" role="status" aria-live="polite">
+      <span class="status-bar-dot" />
+      <span class="status-bar-phase">{{ phaseLabels[details.session.phase] }}</span>
+      <span class="status-bar-sep">·</span>
+      <span class="status-bar-seat">{{ runningSeatLabel }}</span>
+      <span v-if="details.events?.length" class="status-bar-time">{{ lastEventTime }}</span>
+    </div>
+
+    <div v-if="viewMode === 'workbench' && currentDigest" class="digest-row">
+      <DecisionDigest :digest="currentDigest" />
+      <EvidenceSummary v-if="currentEvidenceSummary" :summary="currentEvidenceSummary" />
+    </div>
 
     <DecisionSummary v-if="primaryDecision" :decision="primaryDecision" :vote-policy="details.session.vote_policy" />
 
@@ -170,9 +184,18 @@
     <section v-if="toolRuns.length" class="panel tool-run-panel">
       <div class="row-head">
         <h2>工具轨迹</h2>
-        <span class="badge flat">{{ toolRuns.length }} 次</span>
+        <button class="icon" title="展开详情" @click="showToolDetail = !showToolDetail">
+          <ChevronDown v-if="!showToolDetail" :size="16" />
+          <ChevronUp v-else :size="16" />
+        </button>
       </div>
-      <div class="item-grid tool-run-grid">
+      <div v-if="!showToolDetail" class="tool-run-summary">
+        <span v-for="(count, name) in toolRunSummaryData.by_tool" :key="name" class="tool-run-chip">
+          {{ toolNameLabel(name) }} {{ count }} 次
+        </span>
+        <span class="tool-run-meta">{{ toolRunSummaryData.total_ms }} ms · {{ toolRunSummaryData.failed }} 次失败</span>
+      </div>
+      <div v-else class="item-grid tool-run-grid">
         <article v-for="run in toolRuns" :key="run.id" class="item tool-run-item">
           <div class="item-head">
             <span>{{ toolNameLabel(run.tool_name) }}</span>
@@ -345,10 +368,30 @@
     </template>
 
     <template v-else>
-      <div class="report-meta">
-        <span>{{ phaseLabels[details.session.phase] }}</span>
-        <span>{{ modeLabels[details.session.mode] }}</span>
-        <span>{{ details.session.id }}</span>
+      <div v-if="currentDigest" class="report-cover">
+        <h1 class="report-cover-title">{{ details.session.title }}</h1>
+        <div class="report-cover-meta">
+          <span>{{ phaseLabels[details.session.phase] }}</span>
+          <span>·</span>
+          <span>{{ modeLabels[details.session.mode] }}</span>
+          <span>·</span>
+          <span>{{ currentDigest.evidence_total }} 项来源</span>
+          <span>·</span>
+          <span>{{ currentDigest.vote_count }} 票</span>
+        </div>
+        <div v-if="currentDigest.has_decision" class="report-cover-decision">
+          <span :class="['badge', currentDigest.status_class === 'ok' ? 'ok' : 'warn']">
+            {{ currentDigest.status_label }}
+          </span>
+          <span v-if="currentDigest.selected_proposal_title" class="report-cover-proposal">
+            {{ currentDigest.selected_proposal_title }}
+          </span>
+        </div>
+        <div v-if="currentDigest.has_risk_blocker || currentDigest.has_untrusted_external || currentDigest.has_injection_risk" class="report-cover-flags">
+          <span v-if="currentDigest.has_risk_blocker" class="report-flag report-flag-warn">存在风险阻塞</span>
+          <span v-if="currentDigest.has_untrusted_external" class="report-flag report-flag-warn">含不可信外部来源</span>
+          <span v-if="currentDigest.has_injection_risk" class="report-flag report-flag-danger">检测到疑似注入</span>
+        </div>
       </div>
 
       <section class="panel report-topic">
@@ -455,6 +498,19 @@
       </section>
     </template>
   </section>
+
+  <ShareExportPanel
+    v-if="showShare && shareDigest"
+    :visible="showShare"
+    :digest="shareDigest"
+    :title="details?.session.title ?? ''"
+    :seat-summary="seatSummary"
+    :evidence-total="shareDigest.evidence_total"
+    :untrusted-count="shareDigest.untrusted_count"
+    :vote-count="shareDigest.vote_count"
+    @close="showShare = false"
+  />
+
   <section v-else class="page">
     <ApiErrorState :message="error || '加载中'" />
   </section>
@@ -463,11 +519,14 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { Ban, ChevronDown, Copy, Download, FileText, Pause, Pen, Play, RefreshCw, RotateCw } from '@lucide/vue'
+import { Ban, ChevronDown, ChevronUp, Copy, Download, FileText, Pause, Pen, Play, RefreshCw, RotateCw } from '@lucide/vue'
 import { api } from '../api'
 import ApiErrorState from '../components/ApiErrorState.vue'
 import CritiqueGraph from '../components/CritiqueGraph.vue'
+import DecisionDigest from '../components/DecisionDigest.vue'
 import DecisionSummary from '../components/DecisionSummary.vue'
+import EvidenceSummary from '../components/EvidenceSummary.vue'
+import ShareExportPanel from '../components/ShareExportPanel.vue'
 import IdeaCard from '../components/IdeaCard.vue'
 import PhaseProgressBar from '../components/PhaseProgressBar.vue'
 import ProposalCompare from '../components/ProposalCompare.vue'
@@ -475,7 +534,7 @@ import SeatRoleCard from '../components/SeatRoleCard.vue'
 import VoteChanges from '../components/VoteChanges.vue'
 import VoteDisplay from '../components/VoteDisplay.vue'
 import { hasStoredViewMode, useViewMode } from '../composables/useViewMode'
-import { evidenceSafetyLabels, evidenceSourceKindLabels, evidenceTrustLabels, exportSessionMarkdown, ideaStatusLabels, evidenceKindLabels, modeLabels, phaseLabels, qualityMetricRows, revisionDiffs, seatLabels, seatRunStats, voteStrategyLabels, type SeatKind, type SessionDetails } from '../domain/session'
+import { decisionDigest, evidenceSafetyLabels, evidenceSourceKindLabels, evidenceSummary, evidenceTrustLabels, exportSessionMarkdown, ideaStatusLabels, evidenceKindLabels, modeLabels, phaseLabels, qualityMetricRows, revisionDiffs, seatLabels, seatRunStats, toolRunSummary, voteStrategyLabels, type SeatKind, type SessionDetails } from '../domain/session'
 
 const route = useRoute()
 const router = useRouter()
@@ -487,8 +546,32 @@ const error = ref('')
 const editingContext = ref(false)
 const newContext = ref('')
 const showTrajectory = ref(false)
+const showToolDetail = ref(false)
 const showExportMenu = ref(false)
 const showMdMenu = ref(false)
+const showShare = ref(false)
+
+const shareDigest = computed(() => {
+  if (!details.value) return null
+  const deets = details.value
+  return {
+    title: deets.session.title,
+    status_label: currentDigest.value?.status_label ?? '尚无结论',
+    status_class: currentDigest.value?.status_class ?? 'warn',
+    selected_proposal_title: currentDigest.value?.selected_proposal_title ?? '',
+    majority_summary: currentDigest.value?.majority_reason_summary ?? '',
+    risk_summary: currentDigest.value?.has_risk_blocker ? '存在风险阻塞，需先处理采纳条件' : '',
+    evidence_total: currentEvidenceSummary.value?.total ?? 0,
+    untrusted_count: currentEvidenceSummary.value?.untrusted_count ?? 0,
+    vote_count: currentDigest.value?.vote_count ?? 0,
+    seat_count: deets.seats?.length ?? 0,
+  }
+})
+
+const seatSummary = computed(() => {
+  if (!details.value) return ''
+  return details.value.seats?.map((s) => seatLabels[s.seat]).join(' · ') ?? ''
+})
 const trajectory = ref<Array<{ id: number; event_type: string; created_at: string }>>([])
 const canManualRevision = computed(
   () =>
@@ -508,12 +591,51 @@ const recentFailedRuns = computed(() =>
 )
 const hasTokenUsage = computed(() => (details.value?.artifacts.seat_runs ?? []).some((run) => typeof run.total_tokens === 'number'))
 const primaryDecision = computed(() => details.value?.session.result ?? details.value?.artifacts.decision ?? null)
+const currentEvidenceSummary = computed(() => details.value ? evidenceSummary(details.value) : null)
+const currentDigest = computed(() => {
+  if (!details.value) return null
+  const evSum = currentEvidenceSummary.value ?? undefined
+  return decisionDigest(details.value, evSum)
+})
 const timelineEvents = computed(() => [...(details.value?.events ?? [])].reverse())
+
+const seatEvents = computed(() => (details.value?.events ?? []).filter((e) =>
+  ['seat_started', 'seat_completed', 'seat_failed'].includes(e.event_type)
+))
+const runningSeatLabel = computed(() => {
+  if (!details.value?.execution.running) return ''
+  const events = seatEvents.value
+  const latest = events[events.length - 1]
+  if (latest?.event_type === 'seat_started') {
+    const seat = (latest.payload as { seat?: SeatKind })?.seat
+    if (seat) return `${seatLabels[seat]}工作中`
+  }
+  if (details.value.session.phase === 'independent_deliberation') return '三席独立陈策'
+  if (details.value.session.phase === 'cross_critique') return '三席交叉批议'
+  if (details.value.session.phase === 'revision') return '三席修订策案'
+  if (details.value.session.phase === 'voting') return '三席阁议投票'
+  if (details.value.session.phase === 'convergence') return '合案复议'
+  return '执行中'
+})
+const lastEventTime = computed(() => {
+  const events = details.value?.events ?? []
+  if (!events.length) return ''
+  const last = events[events.length - 1]
+  try {
+    const d = new Date(last.created_at)
+    const now = new Date()
+    const diffSec = Math.floor((now.getTime() - d.getTime()) / 1000)
+    if (diffSec < 60) return `${diffSec}秒前`
+    if (diffSec < 3600) return `${Math.floor(diffSec / 60)}分钟前`
+    return d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
+  } catch { return '' }
+})
 const trajectoryEvents = computed(() => [...trajectory.value].reverse())
 const externalEvidence = computed(() =>
   (details.value?.artifacts.evidence ?? []).filter((ev) => ev.source_kind && ev.source_kind !== 'internal'),
 )
 const toolRuns = computed(() => details.value?.artifacts.tool_runs ?? [])
+const toolRunSummaryData = computed(() => toolRunSummary(toolRuns.value))
 let source: EventSource | null = null
 let timer: number | undefined
 
@@ -613,23 +735,36 @@ function downloadHTML() {
 
 function generateHTML(details: SessionDetails): string {
   const decision = details.session.result ?? details.artifacts.decision
+  const evSum = evidenceSummary(details)
+  const digest = decisionDigest(details, evSum)
   return `<!DOCTYPE html>
 <html lang="zh-CN">
 <head><meta charset="utf-8"><title>${escapeHTML(details.session.title)} — 文渊阁</title>
 <style>
   body { font-family: Inter, "Noto Sans SC", system-ui, sans-serif; background: #f7f4ed; color: #20231f; max-width: 900px; margin: 0 auto; padding: 32px; line-height: 1.7; }
-  h1 { font-family: "Noto Serif SC", serif; font-size: 28px; }
+  h1 { font-family: "Noto Serif SC", serif; font-size: 28px; margin-bottom: 4px; }
   h2 { font-family: "Noto Serif SC", serif; font-size: 20px; margin-top: 32px; border-bottom: 1px solid #ded5c5; padding-bottom: 8px; }
   h3 { font-family: "Noto Serif SC", serif; font-size: 16px; }
   .meta { color: #6d6a61; font-size: 14px; }
+  .cover-meta { color: #6d6a61; font-size: 13px; margin-bottom: 24px; }
   .section { background: #fffdf8; border: 1px solid #ded5c5; padding: 16px; margin: 12px 0; border-radius: 8px; }
   ul { padding-left: 20px; }
   li { margin: 4px 0; }
   .badge { display: inline-block; border: 1px solid #c9c0b2; padding: 2px 8px; border-radius: 4px; font-size: 12px; }
+  .badge-ok { border-color: #2f5d50; background: #e8f5ee; color: #2f5d50; }
+  .badge-warn { border-color: #d4b86a; background: #fff8e6; color: #6f5223; }
+  .flag { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; margin-right: 6px; }
+  .flag-warn { background: #fff8e6; color: #6f5223; border: 1px solid #d4b86a; }
+  .flag-danger { background: #fdf0ee; color: #9a3f34; border: 1px solid rgba(154,63,52,0.2); }
 </style></head>
 <body>
   <h1>${escapeHTML(details.session.title)}</h1>
-  <p class="meta">${phaseLabels[details.session.phase]} · ${details.session.id}</p>
+  <p class="cover-meta">${phaseLabels[details.session.phase]} · ${evSum.total} 项来源 · ${digest.vote_count} 票</p>
+
+  ${digest.has_decision ? `<p><span class="badge ${digest.status_class === 'ok' ? 'badge-ok' : 'badge-warn'}">${escapeHTML(digest.status_label)}</span>${digest.selected_proposal_title ? ` <strong>${escapeHTML(digest.selected_proposal_title)}</strong>` : ''}</p>` : ''}
+
+  <div>${digest.has_risk_blocker ? '<span class="flag flag-warn">存在风险阻塞</span>' : ''}${digest.has_untrusted_external ? '<span class="flag flag-warn">含不可信外部来源</span>' : ''}${digest.has_injection_risk ? '<span class="flag flag-danger">检测到疑似注入</span>' : ''}</div>
+
   <h2>议题</h2>
   <div class="section"><p>${escapeHTML(details.session.topic)}</p></div>
   ${details.artifacts.ideas.length ? `<h2>创意池（${details.artifacts.ideas.length}）</h2>
@@ -850,5 +985,172 @@ onBeforeUnmount(() => {
 
 .tool-run-error {
   color: var(--color-danger) !important;
+}
+
+/* ── Report cover ── */
+.report-cover {
+  padding: 32px 24px;
+  margin-bottom: 16px;
+  border-bottom: 1px solid var(--color-border-light);
+}
+
+.report-cover-title {
+  margin: 0 0 8px;
+  font-size: 28px;
+  font-weight: 800;
+  line-height: 1.25;
+  color: var(--color-text);
+}
+
+.report-cover-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--color-text-muted);
+  margin-bottom: 16px;
+}
+
+.report-cover-decision {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.report-cover-proposal {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--color-text);
+}
+
+.report-cover-flags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.report-flag {
+  padding: 3px 10px;
+  border-radius: var(--radius-sm);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.report-flag-warn {
+  background: var(--color-warning-bg);
+  color: var(--color-warning-text);
+  border: 1px solid var(--color-warning-border);
+}
+
+.report-flag-danger {
+  background: var(--color-danger-light);
+  color: var(--color-danger);
+  border: 1px solid rgba(154, 63, 52, 0.2);
+}
+
+.tool-run-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+}
+
+.tool-run-chip {
+  padding: 3px 10px;
+  border-radius: 12px;
+  background: var(--color-accent-light);
+  color: var(--color-accent-text);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.tool-run-meta {
+  font-size: 12px;
+  color: var(--color-text-dim);
+  margin-left: auto;
+}
+
+/* ── Digest row ── */
+.digest-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+@media (max-width: 860px) {
+  .digest-row {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ── Status bar ── */
+.status-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.status-bar-warn {
+  background: var(--color-warning-bg);
+  border: 1px solid var(--color-warning-border);
+  color: var(--color-warning-text);
+}
+
+.status-bar-icon {
+  font-size: 15px;
+  flex-shrink: 0;
+}
+
+.status-bar-live {
+  background: var(--color-accent-light);
+  border: 1px solid rgba(15, 138, 161, 0.25);
+  color: var(--color-accent-text);
+}
+
+.status-bar-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--color-accent);
+  flex-shrink: 0;
+  animation: status-dot-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes status-dot-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.4; transform: scale(0.7); }
+}
+
+.status-bar-phase {
+  font-weight: 700;
+}
+
+.status-bar-sep {
+  color: var(--color-text-dim);
+}
+
+.status-bar-seat {
+  color: var(--color-text);
+}
+
+.status-bar-time {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--color-text-dim);
+  white-space: nowrap;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .status-bar-dot {
+    animation: none;
+    opacity: 0.7;
+  }
 }
 </style>

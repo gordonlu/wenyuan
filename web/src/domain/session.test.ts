@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { exportSessionMarkdown, hasMajority, qualityMetricRows, revisionDiffs, seatRunStats, seatStatus, type SessionDetails } from './session'
+import { evidenceSummary, decisionDigest, exportSessionMarkdown, hasMajority, qualityMetricRows, revisionDiffs, seatRunStats, seatStatus, type SessionDetails } from './session'
 
 describe('session domain helpers', () => {
   it('detects final majority display state', () => {
@@ -203,6 +203,141 @@ describe('session domain helpers', () => {
       addedImplementationPath: '两周内完成 A/B 实验',
       addedSuccessMetrics: ['留存提升'],
     })
+  })
+
+  it('evidenceSummary returns zero counts for empty evidence', () => {
+    const details = {
+      session: { id: 's1', title: 't', topic: '', context: '', mode: 'three_seat', phase: 'draft' },
+      artifacts: { ideas: [], critiques: [], proposals: [], votes: [], seat_runs: [], events: [], evidence: [], claims: [] },
+      execution: { running: false, recovery_state: 'idle' },
+      events: [],
+    } as unknown as SessionDetails
+    const summary = evidenceSummary(details)
+    expect(summary.total).toBe(0)
+    expect(summary.untrusted_count).toBe(0)
+    expect(summary.injection_risk_count).toBe(0)
+    expect(summary.unverified_claims).toBe(0)
+    expect(summary.has_safety_warnings).toBe(false)
+  })
+
+  it('evidenceSummary counts internal-only evidence', () => {
+    const details = {
+      session: { id: 's1', title: 't', topic: '', context: '', mode: 'three_seat', phase: 'completed' },
+      artifacts: {
+        ideas: [], critiques: [], proposals: [], votes: [], seat_runs: [], events: [],
+        evidence: [
+          { id: 'e1', content: 'idea inference', source: '谋远席 独议', source_kind: 'internal', trust_level: 'internal' },
+          { id: 'e2', content: 'idea risk', source: '经世席 独议', source_kind: 'internal', trust_level: 'internal' },
+        ],
+        claims: [],
+      },
+      execution: { running: false, recovery_state: 'completed' },
+      events: [],
+    } as unknown as SessionDetails
+    const summary = evidenceSummary(details)
+    expect(summary.total).toBe(2)
+    expect(summary.by_source.internal).toBe(2)
+    expect(summary.untrusted_count).toBe(0)
+  })
+
+  it('evidenceSummary detects external sources and safety flags', () => {
+    const details = {
+      session: { id: 's1', title: 't', topic: '', context: '', mode: 'three_seat', phase: 'completed' },
+      artifacts: {
+        ideas: [], critiques: [], proposals: [], votes: [], seat_runs: [], events: [],
+        evidence: [
+          { id: 'e1', content: 'web result', source: 'https://example.com', source_kind: 'web_search', trust_level: 'untrusted_external', safety_flags: {} },
+          { id: 'e2', content: 'file result', source: 'doc.pdf', source_kind: 'file', trust_level: 'untrusted_external', safety_flags: { prompt_injection_risk: true } },
+          { id: 'e3', content: 'internal evidence', source: '持正席 独议', source_kind: 'internal', trust_level: 'internal' },
+        ],
+        claims: [
+          { id: 'c1', content: 'claim1', is_supported: true },
+          { id: 'c2', content: 'claim2', is_supported: false },
+        ],
+      },
+      execution: { running: false, recovery_state: 'completed' },
+      events: [],
+    } as unknown as SessionDetails
+    const summary = evidenceSummary(details)
+    expect(summary.total).toBe(3)
+    expect(summary.by_source.web_search).toBe(1)
+    expect(summary.by_source.file).toBe(1)
+    expect(summary.by_source.internal).toBe(1)
+    expect(summary.untrusted_count).toBe(2)
+    expect(summary.injection_risk_count).toBe(1)
+    expect(summary.unverified_claims).toBe(1)
+    expect(summary.has_safety_warnings).toBe(true)
+  })
+
+  it('decisionDigest returns no-decision state', () => {
+    const details = {
+      session: { id: 's1', title: 't', topic: '', context: '', mode: 'three_seat', phase: 'draft' },
+      artifacts: { ideas: [], critiques: [], proposals: [], votes: [], seat_runs: [], events: [], evidence: [], claims: [] },
+      execution: { running: false, recovery_state: 'idle' },
+      events: [],
+    } as unknown as SessionDetails
+    const digest = decisionDigest(details)
+    expect(digest.has_decision).toBe(false)
+    expect(digest.status_label).toBe('尚无结论')
+  })
+
+  it('decisionDigest extracts majority decision fields', () => {
+    const details = {
+      session: {
+        id: 's1', title: 't', topic: 'topic', context: '', mode: 'three_seat', phase: 'completed',
+        result: {
+          status: 'majority_reached',
+          vote_count: 2,
+          majority_reasons: ['方案可行', '成本可控'],
+          minority_opinion: ['需要更多数据'],
+          adoption_conditions: ['两周内验证'],
+          next_steps: ['启动A/B实验'],
+          self_vote_count: 1,
+          selected_proposal: { id: 'p1', proposed_by: 'mouyuan', title: '分层实验', summary: 'test' },
+          has_risk_blocker: false,
+          minority_choices: [],
+        },
+      },
+      artifacts: { ideas: [], critiques: [], proposals: [], votes: [], seat_runs: [], events: [], evidence: [], claims: [] },
+      execution: { running: false, recovery_state: 'completed' },
+      events: [],
+    } as unknown as SessionDetails
+    const digest = decisionDigest(details)
+    expect(digest.has_decision).toBe(true)
+    expect(digest.status_label).toBe('形成多数')
+    expect(digest.status_class).toBe('ok')
+    expect(digest.selected_proposal_title).toBe('分层实验')
+    expect(digest.selected_proposal_seat).toBe('mouyuan')
+    expect(digest.majority_reason_summary).toContain('方案可行')
+  })
+
+  it('decisionDigest detects risk blocker and conditionally adopted', () => {
+    const details = {
+      session: {
+        id: 's1', title: 't', topic: 'topic', context: '', mode: 'three_seat', phase: 'completed',
+        result: {
+          status: 'conditionally_adopted',
+          vote_count: 2,
+          majority_reasons: ['价值明确'],
+          minority_opinion: [],
+          adoption_conditions: ['需解决安全合规'],
+          next_steps: ['启动安全性审计'],
+          self_vote_count: 0,
+          selected_proposal: { id: 'p1', proposed_by: 'chizheng', title: '安全优先方案', summary: 'test' },
+          has_risk_blocker: true,
+          minority_choices: [{ seat: 'chizheng', proposal_id: 'p1', reason: '隐私风险未解决', has_risk_warning: true }],
+        },
+      },
+      artifacts: { ideas: [], critiques: [], proposals: [], votes: [], seat_runs: [], events: [], evidence: [], claims: [] },
+      execution: { running: false, recovery_state: 'completed' },
+      events: [],
+    } as unknown as SessionDetails
+    const digest = decisionDigest(details)
+    expect(digest.has_decision).toBe(true)
+    expect(digest.status_label).toBe('有条件通过')
+    expect(digest.status_class).toBe('warn')
+    expect(digest.has_risk_blocker).toBe(true)
+    expect(digest.minority_count).toBe(1)
   })
 
   it('formats quality metric rows', () => {

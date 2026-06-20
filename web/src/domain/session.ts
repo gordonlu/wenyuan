@@ -759,6 +759,139 @@ function markdownText(value: string) {
   return value.replace(/\r\n/g, '\n').trim()
 }
 
+export function toolRunSummary(runs: ToolRun[]) {
+  const total = runs.length
+  const completed = runs.filter((r) => r.status === 'completed').length
+  const failed = runs.filter((r) => r.status !== 'completed').length
+  const by_tool: Record<string, number> = {}
+  for (const r of runs) {
+    by_tool[r.tool_name] = (by_tool[r.tool_name] ?? 0) + 1
+  }
+  const total_ms = runs.reduce((s, r) => s + r.duration_ms, 0)
+  return { total, completed, failed, by_tool, total_ms }
+}
+
+export function toolNameLabel(name: string): string {
+  const labels: Record<string, string> = {
+    web_search: '网页搜索',
+    document_parse: '文档解析',
+    code_search: '代码搜索',
+  }
+  return labels[name] ?? name
+}
+
+export interface EvidenceSummary {
+  total: number
+  by_source: Record<string, number>
+  untrusted_count: number
+  injection_risk_count: number
+  unverified_claims: number
+  has_safety_warnings: boolean
+}
+
+export function evidenceSummary(details: SessionDetails): EvidenceSummary {
+  const evidence = details.artifacts.evidence ?? []
+  const claims = details.artifacts.claims ?? []
+  const by_source: Record<string, number> = {}
+  let untrusted_count = 0
+  let injection_risk_count = 0
+
+  for (const ev of evidence) {
+    const kind = ev.source_kind ?? 'internal'
+    by_source[kind] = (by_source[kind] ?? 0) + 1
+    if (ev.trust_level === 'untrusted_external') untrusted_count++
+    if (ev.safety_flags?.prompt_injection_risk) injection_risk_count++
+  }
+
+  return {
+    total: evidence.length,
+    by_source,
+    untrusted_count,
+    injection_risk_count,
+    unverified_claims: claims.filter((c) => !c.is_supported).length,
+    has_safety_warnings: evidence.some((ev) => {
+      const f = ev.safety_flags
+      return f?.prompt_injection_risk || f?.contains_control_chars || !!f?.warnings?.length
+    }),
+  }
+}
+
+export interface DecisionDigest {
+  has_decision: boolean
+  status_label: string
+  status_class: 'ok' | 'warn' | 'danger'
+  selected_proposal_title: string
+  selected_proposal_seat: SeatKind | ''
+  vote_count: number
+  has_risk_blocker: boolean
+  minority_count: number
+  majority_reason_summary: string
+  minority_summary: string
+  next_step_summary: string
+  evidence_total: number
+  has_unverified_evidence: boolean
+  unverified_claims: number
+  has_untrusted_external: boolean
+  has_injection_risk: boolean
+}
+
+export function decisionDigest(details: SessionDetails, evidenceSummaryResult?: EvidenceSummary): DecisionDigest {
+  const decision = details.session.result ?? details.artifacts.decision
+  const evSum = evidenceSummaryResult ?? evidenceSummary(details)
+
+  if (!decision) {
+    return {
+      has_decision: false,
+      status_label: '尚无结论',
+      status_class: 'warn',
+      selected_proposal_title: '',
+      selected_proposal_seat: '',
+      vote_count: 0,
+      has_risk_blocker: false,
+      minority_count: 0,
+      majority_reason_summary: '',
+      minority_summary: '',
+      next_step_summary: '',
+      evidence_total: evSum.total,
+      has_unverified_evidence: evSum.unverified_claims > 0,
+      unverified_claims: evSum.unverified_claims,
+      has_untrusted_external: evSum.untrusted_count > 0,
+      has_injection_risk: evSum.injection_risk_count > 0,
+    }
+  }
+
+  const status_label = decision.status === 'majority_reached'
+    ? '形成多数'
+    : decision.status === 'conditionally_adopted'
+      ? '有条件通过'
+      : '未形成多数'
+
+  const status_class: 'ok' | 'warn' | 'danger' = decision.status === 'no_majority'
+    ? 'danger'
+    : decision.has_risk_blocker
+      ? 'warn'
+      : 'ok'
+
+  return {
+    has_decision: true,
+    status_label,
+    status_class,
+    selected_proposal_title: decision.selected_proposal?.title ?? '',
+    selected_proposal_seat: decision.selected_proposal?.proposed_by ?? '',
+    vote_count: decision.vote_count,
+    has_risk_blocker: !!decision.has_risk_blocker,
+    minority_count: decision.minority_choices?.length ?? 0,
+    majority_reason_summary: decision.majority_reasons?.slice(0, 2).join('；') ?? '',
+    minority_summary: decision.minority_opinion?.slice(0, 2).join('；') ?? '',
+    next_step_summary: decision.next_steps?.slice(0, 2).join('；') ?? '',
+    evidence_total: evSum.total,
+    has_unverified_evidence: evSum.unverified_claims > 0,
+    unverified_claims: evSum.unverified_claims,
+    has_untrusted_external: evSum.untrusted_count > 0,
+    has_injection_risk: evSum.injection_risk_count > 0,
+  }
+}
+
 function normalizeText(value: string) {
   return value.replace(/\s+/g, '').toLowerCase()
 }

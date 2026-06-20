@@ -1,7 +1,10 @@
 <template>
   <article
-    :class="['seat-role-card', profile.className, statusClass, { 'report-mode': reportMode }]"
+    :class="['seat-role-card', profile.className, statusClass, { 'report-mode': reportMode, 'is-running': isRunning, 'is-active': isActive }]"
     :style="cardStyle"
+    :aria-busy="isRunning"
+    role="region"
+    :aria-label="`${seatLabels[seat]} — ${status}`"
     @pointermove="handlePointerMove"
     @pointerleave="resetPointer"
   >
@@ -128,6 +131,8 @@ const profiles: Record<SeatKind, { kicker: string; summary: string; className: s
 const profile = computed(() => profiles[props.seat])
 const status = computed(() => seatStatus(props.phase, props.seat, props.events, props.running))
 const statusClass = computed(() => seatStatusClass(props.phase, props.seat, props.events, props.running))
+const isRunning = computed(() => props.running && ['pending', 'active'].includes(statusClass.value))
+const isActive = computed(() => !props.running && statusClass.value === 'active')
 const stats = computed(() => seatRunStats(props.runs).find((item) => item.seat === props.seat) ?? {
   seat: props.seat,
   calls: 0,
@@ -306,6 +311,87 @@ function resetPointer() {
 .seat-role-card:hover .holo-reverse {
   opacity: 0.1;
   mask-image: radial-gradient(circle 166px at var(--pointer-x) var(--pointer-y), rgba(0, 0, 0, 0.72) 0 16%, rgba(0, 0, 0, 0.38) 50%, rgba(0, 0, 0, 0.1) 82%, transparent 100%);
+}
+
+/* ── Running state ── */
+.seat-role-card.is-running {
+  animation: seat-breath 2s ease-in-out infinite;
+}
+
+.seat-role-card.is-running::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  border-radius: var(--radius-md);
+  background:
+    conic-gradient(from 0deg at 50% 50%,
+      transparent 0deg,
+      rgba(255, 255, 255, 0.15) 45deg,
+      transparent 90deg,
+      transparent 180deg,
+      rgba(255, 255, 255, 0.08) 225deg,
+      transparent 270deg,
+      transparent 360deg);
+  animation: seat-shimmer 3s linear infinite;
+  pointer-events: none;
+  mask-image: radial-gradient(circle 140% at 50% 50%, black 82%, transparent 100%);
+  -webkit-mask-image: radial-gradient(circle 140% at 50% 50%, black 82%, transparent 100%);
+}
+
+.seat-role-card.is-running .role-status {
+  position: relative;
+  padding-left: 22px;
+}
+
+.seat-role-card.is-running .role-status::before {
+  content: '';
+  position: absolute;
+  left: 8px;
+  top: 50%;
+  width: 7px;
+  height: 7px;
+  margin-top: -3.5px;
+  border-radius: 50%;
+  background: var(--role-soft);
+  animation: seat-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes seat-breath {
+  0%, 100% { box-shadow:
+      0 0 0 5px rgba(255, 255, 255, 0.3),
+      0 20px 42px rgba(16, 24, 40, 0.18),
+      inset 0 0 0 1px rgba(0, 0, 0, 0.18),
+      inset 0 1px 0 rgba(255, 255, 255, 0.42); }
+  50% { box-shadow:
+      0 0 0 5px rgba(255, 255, 255, 0.34),
+      0 20px 52px rgba(16, 24, 40, 0.22),
+      0 0 24px var(--role-glow),
+      inset 0 0 0 1px rgba(0, 0, 0, 0.18),
+      inset 0 1px 0 rgba(255, 255, 255, 0.48); }
+}
+
+@keyframes seat-shimmer {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+@keyframes seat-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.35; transform: scale(0.7); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .seat-role-card.is-running {
+    animation: none;
+    outline: 1px solid rgba(255, 255, 255, 0.3);
+    outline-offset: 2px;
+  }
+  .seat-role-card.is-running::before,
+  .seat-role-card.is-running .role-status::before {
+    animation: none;
+    display: none;
+  }
 }
 
 .role-head,

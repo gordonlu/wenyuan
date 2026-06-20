@@ -4,6 +4,12 @@
       <p>新建议题</p>
       <h1>启动一次合议</h1>
     </header>
+    <section class="template-bar">
+      <span>快速开始：</span>
+      <button type="button" v-for="t in templates" :key="t.id" class="template-btn" @click="applyTemplate(t)">
+        {{ t.label }}
+      </button>
+    </section>
     <form class="form-panel create-session-panel" @submit.prevent="submit">
       <div class="create-main">
         <label>
@@ -21,16 +27,24 @@
           <span class="field-caption">补充现状、约束、已有方案和风险边界；没有也可以留空。</span>
           <textarea v-model="context" rows="6" :placeholder="contextPlaceholder" />
         </label>
-        <DocumentSourcePanel
-          v-model="documentContext"
-          v-model:evidence="documentEvidence"
-          v-model:tool-runs="documentToolRuns"
-        />
-        <CodeSearchPanel
-          v-model="codeContext"
-          v-model:evidence="codeEvidence"
-          v-model:tool-runs="codeToolRuns"
-        />
+        <details class="source-area" :open="sourceAreaOpen">
+          <summary>
+            外部资料
+            <span v-if="sourceCount" class="badge flat">{{ sourceCount }} 项</span>
+          </summary>
+          <div class="source-area-body">
+            <DocumentSourcePanel
+              v-model="documentContext"
+              v-model:evidence="documentEvidence"
+              v-model:tool-runs="documentToolRuns"
+            />
+            <CodeSearchPanel
+              v-model="codeContext"
+              v-model:evidence="codeEvidence"
+              v-model:tool-runs="codeToolRuns"
+            />
+          </div>
+        </details>
       </div>
 
       <aside class="create-side">
@@ -128,6 +142,50 @@ const mode = ref<'three_seat' | 'single_agent'>('three_seat')
 const voteStrategy = ref<'simple_majority' | 'risk_veto' | 'unanimous' | 'conditional_pass' | 'weighted_score'>('simple_majority')
 const allowSelfVote = ref(true)
 const scribeEnabled = ref(false)
+const sourceAreaOpen = ref(true)
+
+const templates = [
+  {
+    id: 'product',
+    label: '产品决策',
+    title: '是否优先做企业版还是低代码版本',
+    topic: '我们的产品是一个面向开发者的API管理工具，目前月活5万。团队正在争论应该深耕现有用户做企业版，还是横向扩展做一个面向非技术用户的低代码版本。',
+    context: '现有用户反馈企业版需求强烈，但新市场可能更大。团队只有10人，资源有限。使用三年数据：API调用量年增40%，免费用户流失率60%。企业用户续费率95%，平均客单价$2000/月。',
+    suggest_search: true,
+    suggest_scribe: true,
+  },
+  {
+    id: 'code',
+    label: '代码方案评审',
+    title: '评审新API网关的技术方案',
+    topic: '团队提交了新的API网关设计方案，需要从架构合理性、资源成本和长期可维护性三个角度评估。\n\n需要判断：\n1. 该方案是否适合当前每秒2000请求的流量规模。\n2. 与现有Nginx+OpenResty方案相比，迁移成本是否合理。\n3. 方案的扩展性设计是否足够支撑未来12个月的增长预期。',
+    context: '方案使用Rust重写核心路由层，引入gRPC取代REST内部通信。预计开发周期3个月。团队有2人熟悉Rust。当前基础设施运行在Kubernetes上。',
+    suggest_search: false,
+    suggest_scribe: true,
+  },
+  {
+    id: 'fact',
+    label: '文档事实核验',
+    title: '核验产品白皮书中的数据 claims',
+    topic: '产品团队提交了Q2产品白皮书初稿，其中包含多项关于市场占有率、用户增长和性能指标的数据声明。需要逐条核验数据来源、时效性和准确性。',
+    context: '白皮书引用了第三方报告、内部Dashboard数据和竞品对比。部分数据无明确来源标注。预计将在下月面向客户发布。',
+    suggest_search: true,
+    suggest_scribe: false,
+  },
+]
+
+function applyTemplate(t: typeof templates[number]) {
+  title.value = t.title
+  topic.value = t.topic
+  context.value = t.context
+  searchEnabled.value = t.suggest_search
+  scribeEnabled.value = t.suggest_scribe
+  sourceAreaOpen.value = false
+}
+
+const sourceCount = computed(() =>
+  documentEvidence.value.length + codeEvidence.value.length
+)
 const searchEnabled = ref(false)
 const votePolicyOpen = ref(true)
 const scribeOpen = ref(true)
@@ -433,6 +491,65 @@ async function submit() {
 .create-submit {
   width: 100%;
   min-height: 42px;
+}
+
+/* ── Template bar ── */
+.template-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 24px;
+  margin-bottom: 12px;
+  font-size: 13px;
+  color: var(--color-text-muted);
+}
+
+.template-btn {
+  padding: 5px 14px;
+  border: 1px solid var(--color-border);
+  border-radius: 20px;
+  background: var(--color-surface);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text);
+  cursor: pointer;
+  transition: border-color 150ms, background 150ms;
+}
+
+.template-btn:hover {
+  border-color: var(--color-accent);
+  background: var(--color-accent-light);
+  color: var(--color-accent-text);
+}
+
+/* ── Source area ── */
+.source-area {
+  margin-top: 4px;
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-sm);
+  padding: 12px;
+  background: var(--color-surface-alt);
+}
+
+.source-area summary {
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 14px;
+  user-select: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.source-area-body {
+  display: grid;
+  gap: 16px;
+  margin-top: 12px;
+}
+
+.source-area .badge {
+  font-size: 11px;
+  font-weight: 700;
 }
 
 @media (max-width: 860px) {
