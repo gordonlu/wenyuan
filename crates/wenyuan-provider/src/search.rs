@@ -27,7 +27,7 @@ impl SearchBackend for BingBackend {
     }
 
     async fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>, SearchError> {
-        let url = format!("https://cn.bing.com/search?q={}", urlencoding(query));
+        let url = format!("https://cn.bing.com/search?q={}", encode_query(query));
         let resp = self
             .client
             .get(&url)
@@ -39,6 +39,7 @@ impl SearchBackend for BingBackend {
             .send()
             .await
             .map_err(|e| SearchError::Request(e.to_string()))?;
+        ensure_success(self.name(), resp.status())?;
 
         let body = resp
             .text()
@@ -58,8 +59,7 @@ fn parse_bing(body: &str, limit: usize) -> Result<Vec<SearchResult>, SearchError
     let doc = Html::parse_document(body);
     let li_sel = Selector::parse("li.b_algo").map_err(|e| SearchError::Request(e.to_string()))?;
     let a_sel = Selector::parse("h2 a").map_err(|e| SearchError::Request(e.to_string()))?;
-    let p_sel =
-        Selector::parse(".b_caption p").map_err(|e| SearchError::Request(e.to_string()))?;
+    let p_sel = Selector::parse(".b_caption p").map_err(|e| SearchError::Request(e.to_string()))?;
 
     let mut results = Vec::new();
     for li in doc.select(&li_sel).take(limit) {
@@ -141,6 +141,8 @@ impl SearchBackend for WikipediaBackend {
             .await
             .map_err(|e| SearchError::Request(e.to_string()))?;
 
+        ensure_success(self.name(), resp.status())?;
+
         let data: serde_json::Value = resp
             .json()
             .await
@@ -203,7 +205,10 @@ impl SearchBackend for DuckDuckGoBackend {
     }
 
     async fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>, SearchError> {
-        let url = format!("https://lite.duckduckgo.com/lite/?q={}", urlencoding(query));
+        let url = format!(
+            "https://lite.duckduckgo.com/lite/?q={}",
+            encode_query(query)
+        );
         let resp = self
             .client
             .get(&url)
@@ -214,6 +219,7 @@ impl SearchBackend for DuckDuckGoBackend {
             .send()
             .await
             .map_err(|e| SearchError::Request(e.to_string()))?;
+        ensure_success(self.name(), resp.status())?;
 
         let body = resp
             .text()
@@ -242,11 +248,7 @@ fn parse_ddg(body: &str, limit: usize) -> Result<Vec<SearchResult>, SearchError>
 
     for (link, snippet) in links.iter().zip(snippets.iter()).take(limit) {
         let title = link.text().collect::<String>();
-        let url = link
-            .value()
-            .attr("href")
-            .unwrap_or("")
-            .to_string();
+        let url = link.value().attr("href").unwrap_or("").to_string();
         let snippet_text = snippet.text().collect::<String>();
         if !title.is_empty() {
             results.push(SearchResult {
@@ -292,10 +294,10 @@ impl SearchBackend for CustomSearchBackend {
     }
 
     async fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>, SearchError> {
-        let req = self.client.get(&self.url).query(&[
-            ("q", query),
-            ("limit", &limit.to_string()),
-        ]);
+        let req = self
+            .client
+            .get(&self.url)
+            .query(&[("q", query), ("limit", &limit.to_string())]);
         let req = if let Some(key) = &self.api_key {
             req.header("Authorization", format!("Bearer {key}"))
         } else {
@@ -305,6 +307,7 @@ impl SearchBackend for CustomSearchBackend {
             .send()
             .await
             .map_err(|e| SearchError::Request(e.to_string()))?;
+        ensure_success(self.name(), resp.status())?;
         let results: Vec<SearchResult> = resp
             .json()
             .await
@@ -357,6 +360,7 @@ impl SearchBackend for DoubaoBackend {
             .send()
             .await
             .map_err(|e| SearchError::Request(e.to_string()))?;
+        ensure_success(self.name(), resp.status())?;
 
         let data: serde_json::Value = resp
             .json()
@@ -423,6 +427,7 @@ impl SearchBackend for TavilyBackend {
             .send()
             .await
             .map_err(|e| SearchError::Request(e.to_string()))?;
+        ensure_success(self.name(), resp.status())?;
 
         let data: serde_json::Value = resp
             .json()
@@ -488,6 +493,7 @@ impl SearchBackend for GoogleCustomSearchBackend {
             .send()
             .await
             .map_err(|e| SearchError::Request(e.to_string()))?;
+        ensure_success(self.name(), resp.status())?;
 
         let data: serde_json::Value = resp
             .json()
@@ -551,6 +557,7 @@ impl SearchBackend for SearXNGSearchBackend {
             .send()
             .await
             .map_err(|e| SearchError::Request(e.to_string()))?;
+        ensure_success(self.name(), resp.status())?;
 
         let data: serde_json::Value = resp
             .json()
@@ -606,27 +613,143 @@ impl SearchBackend for SearchPool {
     async fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>, SearchError> {
         let mut all = Vec::new();
         let mut seen_urls = std::collections::HashSet::new();
+        let mut failures = Vec::new();
         for backend in &self.backends {
-            if let Ok(results) = backend.search(query, limit).await {
-                for r in results {
-                    if seen_urls.insert(r.url.clone()) {
-                        all.push(r);
+            match backend.search(query, limit).await {
+                Ok(results) if results.is_empty() => {
+                    failures.push(format!("{}: no results", backend.name()));
+                }
+                Ok(results) => {
+                    for r in results {
+                        if !r.title.trim().is_empty()
+                            && !r.url.trim().is_empty()
+                            && seen_urls.insert(r.url.clone())
+                        {
+                            all.push(r);
+                        }
                     }
                 }
+                Err(err) => failures.push(format!("{}: {err}", backend.name())),
             }
         }
         all.truncate(limit);
-        Ok(all)
+        if all.is_empty() {
+            Err(SearchError::Backend("pool", failures.join("; ")))
+        } else {
+            Ok(all)
+        }
     }
 }
 
-fn urlencoding(input: &str) -> String {
-    input
-        .chars()
-        .map(|c| match c {
-            'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' | '.' | '~' => c.to_string(),
-            ' ' => "+".to_string(),
-            other => format!("%{:02X}", other as u8),
-        })
-        .collect()
+fn ensure_success(backend: &'static str, status: reqwest::StatusCode) -> Result<(), SearchError> {
+    if status.is_success() {
+        Ok(())
+    } else {
+        Err(SearchError::Backend(backend, format!("http {status}")))
+    }
+}
+
+fn encode_query(input: &str) -> String {
+    let mut out = String::new();
+    for byte in input.as_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(*byte as char);
+            }
+            b' ' => out.push('+'),
+            other => out.push_str(&format!("%{other:02X}")),
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    enum StaticOutcome {
+        Ok(Vec<SearchResult>),
+        Err(&'static str),
+    }
+
+    struct StaticSearchBackend {
+        name: &'static str,
+        result: StaticOutcome,
+    }
+
+    #[async_trait]
+    impl SearchBackend for StaticSearchBackend {
+        fn name(&self) -> &'static str {
+            self.name
+        }
+
+        async fn search(
+            &self,
+            _query: &str,
+            _limit: usize,
+        ) -> Result<Vec<SearchResult>, SearchError> {
+            match &self.result {
+                StaticOutcome::Ok(results) => Ok(results.clone()),
+                StaticOutcome::Err(message) => Err(SearchError::Request((*message).into())),
+            }
+        }
+    }
+
+    fn result(url: &str) -> SearchResult {
+        SearchResult {
+            title: "title".into(),
+            snippet: "snippet".into(),
+            url: url.into(),
+            source: "test".into(),
+        }
+    }
+
+    #[test]
+    fn encode_query_uses_utf8_percent_encoding() {
+        assert_eq!(
+            encode_query("文渊阁 search"),
+            "%E6%96%87%E6%B8%8A%E9%98%81+search"
+        );
+    }
+
+    #[tokio::test]
+    async fn search_pool_returns_first_available_backend() {
+        let pool = SearchPool::new(vec![
+            Box::new(StaticSearchBackend {
+                name: "broken",
+                result: StaticOutcome::Err("offline"),
+            }),
+            Box::new(StaticSearchBackend {
+                name: "empty",
+                result: StaticOutcome::Ok(vec![]),
+            }),
+            Box::new(StaticSearchBackend {
+                name: "ok",
+                result: StaticOutcome::Ok(vec![result("https://example.com")]),
+            }),
+        ]);
+
+        let results = pool.search("query", 5).await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].url, "https://example.com");
+    }
+
+    #[tokio::test]
+    async fn search_pool_errors_when_every_backend_fails_or_is_empty() {
+        let pool = SearchPool::new(vec![
+            Box::new(StaticSearchBackend {
+                name: "broken",
+                result: StaticOutcome::Err("offline"),
+            }),
+            Box::new(StaticSearchBackend {
+                name: "empty",
+                result: StaticOutcome::Ok(vec![]),
+            }),
+        ]);
+
+        let err = pool.search("query", 5).await.unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("broken"));
+        assert!(message.contains("empty"));
+    }
 }

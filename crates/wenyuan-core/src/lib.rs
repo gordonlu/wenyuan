@@ -118,6 +118,10 @@ pub struct Session {
     pub vote_policy: Option<VotePolicy>,
     pub scribe_enabled: bool,
     pub search_enabled: bool,
+    #[serde(default)]
+    pub external_evidence: Vec<Evidence>,
+    #[serde(default)]
+    pub external_tool_runs: Vec<ToolRun>,
 }
 
 impl Session {
@@ -143,6 +147,8 @@ impl Session {
             vote_policy: None,
             scribe_enabled: false,
             search_enabled: false,
+            external_evidence: vec![],
+            external_tool_runs: vec![],
         }
     }
 
@@ -169,6 +175,8 @@ impl Session {
             vote_policy: None,
             scribe_enabled: false,
             search_enabled: false,
+            external_evidence: vec![],
+            external_tool_runs: vec![],
         }
     }
 
@@ -265,6 +273,40 @@ pub enum EvidenceStatus {
     Superseded,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EvidenceSourceKind {
+    #[default]
+    Internal,
+    WebSearch,
+    File,
+    Code,
+    Log,
+    Data,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EvidenceTrustLevel {
+    #[default]
+    Internal,
+    UntrustedExternal,
+    UserProvided,
+    VerifiedExternal,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceSafetyFlags {
+    #[serde(default)]
+    pub prompt_injection_risk: bool,
+    #[serde(default)]
+    pub contains_control_chars: bool,
+    #[serde(default)]
+    pub truncated: bool,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Claim {
     pub id: Uuid,
@@ -294,6 +336,31 @@ pub struct Evidence {
     pub source_hash: Option<String>,
     #[serde(default)]
     pub claim_ids: Vec<Uuid>,
+    #[serde(default)]
+    pub source_kind: EvidenceSourceKind,
+    #[serde(default)]
+    pub trust_level: EvidenceTrustLevel,
+    #[serde(default)]
+    pub safety_flags: SourceSafetyFlags,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolRun {
+    pub id: Uuid,
+    #[serde(default)]
+    pub seat: Option<SeatKind>,
+    #[serde(default)]
+    pub phase: Option<SessionPhase>,
+    pub tool_name: String,
+    pub input_summary: String,
+    pub input_hash: String,
+    pub status: String,
+    pub duration_ms: u64,
+    #[serde(default)]
+    pub evidence_ids: Vec<Uuid>,
+    #[serde(default)]
+    pub error: Option<String>,
+    pub created_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

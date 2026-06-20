@@ -9,8 +9,16 @@ use axum::{
     },
     routing::{get, post},
 };
+use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, env, net::SocketAddr, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    env, fs,
+    net::SocketAddr,
+    path::{Path as FsPath, PathBuf},
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use tokio::sync::{Mutex, broadcast};
 use tokio_stream::{Stream, StreamExt};
 use tower_http::{
@@ -22,15 +30,19 @@ use tracing::{error, info};
 use uuid::Uuid;
 use wenyuan_agent::{AgentError, AgentRunner, CancellationFlag, ProgressSink};
 use wenyuan_core::{
-    DeliberationMode, SearchBackend, SeatKind, SeatModelConfig, Session, SessionPhase, VotePolicy,
+    DeliberationMode, Evidence, SearchBackend, SeatKind, SeatModelConfig, Session, SessionPhase,
+    VotePolicy, VoteStrategy,
 };
 use wenyuan_provider::{
-    BingBackend, CustomSearchBackend, DoubaoBackend, DuckDuckGoBackend,
-    GoogleCustomSearchBackend, LlmProvider, MockProvider, MockScenario,
-    OpenAiCompatibleConfig, OpenAiCompatibleProvider, SearchPool, SearXNGSearchBackend,
-    SeatRoutedProvider, TavilyBackend, WikipediaBackend,
+    BingBackend, CustomSearchBackend, DoubaoBackend, DuckDuckGoBackend, GoogleCustomSearchBackend,
+    LlmProvider, MockProvider, MockScenario, OpenAiCompatibleConfig, OpenAiCompatibleProvider,
+    SearXNGSearchBackend, SearchPool, SeatRoutedProvider, TavilyBackend, WikipediaBackend,
 };
 use wenyuan_store::{SessionDetails, Store};
+use wenyuan_tools::{
+    CodeSearchResultSet, ParsedDocument, code_search_to_evidence, document_to_evidence,
+    make_tool_run, parse_document_bytes, search_code,
+};
 
 #[derive(Clone)]
 struct AppState {
@@ -40,6 +52,7 @@ struct AppState {
     event_tx: broadcast::Sender<Uuid>,
     config: ConfigStatus,
     search_backend: Option<Arc<dyn SearchBackend>>,
+    preferences_path: Arc<PathBuf>,
 }
 
 struct StoreProgressSink {
@@ -92,6 +105,98 @@ struct ConfigStatus {
     seat_available_models: HashMap<String, Vec<ModelOption>>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct UserPreferences {
+    #[serde(default)]
+    defaults: UserPreferenceDefaults,
+    #[serde(default)]
+    models: UserPreferenceModels,
+    #[serde(default)]
+    tools: UserPreferenceTools,
+}
+
+impl Default for UserPreferences {
+    fn default() -> Self {
+        Self {
+            defaults: UserPreferenceDefaults::default(),
+            models: UserPreferenceModels::default(),
+            tools: UserPreferenceTools::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct UserPreferenceDefaults {
+    #[serde(default)]
+    mode: DeliberationMode,
+    #[serde(default)]
+    scribe_enabled: bool,
+    #[serde(default)]
+    search_enabled: bool,
+    #[serde(default)]
+    vote_strategy: VoteStrategy,
+    #[serde(default = "default_allow_self_vote")]
+    allow_self_vote: bool,
+    #[serde(default = "default_view_mode")]
+    view_mode: String,
+}
+
+impl Default for UserPreferenceDefaults {
+    fn default() -> Self {
+        Self {
+            mode: DeliberationMode::default(),
+            scribe_enabled: false,
+            search_enabled: false,
+            vote_strategy: VoteStrategy::SimpleMajority,
+            allow_self_vote: true,
+            view_mode: default_view_mode(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct UserPreferenceModels {
+    #[serde(default)]
+    mouyuan: String,
+    #[serde(default)]
+    jingshi: String,
+    #[serde(default)]
+    chizheng: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct UserPreferenceTools {
+    #[serde(default = "default_code_search_root")]
+    code_search_root: String,
+    #[serde(default = "default_max_file_size_mb")]
+    max_file_size_mb: u64,
+}
+
+impl Default for UserPreferenceTools {
+    fn default() -> Self {
+        Self {
+            code_search_root: default_code_search_root(),
+            max_file_size_mb: default_max_file_size_mb(),
+        }
+    }
+}
+
+fn default_allow_self_vote() -> bool {
+    true
+}
+
+fn default_view_mode() -> String {
+    "workbench".into()
+}
+
+fn default_code_search_root() -> String {
+    ".".into()
+}
+
+fn default_max_file_size_mb() -> u64 {
+    20
+}
+
 #[derive(Debug, Deserialize)]
 struct CreateSessionRequest {
     title: String,
@@ -102,6 +207,8 @@ struct CreateSessionRequest {
     vote_policy: Option<VotePolicy>,
     scribe_enabled: Option<bool>,
     search_enabled: Option<bool>,
+    external_evidence: Option<Vec<Evidence>>,
+    external_tool_runs: Option<Vec<wenyuan_core::ToolRun>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -114,6 +221,32 @@ struct TestTopic {
 #[derive(Debug, Serialize)]
 struct HealthResponse {
     ok: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct ParseDocumentRequest {
+    filename: String,
+    mime_type: Option<String>,
+    content_base64: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ParseDocumentResponse {
+    document: ParsedDocument,
+    evidence: Vec<Evidence>,
+    tool_run: wenyuan_core::ToolRun,
+}
+
+#[derive(Debug, Deserialize)]
+struct CodeSearchRequest {
+    query: String,
+}
+
+#[derive(Debug, Serialize)]
+struct CodeSearchResponse {
+    result: CodeSearchResultSet,
+    evidence: Vec<Evidence>,
+    tool_run: wenyuan_core::ToolRun,
 }
 
 #[tokio::main]
@@ -130,6 +263,7 @@ async fn main() -> anyhow::Result<()> {
     let database_url =
         env::var("WENYUAN_DATABASE_URL").unwrap_or_else(|_| "sqlite://wenyuan.db".into());
     let bind = env::var("WENYUAN_BIND").unwrap_or_else(|_| "127.0.0.1:3210".into());
+    let preferences_path = Arc::new(preferences_path_from_env());
     let store = Store::connect(&database_url).await?;
     let recovered = store.recover_stale_executions().await?;
     if recovered > 0 {
@@ -147,6 +281,7 @@ async fn main() -> anyhow::Result<()> {
         event_tx: broadcast::channel(128).0,
         config,
         search_backend,
+        preferences_path,
     };
 
     let app = app(state);
@@ -166,11 +301,60 @@ fn provider_timeout_from_env() -> Duration {
         .unwrap_or_else(|| Duration::from_secs(120))
 }
 
+fn preferences_path_from_env() -> PathBuf {
+    env::var("WENYUAN_PREFERENCES_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("wenyuan-preferences.json"))
+}
+
+fn load_preferences(path: &FsPath) -> Result<UserPreferences, ApiError> {
+    if !path.exists() {
+        return Ok(UserPreferences::default());
+    }
+    let raw = fs::read_to_string(path)
+        .map_err(|err| ApiError::internal(format!("failed to read preferences: {err}")))?;
+    let preferences = serde_json::from_str(&raw)
+        .map_err(|err| ApiError::bad_request(format!("invalid preferences json: {err}")))?;
+    Ok(normalize_preferences(preferences))
+}
+
+fn save_preferences(path: &FsPath, preferences: &UserPreferences) -> Result<(), ApiError> {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent).map_err(|err| {
+            ApiError::internal(format!("failed to create preferences dir: {err}"))
+        })?;
+    }
+    let raw = serde_json::to_string_pretty(preferences)
+        .map_err(|err| ApiError::internal(format!("failed to encode preferences: {err}")))?;
+    fs::write(path, format!("{raw}\n"))
+        .map_err(|err| ApiError::internal(format!("failed to write preferences: {err}")))
+}
+
+fn normalize_preferences(mut preferences: UserPreferences) -> UserPreferences {
+    preferences.defaults.view_mode = match preferences.defaults.view_mode.as_str() {
+        "report" => "report".into(),
+        _ => default_view_mode(),
+    };
+    if preferences.tools.code_search_root.trim().is_empty() {
+        preferences.tools.code_search_root = default_code_search_root();
+    }
+    preferences.tools.max_file_size_mb = preferences.tools.max_file_size_mb.clamp(1, 100);
+    preferences
+}
+
 fn search_backend_from_env() -> Option<Arc<dyn SearchBackend>> {
     let provider = env::var("WENYUAN_SEARCH_PROVIDER")
-        .unwrap_or_default()
+        .unwrap_or_else(|_| "bing,duckduckgo,wikipedia".into())
         .to_lowercase();
-    if provider.is_empty() {
+    let provider = if provider.trim().is_empty() {
+        "bing,duckduckgo,wikipedia".to_string()
+    } else {
+        provider
+    };
+    if matches!(provider.trim(), "none" | "off" | "disabled") {
         return None;
     }
     let mut backends: Vec<Box<dyn SearchBackend>> = Vec::new();
@@ -215,16 +399,21 @@ fn search_backend_from_env() -> Option<Arc<dyn SearchBackend>> {
         }
     }
     if backends.is_empty() {
-        None
-    } else {
-        Some(Arc::new(SearchPool::new(backends)))
+        backends.push(Box::new(BingBackend::new()));
+        backends.push(Box::new(DuckDuckGoBackend::new()));
+        backends.push(Box::new(WikipediaBackend::new()));
     }
+    Some(Arc::new(SearchPool::new(backends)))
 }
 
 fn app(state: AppState) -> Router {
     Router::new()
         .route("/api/health", get(health))
         .route("/api/config/status", get(config_status))
+        .route(
+            "/api/preferences",
+            get(get_preferences).put(update_preferences),
+        )
         .route("/api/sessions", post(create_session).get(list_sessions))
         .route("/api/sessions/{id}", get(get_session))
         .route("/api/sessions/{id}/start", post(start_session))
@@ -238,6 +427,8 @@ fn app(state: AppState) -> Router {
         .route("/api/sessions/{id}/manual-revision", post(manual_revision))
         .route("/api/sessions/{id}/trajectory", get(phase_trajectory))
         .route("/api/sessions/{id}/events", get(events_sse))
+        .route("/api/tools/documents/parse", post(parse_document))
+        .route("/api/tools/code/search", post(search_code_tool))
         .route("/api/test-topics", get(test_topics))
         .fallback_service(ServeDir::new("web/dist").fallback(ServeFile::new("web/dist/index.html")))
         .layer(CorsLayer::permissive())
@@ -478,8 +669,87 @@ async fn health() -> Json<HealthResponse> {
     Json(HealthResponse { ok: true })
 }
 
+async fn parse_document(
+    State(state): State<AppState>,
+    Json(input): Json<ParseDocumentRequest>,
+) -> Result<Json<ParseDocumentResponse>, ApiError> {
+    let started = Instant::now();
+    if input.filename.trim().is_empty() {
+        return Err(ApiError::bad_request("filename is required"));
+    }
+    let bytes = BASE64
+        .decode(input.content_base64.trim())
+        .map_err(|err| ApiError::bad_request(format!("invalid base64 content: {err}")))?;
+    let preferences = load_preferences(&state.preferences_path)?;
+    let max_bytes = preferences
+        .tools
+        .max_file_size_mb
+        .saturating_mul(1024 * 1024);
+    if max_bytes > 0 && bytes.len() as u64 > max_bytes {
+        return Err(ApiError::bad_request(format!(
+            "document is too large: {} bytes",
+            bytes.len()
+        )));
+    }
+    let document = parse_document_bytes(&input.filename, input.mime_type.as_deref(), &bytes)
+        .map_err(|err| ApiError::bad_request(err.to_string()))?;
+    let evidence = document_to_evidence(&document, SeatKind::Mouyuan);
+    let tool_run = make_tool_run(
+        "document_parse",
+        format!("filename={}", input.filename),
+        "completed",
+        started.elapsed(),
+        evidence.iter().map(|item| item.id).collect(),
+        None,
+    );
+    Ok(Json(ParseDocumentResponse {
+        document,
+        evidence,
+        tool_run,
+    }))
+}
+
+async fn search_code_tool(
+    State(state): State<AppState>,
+    Json(input): Json<CodeSearchRequest>,
+) -> Result<Json<CodeSearchResponse>, ApiError> {
+    let started = Instant::now();
+    let preferences = load_preferences(&state.preferences_path)?;
+    let root = env::var("WENYUAN_CODE_SEARCH_ROOT")
+        .unwrap_or_else(|_| preferences.tools.code_search_root.clone());
+    let result =
+        search_code(root, &input.query).map_err(|err| ApiError::bad_request(err.to_string()))?;
+    let evidence = code_search_to_evidence(&result, SeatKind::Mouyuan);
+    let tool_run = make_tool_run(
+        "code_search",
+        format!("query={}", input.query.trim()),
+        "completed",
+        started.elapsed(),
+        evidence.iter().map(|item| item.id).collect(),
+        None,
+    );
+    Ok(Json(CodeSearchResponse {
+        result,
+        evidence,
+        tool_run,
+    }))
+}
+
 async fn config_status(State(state): State<AppState>) -> Json<ConfigStatus> {
     Json(state.config)
+}
+
+async fn get_preferences(State(state): State<AppState>) -> Result<Json<UserPreferences>, ApiError> {
+    Ok(Json(load_preferences(&state.preferences_path)?))
+}
+
+async fn update_preferences(
+    State(state): State<AppState>,
+    Json(input): Json<UserPreferences>,
+) -> Result<Json<UserPreferences>, ApiError> {
+    let preferences = normalize_preferences(input);
+    save_preferences(&state.preferences_path, &preferences)?;
+    Ok(Json(preferences))
 }
 
 async fn create_session(
@@ -500,6 +770,8 @@ async fn create_session(
     if let Some(enabled) = input.search_enabled {
         session.search_enabled = enabled;
     }
+    session.external_evidence = input.external_evidence.unwrap_or_default();
+    session.external_tool_runs = input.external_tool_runs.unwrap_or_default();
     state
         .store
         .create_session_with_provider_refs(&session, &seat_provider_refs(&state.config))
@@ -784,6 +1056,13 @@ impl ApiError {
     fn bad_request(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::BAD_REQUEST,
+            message: message.into(),
+        }
+    }
+
+    fn internal(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
             message: message.into(),
         }
     }

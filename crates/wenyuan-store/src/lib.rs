@@ -6,7 +6,9 @@ use std::str::FromStr;
 use thiserror::Error;
 use uuid::Uuid;
 use wenyuan_agent::{DiscussionArtifacts, SeatRunStatus, SeatRunTrace, system_prompt};
-use wenyuan_core::{ChatMessage, DeliberationMode, SeatKind, Session, SessionPhase};
+use wenyuan_core::{
+    ChatMessage, DeliberationMode, Evidence, SeatKind, Session, SessionPhase, ToolRun,
+};
 
 #[derive(Debug, Error)]
 pub enum StoreError {
@@ -43,6 +45,8 @@ impl Store {
         store.ensure_vote_policy_column().await?;
         store.ensure_scribe_enabled_column().await?;
         store.ensure_search_enabled_column().await?;
+        store.ensure_external_evidence_column().await?;
+        store.ensure_external_tool_runs_column().await?;
         Ok(store)
     }
 
@@ -207,9 +211,11 @@ impl Store {
             .filter_map(|row| row.try_get::<String, _>("name").ok())
             .collect();
         if !columns.contains("scribe_enabled") {
-            sqlx::query("alter table sessions add column scribe_enabled integer not null default 0")
-                .execute(&self.pool)
-                .await?;
+            sqlx::query(
+                "alter table sessions add column scribe_enabled integer not null default 0",
+            )
+            .execute(&self.pool)
+            .await?;
         }
         Ok(())
     }
@@ -223,9 +229,47 @@ impl Store {
             .filter_map(|row| row.try_get::<String, _>("name").ok())
             .collect();
         if !columns.contains("search_enabled") {
-            sqlx::query("alter table sessions add column search_enabled integer not null default 0")
-                .execute(&self.pool)
-                .await?;
+            sqlx::query(
+                "alter table sessions add column search_enabled integer not null default 0",
+            )
+            .execute(&self.pool)
+            .await?;
+        }
+        Ok(())
+    }
+
+    async fn ensure_external_evidence_column(&self) -> Result<(), StoreError> {
+        let rows = sqlx::query("pragma table_info(sessions)")
+            .fetch_all(&self.pool)
+            .await?;
+        let columns: std::collections::HashSet<String> = rows
+            .into_iter()
+            .filter_map(|row| row.try_get::<String, _>("name").ok())
+            .collect();
+        if !columns.contains("external_evidence_json") {
+            sqlx::query(
+                "alter table sessions add column external_evidence_json text not null default '[]'",
+            )
+            .execute(&self.pool)
+            .await?;
+        }
+        Ok(())
+    }
+
+    async fn ensure_external_tool_runs_column(&self) -> Result<(), StoreError> {
+        let rows = sqlx::query("pragma table_info(sessions)")
+            .fetch_all(&self.pool)
+            .await?;
+        let columns: std::collections::HashSet<String> = rows
+            .into_iter()
+            .filter_map(|row| row.try_get::<String, _>("name").ok())
+            .collect();
+        if !columns.contains("external_tool_runs_json") {
+            sqlx::query(
+                "alter table sessions add column external_tool_runs_json text not null default '[]'",
+            )
+            .execute(&self.pool)
+            .await?;
         }
         Ok(())
     }
@@ -241,10 +285,13 @@ impl Store {
         provider_refs: &HashMap<SeatKind, String>,
     ) -> Result<(), StoreError> {
         let mut tx = self.pool.begin().await?;
+        let mut initial_artifacts = DiscussionArtifacts::default();
+        initial_artifacts.evidence = session.external_evidence.clone();
+        initial_artifacts.tool_runs = session.external_tool_runs.clone();
         sqlx::query(
             "insert into sessions
-            (id, title, topic, context, mode, phase, created_at, updated_at, result_json, failure_reason, convergence_used, artifacts_json, recovery_state, model_config, vote_policy, scribe_enabled, search_enabled)
-            values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+            (id, title, topic, context, mode, phase, created_at, updated_at, result_json, failure_reason, convergence_used, artifacts_json, recovery_state, model_config, vote_policy, scribe_enabled, search_enabled, external_evidence_json, external_tool_runs_json)
+            values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
         )
         .bind(session.id.to_string())
         .bind(&session.title)
@@ -257,12 +304,14 @@ impl Store {
         .bind(optional_json(&session.result)?)
         .bind(&session.failure_reason)
         .bind(session.convergence_used)
-        .bind(serde_json::to_string(&DiscussionArtifacts::default())?)
+        .bind(serde_json::to_string(&initial_artifacts)?)
         .bind("idle")
         .bind(optional_json(&session.model_config)?)
         .bind(optional_json(&session.vote_policy)?)
         .bind(session.scribe_enabled)
         .bind(session.search_enabled)
+        .bind(serde_json::to_string(&session.external_evidence)?)
+        .bind(serde_json::to_string(&session.external_tool_runs)?)
         .execute(&mut *tx)
         .await?;
         let seats: &[SeatKind] = match session.mode {
@@ -1077,7 +1126,9 @@ create table if not exists sessions (
     artifacts_json text,
     execution_token text,
     lease_expires_at text,
-    recovery_state text not null default 'idle'
+    recovery_state text not null default 'idle',
+    external_evidence_json text not null default '[]',
+    external_tool_runs_json text not null default '[]'
 );
 create table if not exists seats (
     session_id text not null,
@@ -1240,6 +1291,10 @@ fn session_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Session, StoreError
     let result_json: Option<String> = row.try_get("result_json")?;
     let model_config_json: Option<String> = row.try_get("model_config").ok().flatten();
     let vote_policy_json: Option<String> = row.try_get("vote_policy").ok().flatten();
+    let external_evidence_json: Option<String> =
+        row.try_get("external_evidence_json").ok().flatten();
+    let external_tool_runs_json: Option<String> =
+        row.try_get("external_tool_runs_json").ok().flatten();
     let scribe_enabled_val: Option<i32> = row.try_get("scribe_enabled").ok();
     let search_enabled_val: Option<i32> = row.try_get("search_enabled").ok();
     Ok(Session {
@@ -1268,6 +1323,16 @@ fn session_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Session, StoreError
             .transpose()?,
         scribe_enabled: scribe_enabled_val.unwrap_or(0) != 0,
         search_enabled: search_enabled_val.unwrap_or(0) != 0,
+        external_evidence: external_evidence_json
+            .as_deref()
+            .map(serde_json::from_str::<Vec<Evidence>>)
+            .transpose()?
+            .unwrap_or_default(),
+        external_tool_runs: external_tool_runs_json
+            .as_deref()
+            .map(serde_json::from_str::<Vec<ToolRun>>)
+            .transpose()?
+            .unwrap_or_default(),
     })
 }
 
@@ -1518,6 +1583,63 @@ mod tests {
             assert_eq!(record.conversation[0].role, "system");
             assert_eq!(record.conversation[0].content, system_prompt(seat));
         }
+    }
+
+    #[tokio::test]
+    async fn create_session_persists_external_evidence() {
+        let store = Store::connect("sqlite::memory:").await.unwrap();
+        let mut session = Session::new("议题", "上传文件证据", "");
+        session.external_evidence.push(Evidence {
+            id: Uuid::new_v4(),
+            proposed_by: SeatKind::Mouyuan,
+            kind: wenyuan_core::EvidenceKind::Fact,
+            content: "DOCX source fact".into(),
+            source: "file://source.docx#document:0".into(),
+            source_fetched_at: Some(Utc::now().to_rfc3339()),
+            source_hash: Some("hash".into()),
+            claim_ids: vec![],
+            source_kind: wenyuan_core::EvidenceSourceKind::File,
+            trust_level: wenyuan_core::EvidenceTrustLevel::UntrustedExternal,
+            safety_flags: wenyuan_core::SourceSafetyFlags::default(),
+        });
+        let id = session.id;
+
+        store.create_session(&session).await.unwrap();
+        let details = store.get_session(id).await.unwrap();
+
+        assert_eq!(details.session.external_evidence.len(), 1);
+        assert_eq!(
+            details.session.external_evidence[0].source,
+            "file://source.docx#document:0"
+        );
+        assert_eq!(details.artifacts.evidence.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn create_session_persists_external_tool_runs() {
+        let store = Store::connect("sqlite::memory:").await.unwrap();
+        let mut session = Session::new("议题", "工具轨迹", "");
+        session.external_tool_runs.push(ToolRun {
+            id: Uuid::new_v4(),
+            seat: None,
+            phase: None,
+            tool_name: "code_search".into(),
+            input_summary: "query=ToolRun".into(),
+            input_hash: "hash".into(),
+            status: "completed".into(),
+            duration_ms: 12,
+            evidence_ids: vec![],
+            error: None,
+            created_at: Utc::now().to_rfc3339(),
+        });
+        let id = session.id;
+
+        store.create_session(&session).await.unwrap();
+        let details = store.get_session(id).await.unwrap();
+
+        assert_eq!(details.session.external_tool_runs.len(), 1);
+        assert_eq!(details.artifacts.tool_runs.len(), 1);
+        assert_eq!(details.artifacts.tool_runs[0].tool_name, "code_search");
     }
 
     #[tokio::test]

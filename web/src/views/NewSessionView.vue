@@ -21,6 +21,16 @@
           <span class="field-caption">补充现状、约束、已有方案和风险边界；没有也可以留空。</span>
           <textarea v-model="context" rows="6" :placeholder="contextPlaceholder" />
         </label>
+        <DocumentSourcePanel
+          v-model="documentContext"
+          v-model:evidence="documentEvidence"
+          v-model:tool-runs="documentToolRuns"
+        />
+        <CodeSearchPanel
+          v-model="codeContext"
+          v-model:evidence="codeEvidence"
+          v-model:tool-runs="codeToolRuns"
+        />
       </div>
 
       <aside class="create-side">
@@ -100,11 +110,20 @@ import { useRouter } from 'vue-router'
 import { Send } from '@lucide/vue'
 import { api } from '../api'
 import ApiErrorState from '../components/ApiErrorState.vue'
+import CodeSearchPanel from '../components/CodeSearchPanel.vue'
+import DocumentSourcePanel from '../components/DocumentSourcePanel.vue'
+import type { EvidenceItem, ToolRun } from '../domain/session'
 
 const router = useRouter()
 const title = ref('')
 const topic = ref('')
 const context = ref('')
+const documentContext = ref('')
+const documentEvidence = ref<EvidenceItem[]>([])
+const documentToolRuns = ref<ToolRun[]>([])
+const codeContext = ref('')
+const codeEvidence = ref<EvidenceItem[]>([])
+const codeToolRuns = ref<ToolRun[]>([])
 const mode = ref<'three_seat' | 'single_agent'>('three_seat')
 const voteStrategy = ref<'simple_majority' | 'risk_veto' | 'unanimous' | 'conditional_pass' | 'weighted_score'>('simple_majority')
 const allowSelfVote = ref(true)
@@ -143,7 +162,10 @@ const seatConfigs = ref<Array<{ key: string; label: string; model: string; model
 
 onMounted(async () => {
   try {
-    const config = await api.configStatus()
+    const [config, preferences] = await Promise.all([
+      api.configStatus(),
+      api.preferences().catch(() => null),
+    ])
     seatModelsMap.value = config.seat_available_models ?? {}
     const globalFallback = config.available_models ?? []
     // Apply per-seat models or global fallback
@@ -152,6 +174,17 @@ onMounted(async () => {
       s.models = seatModelsMap.value[key]?.length
         ? seatModelsMap.value[key]
         : globalFallback
+    }
+    if (preferences) {
+      mode.value = preferences.defaults.mode
+      scribeEnabled.value = preferences.defaults.scribe_enabled
+      searchEnabled.value = preferences.defaults.search_enabled
+      voteStrategy.value = preferences.defaults.vote_strategy
+      allowSelfVote.value = preferences.defaults.allow_self_vote
+      for (const s of seatConfigs.value) {
+        const preferred = preferences.models[s.key as keyof typeof preferences.models]
+        if (preferred) s.model = preferred
+      }
     }
   } catch { /* ignore */ }
 })
@@ -203,12 +236,14 @@ async function submit() {
     const session = await api.createSession({
       title: title.value,
       topic: topic.value,
-      context: context.value,
+      context: [context.value.trim(), documentContext.value.trim(), codeContext.value.trim()].filter(Boolean).join('\n\n'),
       mode: mode.value,
       model_config: Object.keys(model_config).length > 0 ? model_config : undefined,
       vote_policy: votePolicy,
       scribe_enabled: scribeEnabled.value || undefined,
       search_enabled: searchEnabled.value || undefined,
+      external_evidence: [...documentEvidence.value, ...codeEvidence.value].length ? [...documentEvidence.value, ...codeEvidence.value] : undefined,
+      external_tool_runs: [...documentToolRuns.value, ...codeToolRuns.value].length ? [...documentToolRuns.value, ...codeToolRuns.value] : undefined,
     })
     await api.startSession(session.id)
     router.push(`/sessions/${session.id}`)

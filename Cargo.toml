@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/wenyuan-core",
+    "crates/wenyuan-tools",
     "crates/wenyuan-provider",
     "crates/wenyuan-agent",
     "crates/wenyuan-store",
@@ -18,13 +19,19 @@ anyhow = "1"
 async-trait = "0.1"
 async-stream = "0.3"
 axum = { version = "0.8", features = ["macros"] }
+base64 = "0.22"
+calamine = "0.35"
 chrono = { version = "0.4", features = ["serde"] }
+csv = "1"
+docx-rs = "0.4"
 dotenvy = "0.15"
 futures = "0.3"
+pdf-extract = "0.10"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 scraper = "0.21"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
 sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "sqlite", "chrono", "uuid", "migrate"] }
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
@@ -37,3 +44,4 @@ wenyuan-agent = { path = "crates/wenyuan-agent" }
 wenyuan-core = { path = "crates/wenyuan-core" }
 wenyuan-provider = { path = "crates/wenyuan-provider" }
 wenyuan-store = { path = "crates/wenyuan-store" }
+wenyuan-tools = { path = "crates/wenyuan-tools" }

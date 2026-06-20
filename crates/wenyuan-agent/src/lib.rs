@@ -13,11 +13,13 @@ use tokio::sync::Notify;
 use uuid::Uuid;
 use wenyuan_core::{
     Assessment, ChatMessage, Claim, ClaimEvidenceLink, Critique, Decision, DecisionStatus,
-    DeliberationMode, Evidence, IdeaCard, IdeaStatus, Proposal, SearchBackend, SearchError,
-    SearchResult, SeatKind, SeatModelConfig, SeatStatus, Session, SessionPhase, Vote,
-    VoteOutcome, VotePolicy, build_decision, generate_merged_proposal, phase_barrier_completed,
+    DeliberationMode, Evidence, EvidenceSourceKind, EvidenceTrustLevel, IdeaCard, IdeaStatus,
+    Proposal, SearchBackend, SearchError, SearchResult, SeatKind, SeatModelConfig, SeatStatus,
+    Session, SessionPhase, SourceSafetyFlags, ToolRun, Vote, VoteOutcome, VotePolicy,
+    build_decision, generate_merged_proposal, phase_barrier_completed,
 };
 use wenyuan_provider::{LlmProvider, LlmRequest, LlmResponse, ProviderError};
+use wenyuan_tools::{make_tool_run, search_results_to_evidence, untrusted_evidence_notice};
 
 #[async_trait]
 pub trait ProgressSink: Send + Sync {
@@ -126,8 +128,46 @@ impl AgentRunner {
         }
 
         let mut artifacts = DiscussionArtifacts::default();
+        artifacts
+            .tool_runs
+            .extend(session.external_tool_runs.clone());
         let model_config = session.model_config.clone();
         let mc = model_config.as_ref();
+        let mut external_evidence = session.external_evidence.clone();
+
+        if session.search_enabled {
+            let search_started = Instant::now();
+            let search_results = self.run_search(&session, &cancel, progress.as_ref()).await;
+            match search_results {
+                Ok(results) => {
+                    let search_evidence = search_results_to_evidence(&results);
+                    let evidence_ids = search_evidence.iter().map(|item| item.id).collect();
+                    external_evidence.extend(search_evidence);
+                    artifacts.tool_runs.push(make_tool_run(
+                        "web_search",
+                        format!("query={}", session.topic),
+                        "completed",
+                        search_started.elapsed(),
+                        evidence_ids,
+                        None,
+                    ));
+                    artifacts
+                        .events
+                        .push(format!("search_completed:{}_results", results.len()));
+                }
+                Err(err) => {
+                    artifacts.tool_runs.push(make_tool_run(
+                        "web_search",
+                        format!("query={}", session.topic),
+                        "failed",
+                        search_started.elapsed(),
+                        vec![],
+                        Some(err.to_string()),
+                    ));
+                    artifacts.events.push(format!("search_failed:{err}"));
+                }
+            }
+        }
 
         self.ensure_not_cancelled(&cancel)?;
         session
@@ -143,7 +183,7 @@ impl AgentRunner {
         )
         .await;
         let (ideas, traces) = self
-            .run_independent(&session, &cancel, progress.as_ref())
+            .run_independent(&session, &external_evidence, &cancel, progress.as_ref())
             .await?;
         artifacts.ideas = ideas;
         artifacts.seat_runs.extend(traces);
@@ -333,34 +373,9 @@ impl AgentRunner {
             extract_evidence_pool(&artifacts.ideas, &artifacts.critiques, &artifacts.proposals);
         artifacts.claims = claims;
         artifacts.evidence = evidence;
+        artifacts.evidence.extend(external_evidence);
         artifacts.assessments = assessments;
         artifacts.claim_evidence_links = links;
-
-        if session.search_enabled {
-            let search_results = self
-                .run_search(&session, &cancel, progress.as_ref())
-                .await;
-            match search_results {
-                Ok(results) => {
-                    for result in &results {
-                        artifacts.evidence.push(Evidence {
-                            id: Uuid::new_v4(),
-                            proposed_by: SeatKind::Mouyuan,
-                            kind: wenyuan_core::EvidenceKind::Fact,
-                            content: format!("{} — {}", result.title, result.snippet),
-                            source: result.url.clone(),
-                            source_fetched_at: Some(chrono::Utc::now().to_rfc3339()),
-                            source_hash: None,
-                            claim_ids: vec![],
-                        });
-                    }
-                    artifacts.events.push(format!("search_completed:{}_results", results.len()));
-                }
-                Err(err) => {
-                    artifacts.events.push(format!("search_failed:{err}"));
-                }
-            }
-        }
 
         artifacts.quality = DiscussionQualityMetrics::calculate(&artifacts);
 
@@ -477,9 +492,10 @@ impl AgentRunner {
         )
         .await;
 
-        let results = search.search(&session.topic, 5).await.map_err(|err| {
-            AgentError::Core(format!("search failed: {err}"))
-        })?;
+        let results = search
+            .search(&session.topic, 5)
+            .await
+            .map_err(|err| AgentError::Core(format!("search failed: {err}")))?;
 
         emit_progress(
             progress,
@@ -494,6 +510,7 @@ impl AgentRunner {
     async fn run_independent(
         &self,
         session: &Session,
+        external_evidence: &[Evidence],
         cancel: &CancellationFlag,
         progress: Option<&Arc<dyn ProgressSink>>,
     ) -> Result<(Vec<IdeaCard>, Vec<SeatRunTrace>), AgentError> {
@@ -501,6 +518,8 @@ impl AgentRunner {
             "title": session.title,
             "topic": session.topic,
             "context": session.context,
+            "external_sources": external_evidence,
+            "untrusted_source_notice": untrusted_evidence_notice(),
             "rule": "第一轮独议完全隔离，不引用其他席位输出。"
         });
         let mc = session.model_config.as_ref();
@@ -726,8 +745,46 @@ impl AgentRunner {
         progress: Option<Arc<dyn ProgressSink>>,
     ) -> Result<DiscussionArtifacts, AgentError> {
         let mut artifacts = DiscussionArtifacts::default();
+        artifacts
+            .tool_runs
+            .extend(session.external_tool_runs.clone());
         let model_config = session.model_config.clone();
         let mc = model_config.as_ref();
+        let mut external_evidence = session.external_evidence.clone();
+
+        if session.search_enabled {
+            let search_started = Instant::now();
+            let search_results = self.run_search(&session, &cancel, progress.as_ref()).await;
+            match search_results {
+                Ok(results) => {
+                    let search_evidence = search_results_to_evidence(&results);
+                    let evidence_ids = search_evidence.iter().map(|item| item.id).collect();
+                    external_evidence.extend(search_evidence);
+                    artifacts.tool_runs.push(make_tool_run(
+                        "web_search",
+                        format!("query={}", session.topic),
+                        "completed",
+                        search_started.elapsed(),
+                        evidence_ids,
+                        None,
+                    ));
+                    artifacts
+                        .events
+                        .push(format!("search_completed:{}_results", results.len()));
+                }
+                Err(err) => {
+                    artifacts.tool_runs.push(make_tool_run(
+                        "web_search",
+                        format!("query={}", session.topic),
+                        "failed",
+                        search_started.elapsed(),
+                        vec![],
+                        Some(err.to_string()),
+                    ));
+                    artifacts.events.push(format!("search_failed:{err}"));
+                }
+            }
+        }
 
         // Phase 1: IndependentDeliberation (single seat)
         self.ensure_not_cancelled(&cancel)?;
@@ -747,6 +804,8 @@ impl AgentRunner {
             "title": session.title,
             "topic": session.topic,
             "context": session.context,
+            "external_sources": external_evidence,
+            "untrusted_source_notice": untrusted_evidence_notice(),
             "rule": "第一轮独议完全隔离，不引用其他席位输出。"
         });
         let (ideas_result, traces) = self
@@ -931,6 +990,7 @@ impl AgentRunner {
             extract_evidence_pool(&artifacts.ideas, &artifacts.critiques, &artifacts.proposals);
         artifacts.claims = claims;
         artifacts.evidence = evidence;
+        artifacts.evidence.extend(external_evidence);
         artifacts.assessments = assessments;
         artifacts.claim_evidence_links = links;
         artifacts.quality = DiscussionQualityMetrics::calculate(&artifacts);
@@ -1357,6 +1417,8 @@ pub struct DiscussionArtifacts {
     #[serde(default)]
     pub evidence: Vec<Evidence>,
     #[serde(default)]
+    pub tool_runs: Vec<ToolRun>,
+    #[serde(default)]
     pub assessments: Vec<Assessment>,
     #[serde(default)]
     pub claim_evidence_links: Vec<ClaimEvidenceLink>,
@@ -1719,6 +1781,9 @@ fn extract_evidence_pool(
                 source_fetched_at: Some(now.clone()),
                 source_hash: content_hash,
                 claim_ids: vec![claim_id],
+                source_kind: EvidenceSourceKind::Internal,
+                trust_level: EvidenceTrustLevel::Internal,
+                safety_flags: SourceSafetyFlags::default(),
             });
             links.push(ClaimEvidenceLink {
                 claim_id,
@@ -1752,6 +1817,9 @@ fn extract_evidence_pool(
                 source_fetched_at: Some(now.clone()),
                 source_hash: Some(short_hash(&idea.value)),
                 claim_ids: vec![],
+                source_kind: EvidenceSourceKind::Internal,
+                trust_level: EvidenceTrustLevel::Internal,
+                safety_flags: SourceSafetyFlags::default(),
             });
         }
         if !idea.mechanism.trim().is_empty() {
@@ -1765,6 +1833,9 @@ fn extract_evidence_pool(
                 source_fetched_at: Some(now.clone()),
                 source_hash: Some(short_hash(&idea.mechanism)),
                 claim_ids: vec![],
+                source_kind: EvidenceSourceKind::Internal,
+                trust_level: EvidenceTrustLevel::Internal,
+                safety_flags: SourceSafetyFlags::default(),
             });
         }
     }
@@ -1794,6 +1865,9 @@ fn extract_evidence_pool(
                     source_fetched_at: Some(now.clone()),
                     source_hash: Some(short_hash(&critique.evidence_question)),
                     claim_ids: vec![claim_id],
+                    source_kind: EvidenceSourceKind::Internal,
+                    trust_level: EvidenceTrustLevel::Internal,
+                    safety_flags: SourceSafetyFlags::default(),
                 });
                 links.push(ClaimEvidenceLink {
                     claim_id,
@@ -1813,6 +1887,9 @@ fn extract_evidence_pool(
                 source_fetched_at: Some(now.clone()),
                 source_hash: Some(short_hash(&critique.evidence_question)),
                 claim_ids: vec![],
+                source_kind: EvidenceSourceKind::Internal,
+                trust_level: EvidenceTrustLevel::Internal,
+                safety_flags: SourceSafetyFlags::default(),
             });
         }
     }
@@ -2589,16 +2666,106 @@ mod tests {
     async fn search_enabled_adds_evidence() {
         let mut session = Session::new("search test", "test topic for deliberation", "");
         session.search_enabled = true;
-        let artifacts = AgentRunner::new(Arc::new(MockProvider::new(MockScenario::SuccessMajority)))
-            .with_search(Arc::new(MockSearchBackend::new()))
+        let artifacts =
+            AgentRunner::new(Arc::new(MockProvider::new(MockScenario::SuccessMajority)))
+                .with_search(Arc::new(MockSearchBackend::new()))
+                .run_session(session, CancellationFlag::default())
+                .await
+                .unwrap();
+        assert!(
+            artifacts
+                .events
+                .iter()
+                .any(|e| e.starts_with("search_completed")),
+            "expected search_completed event, got: {:?}",
+            artifacts.events
+        );
+        let search_index = artifacts
+            .events
+            .iter()
+            .position(|e| e.starts_with("search_completed"))
+            .expect("search event should be present");
+        let independent_index = artifacts
+            .events
+            .iter()
+            .position(|e| e == "phase_started:independent_deliberation")
+            .expect("independent phase should be present");
+        assert!(
+            search_index < independent_index,
+            "search should run before independent deliberation: {:?}",
+            artifacts.events
+        );
+        let evidence_sources: Vec<_> = artifacts
+            .evidence
+            .iter()
+            .map(|e| e.source.clone())
+            .collect();
+        assert!(
+            evidence_sources.iter().any(|s| s.contains("github.com")),
+            "expected github source in evidence, got: {:?}",
+            evidence_sources
+        );
+        assert!(
+            artifacts
+                .tool_runs
+                .iter()
+                .any(|run| run.tool_name == "web_search" && run.status == "completed"),
+            "expected web_search tool run, got: {:?}",
+            artifacts.tool_runs
+        );
+    }
+
+    #[tokio::test]
+    async fn external_evidence_is_preserved_in_artifacts() {
+        let mut session = Session::new("file evidence test", "topic", "");
+        session.external_evidence.push(Evidence {
+            id: Uuid::new_v4(),
+            proposed_by: SeatKind::Mouyuan,
+            kind: wenyuan_core::EvidenceKind::Fact,
+            content: "DOCX source fact".into(),
+            source: "file://source.docx#document:0".into(),
+            source_fetched_at: Some(chrono::Utc::now().to_rfc3339()),
+            source_hash: Some("hash".into()),
+            claim_ids: vec![],
+            source_kind: EvidenceSourceKind::File,
+            trust_level: EvidenceTrustLevel::UntrustedExternal,
+            safety_flags: SourceSafetyFlags::default(),
+        });
+        session.external_tool_runs.push(ToolRun {
+            id: Uuid::new_v4(),
+            seat: None,
+            phase: None,
+            tool_name: "document_parse".into(),
+            input_summary: "filename=source.docx".into(),
+            input_hash: "hash".into(),
+            status: "completed".into(),
+            duration_ms: 3,
+            evidence_ids: vec![],
+            error: None,
+            created_at: chrono::Utc::now().to_rfc3339(),
+        });
+
+        let artifacts = runner(MockScenario::SuccessMajority)
             .run_session(session, CancellationFlag::default())
             .await
             .unwrap();
-        assert!(artifacts.events.iter().any(|e| e.starts_with("search_completed")),
-            "expected search_completed event, got: {:?}", artifacts.events);
-        let evidence_sources: Vec<_> = artifacts.evidence.iter().map(|e| e.source.clone()).collect();
-        assert!(evidence_sources.iter().any(|s| s.contains("github.com")),
-            "expected github source in evidence, got: {:?}", evidence_sources);
+
+        assert!(
+            artifacts.evidence.iter().any(|ev| {
+                ev.source == "file://source.docx#document:0"
+                    && ev.source_kind == EvidenceSourceKind::File
+            }),
+            "expected file evidence to be preserved, got: {:?}",
+            artifacts.evidence
+        );
+        assert!(
+            artifacts
+                .tool_runs
+                .iter()
+                .any(|run| run.tool_name == "document_parse"),
+            "expected document_parse tool run, got: {:?}",
+            artifacts.tool_runs
+        );
     }
 
     #[tokio::test]
@@ -2609,7 +2776,9 @@ mod tests {
             .run_session(session, CancellationFlag::default())
             .await
             .unwrap();
-        let report = artifacts.scribe_report.expect("scribe should produce a report");
+        let report = artifacts
+            .scribe_report
+            .expect("scribe should produce a report");
         assert!(!report.consensus_summary.is_empty());
         assert!(!report.final_report.is_empty());
         assert!(artifacts.events.iter().any(|e| e == "scribe_completed"));

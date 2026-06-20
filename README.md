@@ -107,4 +107,26 @@ WENYUAN_LLM_API_KEY_CHIZHENG=key-c
 
 ## 当前边界
 
-当前版本聚焦三席合议、单 Agent 对照、本地持久化和可视化工作台。暂不包含用户系统、云端部署、联网搜索、工具调用、向量数据库、Tauri 桌面端或任意数量 Agent 编排。
+当前版本聚焦三席合议、单 Agent 对照、本地持久化、可视化工作台和可选联网搜索。暂不包含用户系统、云端部署、通用工具调用、向量数据库、Tauri 桌面端或任意数量 Agent 编排。
+
+## 联网搜索
+
+会话勾选“启用搜索”后，系统会在第一轮独议前检索网络来源，并把结果作为 `external_sources` 提供给席位，同时写入最终证据池。未设置 `WENYUAN_SEARCH_PROVIDER` 时默认使用免 key fallback：`bing,duckduckgo,wikipedia`。如需显式关闭搜索后端，可设置 `WENYUAN_SEARCH_PROVIDER=none`；也可混合配置 `custom,doubao,tavily,google,searxng` 等 provider。
+
+## 外部来源安全
+
+搜索结果、文档解析结果和代码搜索结果都被视为不可信证据，而不是指令。进入三席输入前会移除控制字符、限制长度、记录来源 hash，并用 `safety_flags` 标记疑似 prompt injection 内容。模型提示中会明确要求只把这些内容作为事实材料使用，不执行来源文本里的指令。
+
+## 文档解析
+
+后端提供 `POST /api/tools/documents/parse`，请求体包含 `filename`、可选 `mime_type` 和 `content_base64`。当前支持纯文本、Markdown、JSON、日志、CSV/TSV、Excel/OpenDocument 表格、PDF 文本抽取和 DOCX 正文抽取；外部文档内容同样会进入安全净化层并标记为不可信来源。
+
+## 工具调用轨迹
+
+文档解析、代码搜索和会话内网页搜索都会生成 `tool_runs`，记录工具名、输入摘要 hash、状态、耗时、关联 evidence IDs 和错误信息。新建议题页可上传文件或执行代码搜索，结果会作为外部来源进入背景、证据池和最终报告的 Audit 导出。
+
+代码搜索提供 `POST /api/tools/code/search`，默认只扫描服务启动目录；可用 `WENYUAN_CODE_SEARCH_ROOT` 指定允许搜索的项目根。搜索会跳过 `.git`、`target`、`node_modules`、`dist` 等目录，并只读取常见源码/配置文本文件。
+
+## 用户偏好配置
+
+后端提供 `GET/PUT /api/preferences`，默认保存到 `wenyuan-preferences.json`，也可用 `WENYUAN_PREFERENCES_PATH` 指定路径。偏好只保存本地默认配置：默认合议模式、书记官/搜索开关、投票策略、每席默认模型、代码搜索根目录和文件大小上限；不保存隐藏推理，不抽取历史决策，也不做向量记忆。

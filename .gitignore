@@ -6,9 +6,11 @@
 /web/dist/
 /web/.pnpm-store/
 /web/.pnpm-home/
+/.pnpm-store/
 /web/tsconfig.tsbuildinfo
 *.log
 .env
+wenyuan-preferences.json
 Agents.md
 /.codex/
 /.agents/

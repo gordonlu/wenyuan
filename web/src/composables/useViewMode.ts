@@ -18,20 +18,29 @@ function readStoredViewMode(storage: Storage | null): SessionViewMode | null {
   }
 }
 
-export function readInitialViewMode(route: RouteLocationNormalizedLoaded, storage: Storage | null): SessionViewMode {
-  return normalizeViewMode(route.query.view) ?? readStoredViewMode(storage) ?? 'workbench'
+export function hasStoredViewMode(storage: Storage | null): boolean {
+  return readStoredViewMode(storage) !== null
+}
+
+export function readInitialViewMode(
+  route: RouteLocationNormalizedLoaded,
+  storage: Storage | null,
+  defaultMode: SessionViewMode = 'workbench',
+): SessionViewMode {
+  return normalizeViewMode(route.query.view) ?? readStoredViewMode(storage) ?? defaultMode
 }
 
 export function useViewMode(options: {
   route: RouteLocationNormalizedLoaded
   router: Router
+  defaultMode?: SessionViewMode
   storage?: Storage | null
 }): {
   viewMode: Ref<SessionViewMode>
   setViewMode: (mode: SessionViewMode) => void
 } {
   const storage = options.storage ?? (typeof window === 'undefined' ? null : window.localStorage)
-  const viewMode = ref<SessionViewMode>(readInitialViewMode(options.route, storage))
+  const viewMode = ref<SessionViewMode>(readInitialViewMode(options.route, storage, options.defaultMode))
 
   function setViewMode(mode: SessionViewMode) {
     viewMode.value = mode

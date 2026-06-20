@@ -139,6 +139,52 @@
       <p v-else-if="details.session.context" class="muted" style="margin-top: 8px">{{ details.session.context }}</p>
     </section>
 
+    <section v-if="externalEvidence.length" class="panel evidence-source-panel">
+      <div class="row-head">
+        <h2>来源证据</h2>
+        <span class="badge flat">{{ externalEvidence.length }} 条</span>
+      </div>
+      <div class="item-grid evidence-source-grid">
+        <article v-for="ev in externalEvidence.slice(0, 12)" :key="ev.id" class="item evidence-source-item">
+          <div class="item-head">
+            <span>{{ evidenceSourceKindLabels[ev.source_kind ?? 'internal'] ?? ev.source_kind }}</span>
+            <span :class="['badge', ev.trust_level === 'untrusted_external' ? 'warn' : 'ok']">
+              {{ evidenceTrustLabels[ev.trust_level ?? 'internal'] ?? ev.trust_level }}
+            </span>
+          </div>
+          <p>{{ ev.content }}</p>
+          <p class="muted evidence-source-url">{{ compactSource(ev.source) }}</p>
+          <div v-if="evidenceSafetyLabels(ev.safety_flags).length" class="evidence-safety-row">
+            <span
+              v-for="label in evidenceSafetyLabels(ev.safety_flags)"
+              :key="label"
+              class="badge warn"
+            >
+              {{ label }}
+            </span>
+          </div>
+        </article>
+      </div>
+    </section>
+
+    <section v-if="toolRuns.length" class="panel tool-run-panel">
+      <div class="row-head">
+        <h2>工具轨迹</h2>
+        <span class="badge flat">{{ toolRuns.length }} 次</span>
+      </div>
+      <div class="item-grid tool-run-grid">
+        <article v-for="run in toolRuns" :key="run.id" class="item tool-run-item">
+          <div class="item-head">
+            <span>{{ toolNameLabel(run.tool_name) }}</span>
+            <span :class="['badge', run.status === 'completed' ? 'ok' : 'warn']">{{ run.status }}</span>
+          </div>
+          <p>{{ run.input_summary }}</p>
+          <p class="muted">{{ run.duration_ms }} ms · {{ run.evidence_ids?.length ?? 0 }} 条证据</p>
+          <p v-if="run.error" class="muted tool-run-error">{{ run.error }}</p>
+        </article>
+      </div>
+    </section>
+
     <section class="panel">
       <h2>创意池（{{ details.artifacts.ideas.length }}）</h2>
       <div class="item-grid">
@@ -311,6 +357,52 @@
         <p v-if="details.session.context" class="muted">{{ details.session.context }}</p>
       </section>
 
+      <section v-if="externalEvidence.length" class="panel evidence-source-panel">
+        <div class="row-head">
+          <h2>来源证据</h2>
+          <span class="badge flat">{{ externalEvidence.length }} 条</span>
+        </div>
+        <div class="item-grid evidence-source-grid">
+          <article v-for="ev in externalEvidence.slice(0, 12)" :key="ev.id" class="item evidence-source-item">
+            <div class="item-head">
+              <span>{{ evidenceSourceKindLabels[ev.source_kind ?? 'internal'] ?? ev.source_kind }}</span>
+              <span :class="['badge', ev.trust_level === 'untrusted_external' ? 'warn' : 'ok']">
+                {{ evidenceTrustLabels[ev.trust_level ?? 'internal'] ?? ev.trust_level }}
+              </span>
+            </div>
+            <p>{{ ev.content }}</p>
+            <p class="muted evidence-source-url">{{ compactSource(ev.source) }}</p>
+            <div v-if="evidenceSafetyLabels(ev.safety_flags).length" class="evidence-safety-row">
+              <span
+                v-for="label in evidenceSafetyLabels(ev.safety_flags)"
+                :key="label"
+                class="badge warn"
+              >
+                {{ label }}
+              </span>
+            </div>
+          </article>
+        </div>
+      </section>
+
+      <section v-if="toolRuns.length" class="panel tool-run-panel">
+        <div class="row-head">
+          <h2>工具轨迹</h2>
+          <span class="badge flat">{{ toolRuns.length }} 次</span>
+        </div>
+        <div class="item-grid tool-run-grid">
+          <article v-for="run in toolRuns" :key="run.id" class="item tool-run-item">
+            <div class="item-head">
+              <span>{{ toolNameLabel(run.tool_name) }}</span>
+              <span :class="['badge', run.status === 'completed' ? 'ok' : 'warn']">{{ run.status }}</span>
+            </div>
+            <p>{{ run.input_summary }}</p>
+            <p class="muted">{{ run.duration_ms }} ms · {{ run.evidence_ids?.length ?? 0 }} 条证据</p>
+            <p v-if="run.error" class="muted tool-run-error">{{ run.error }}</p>
+          </article>
+        </div>
+      </section>
+
     <DecisionSummary v-if="primaryDecision" :decision="primaryDecision" :vote-policy="details.session.vote_policy" />
 
       <section class="role-card-row report-seat-row" aria-label="三席报告">
@@ -382,8 +474,8 @@ import ProposalCompare from '../components/ProposalCompare.vue'
 import SeatRoleCard from '../components/SeatRoleCard.vue'
 import VoteChanges from '../components/VoteChanges.vue'
 import VoteDisplay from '../components/VoteDisplay.vue'
-import { useViewMode } from '../composables/useViewMode'
-import { exportSessionMarkdown, ideaStatusLabels, evidenceKindLabels, modeLabels, phaseLabels, qualityMetricRows, revisionDiffs, seatLabels, seatRunStats, voteStrategyLabels, type SeatKind, type SessionDetails } from '../domain/session'
+import { hasStoredViewMode, useViewMode } from '../composables/useViewMode'
+import { evidenceSafetyLabels, evidenceSourceKindLabels, evidenceTrustLabels, exportSessionMarkdown, ideaStatusLabels, evidenceKindLabels, modeLabels, phaseLabels, qualityMetricRows, revisionDiffs, seatLabels, seatRunStats, voteStrategyLabels, type SeatKind, type SessionDetails } from '../domain/session'
 
 const route = useRoute()
 const router = useRouter()
@@ -418,6 +510,10 @@ const hasTokenUsage = computed(() => (details.value?.artifacts.seat_runs ?? []).
 const primaryDecision = computed(() => details.value?.session.result ?? details.value?.artifacts.decision ?? null)
 const timelineEvents = computed(() => [...(details.value?.events ?? [])].reverse())
 const trajectoryEvents = computed(() => [...trajectory.value].reverse())
+const externalEvidence = computed(() =>
+  (details.value?.artifacts.evidence ?? []).filter((ev) => ev.source_kind && ev.source_kind !== 'internal'),
+)
+const toolRuns = computed(() => details.value?.artifacts.tool_runs ?? [])
 let source: EventSource | null = null
 let timer: number | undefined
 
@@ -434,6 +530,25 @@ function eventBadge(type: string) {
   if (type.includes('completed') || type.includes('majority')) return 'ok'
   if (type.includes('failed') || type.includes('error') || type.includes('cancelled')) return 'warn'
   return ''
+}
+
+function compactSource(sourceText: string) {
+  if (!sourceText) return '未记录来源'
+  try {
+    const url = new URL(sourceText)
+    return `${url.hostname}${url.pathname === '/' ? '' : url.pathname}`
+  } catch {
+    return sourceText.replace(/^file:\/\//, '')
+  }
+}
+
+function toolNameLabel(name: string) {
+  const labels: Record<string, string> = {
+    web_search: '网页搜索',
+    document_parse: '文档解析',
+    code_search: '代码搜索',
+  }
+  return labels[name] ?? name
 }
 
 function downloadAndClose(format: 'json' | 'html') {
@@ -624,7 +739,22 @@ function safeFilename(value: string) {
   return value.trim().replace(/[\\/:*?"<>|]+/g, '-').replace(/\s+/g, '-').slice(0, 80) || 'wenyuan-session'
 }
 
+async function applyDefaultViewPreference() {
+  if (route.query.view) return
+  const storage = typeof window === 'undefined' ? null : window.localStorage
+  if (hasStoredViewMode(storage)) return
+  try {
+    const preferences = await api.preferences()
+    if (preferences.defaults.view_mode === 'report') {
+      setViewMode('report')
+    }
+  } catch {
+    // Preferences are a convenience layer; session loading should not depend on them.
+  }
+}
+
 onMounted(async () => {
+  await applyDefaultViewPreference()
   await load()
   source = new EventSource(`/api/sessions/${id.value}/events`)
   source.onmessage = () => load()
@@ -663,5 +793,62 @@ onBeforeUnmount(() => {
   white-space: pre-wrap;
   font-size: 14px;
   line-height: 1.7;
+}
+
+.evidence-source-panel .row-head {
+  margin-bottom: var(--space-md);
+}
+
+.evidence-source-panel h2 {
+  margin-bottom: 0;
+}
+
+.evidence-source-grid {
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+}
+
+.evidence-source-item {
+  display: grid;
+  gap: 8px;
+}
+
+.evidence-source-item p {
+  display: -webkit-box;
+  -webkit-line-clamp: 4;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.evidence-source-url {
+  font-family: var(--font-mono);
+  font-size: 12px !important;
+  word-break: break-all;
+}
+
+.evidence-safety-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.tool-run-panel .row-head {
+  margin-bottom: var(--space-md);
+}
+
+.tool-run-panel h2 {
+  margin-bottom: 0;
+}
+
+.tool-run-grid {
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+}
+
+.tool-run-item {
+  display: grid;
+  gap: 8px;
+}
+
+.tool-run-error {
+  color: var(--color-danger) !important;
 }
 </style>

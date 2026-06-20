@@ -75,6 +75,8 @@ export interface SessionRecord {
   vote_policy?: VotePolicy | null
   scribe_enabled?: boolean
   search_enabled?: boolean
+  external_evidence?: EvidenceItem[]
+  external_tool_runs?: ToolRun[]
 }
 
 export interface SessionSummary {
@@ -151,16 +153,7 @@ export interface DiscussionArtifacts {
     evidence_ids?: string[]
     assessment_ids?: string[]
   }>
-  evidence?: Array<{
-    id: string
-    proposed_by: SeatKind
-    kind: 'fact' | 'inference' | 'preference'
-    content: string
-    source: string
-    source_fetched_at?: string | null
-    source_hash?: string | null
-    claim_ids?: string[]
-  }>
+  evidence?: EvidenceItem[]
   assessments?: Array<{
     id: string
     assessor: SeatKind
@@ -177,6 +170,7 @@ export interface DiscussionArtifacts {
   }>
   events: string[]
   scribe_report?: ScribeReport | null
+  tool_runs?: ToolRun[]
 }
 
 export interface DiscussionQualityMetrics {
@@ -230,6 +224,81 @@ export interface SessionDetails {
   events: SessionEvent[]
 }
 
+export interface SourceSafetyFlags {
+  prompt_injection_risk?: boolean
+  contains_control_chars?: boolean
+  truncated?: boolean
+  warnings?: string[]
+}
+
+export interface EvidenceItem {
+  id: string
+  proposed_by: SeatKind
+  kind: 'fact' | 'inference' | 'preference'
+  content: string
+  source: string
+  source_fetched_at?: string | null
+  source_hash?: string | null
+  claim_ids?: string[]
+  source_kind?: 'internal' | 'web_search' | 'file' | 'code' | 'log' | 'data'
+  trust_level?: 'internal' | 'untrusted_external' | 'user_provided' | 'verified_external'
+  safety_flags?: SourceSafetyFlags
+}
+
+export interface DocumentChunk {
+  index: number
+  locator: string
+  text: string
+  safety_flags: SourceSafetyFlags
+}
+
+export interface ParsedDocument {
+  filename: string
+  mime_type: string
+  sha256: string
+  chunks: DocumentChunk[]
+}
+
+export interface ParseDocumentResponse {
+  document: ParsedDocument
+  evidence: EvidenceItem[]
+  tool_run: ToolRun
+}
+
+export interface CodeSearchMatch {
+  path: string
+  line_number: number
+  line: string
+  context_before: string[]
+  context_after: string[]
+}
+
+export interface CodeSearchResultSet {
+  query: string
+  root: string
+  matches: CodeSearchMatch[]
+}
+
+export interface CodeSearchResponse {
+  result: CodeSearchResultSet
+  evidence: EvidenceItem[]
+  tool_run: ToolRun
+}
+
+export interface ToolRun {
+  id: string
+  seat?: SeatKind | null
+  phase?: SessionPhase | null
+  tool_name: string
+  input_summary: string
+  input_hash: string
+  status: string
+  duration_ms: number
+  evidence_ids?: string[]
+  error?: string | null
+  created_at: string
+}
+
 export interface SeatRecord {
   session_id: string
   seat: SeatKind
@@ -257,6 +326,26 @@ export interface ConfigStatus {
   seat_available_models: Record<string, Array<{ value: string; label: string }>>
 }
 
+export interface UserPreferences {
+  defaults: {
+    mode: 'three_seat' | 'single_agent'
+    scribe_enabled: boolean
+    search_enabled: boolean
+    vote_strategy: VoteStrategy
+    allow_self_vote: boolean
+    view_mode: 'workbench' | 'report' | string
+  }
+  models: {
+    mouyuan: string
+    jingshi: string
+    chizheng: string
+  }
+  tools: {
+    code_search_root: string
+    max_file_size_mb: number
+  }
+}
+
 export const seatLabels: Record<SeatKind, string> = {
   mouyuan: '谋远席',
   jingshi: '经世席',
@@ -277,6 +366,33 @@ export const evidenceKindLabels: Record<string, string> = {
   fact: '事实',
   inference: '推断',
   preference: '偏好',
+}
+
+export const evidenceSourceKindLabels: Record<string, string> = {
+  internal: '内部推理',
+  web_search: '网络搜索',
+  file: '上传文件',
+  code: '代码',
+  log: '日志',
+  data: '数据',
+}
+
+export const evidenceTrustLabels: Record<string, string> = {
+  internal: '内部',
+  untrusted_external: '不可信外部',
+  user_provided: '用户提供',
+  verified_external: '已验证外部',
+}
+
+export function evidenceSafetyLabels(flags?: SourceSafetyFlags) {
+  const labels: string[] = []
+  if (flags?.prompt_injection_risk) labels.push('疑似注入')
+  if (flags?.contains_control_chars) labels.push('控制字符已净化')
+  if (flags?.truncated) labels.push('已截断')
+  for (const warning of flags?.warnings ?? []) {
+    if (warning.trim()) labels.push(warning)
+  }
+  return labels
 }
 
 export const phaseLabels: Record<SessionPhase, string> = {
@@ -589,7 +705,19 @@ export function exportSessionMarkdown(details: SessionDetails, level: 'brief' | 
     if (details.artifacts.evidence?.length) {
       lines.push('', '## 证据池（Audit）', '')
       for (const ev of details.artifacts.evidence) {
-        lines.push(`- [${ev.kind}] ${markdownText(ev.content)}${ev.source ? ` (${ev.source})` : ''}`)
+        const sourceKind = evidenceSourceKindLabels[ev.source_kind ?? 'internal'] ?? ev.source_kind ?? '未知来源'
+        const trust = evidenceTrustLabels[ev.trust_level ?? 'internal'] ?? ev.trust_level ?? '未知信任级别'
+        const safety = evidenceSafetyLabels(ev.safety_flags)
+        lines.push(`- [${evidenceKindLabels[ev.kind]}｜${sourceKind}｜${trust}] ${markdownText(ev.content)}${ev.source ? ` (${ev.source})` : ''}`)
+        if (safety.length) lines.push(`  - 安全标记：${safety.map(markdownText).join('、')}`)
+      }
+    }
+    if (details.artifacts.tool_runs?.length) {
+      lines.push('', '## 工具轨迹（Audit）', '')
+      for (const run of details.artifacts.tool_runs) {
+        lines.push(`- ${run.tool_name}：${run.status}，${run.duration_ms} ms，${run.evidence_ids?.length ?? 0} 条证据`)
+        lines.push(`  - 输入：${markdownText(run.input_summary)}`)
+        if (run.error) lines.push(`  - 错误：${markdownText(run.error)}`)
       }
     }
     if (details.artifacts.assessments?.length) {
