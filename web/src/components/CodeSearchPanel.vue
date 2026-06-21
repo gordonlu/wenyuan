@@ -22,7 +22,7 @@
           <Code2 :size="16" />
           <div>
             <strong>{{ run.result.query }}</strong>
-            <span>{{ run.result.matches.length }} 个匹配 · {{ run.result.root }}</span>
+            <span>{{ run.result.matches.length }} 个匹配 · {{ displayRoot(run.result.root) }}</span>
           </div>
           <button class="icon" type="button" title="移除搜索" @click="removeRun(run.id)">
             <Trash2 :size="14" />
@@ -131,6 +131,11 @@ function buildCodeContext(items: CodeSearchRun[]) {
 function makeRunId() {
   if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) return crypto.randomUUID()
   return `code-${Date.now()}-${Math.random().toString(16).slice(2)}`
+}
+
+function displayRoot(root: string) {
+  const normalized = root.replace(/\\/g, '/').replace(/\/+$/g, '')
+  return normalized.split('/').filter(Boolean).pop() || '代码根目录'
 }
 </script>
 

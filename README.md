@@ -94,12 +94,16 @@ WENYUAN_LLM_MODEL=your-model
 WENYUAN_LLM_TIMEOUT_SECS=120
 ```
 
+模型请求参数保持保守：默认不发送 `temperature`，让不同供应商使用自己的默认采样行为。可选的 `WENYUAN_LLM_REASONING_EFFORT` 只有显式配置时才会随请求发送；DeepSeek 模型会把 `low`、`medium`、`high` 或未知值归一为 `high`，把 `xhigh`、`max`、`extra_high` 归一为 `max`，空值则不发送，使用供应商默认值。可选的 `WENYUAN_LLM_MAX_TOKENS` 用于限制输出长度，并会与各阶段提示词自己的上限取较小值。
+
 三个席位默认共用全局模型。也可以分别指定：
 
 ```bash
 WENYUAN_LLM_MODEL_MOUYUAN=model-for-mouyuan
 WENYUAN_LLM_MODEL_JINGSHI=model-for-jingshi
 WENYUAN_LLM_MODEL_CHIZHENG=model-for-chizheng
+WENYUAN_LLM_REASONING_EFFORT_JINGSHI=max
+WENYUAN_LLM_MAX_TOKENS_CHIZHENG=16000
 ```
 
 如果三个席位需要走不同供应商，也可以分别设置：

@@ -638,6 +638,7 @@ const toolRuns = computed(() => details.value?.artifacts.tool_runs ?? [])
 const toolRunSummaryData = computed(() => toolRunSummary(toolRuns.value))
 let source: EventSource | null = null
 let timer: number | undefined
+let pollTimer: number | undefined
 
 function seatProviderRef(seat: SeatKind) {
   return details.value?.seats?.find((item) => item.seat === seat)?.provider_ref ?? ''
@@ -656,12 +657,23 @@ function eventBadge(type: string) {
 
 function compactSource(sourceText: string) {
   if (!sourceText) return '未记录来源'
+  if (sourceText.startsWith('file://')) {
+    return compactPath(sourceText.replace(/^file:\/\//, '').split('#')[0])
+  }
+  if (sourceText.startsWith('code://')) {
+    return sourceText.replace(/^code:\/\//, '')
+  }
   try {
     const url = new URL(sourceText)
     return `${url.hostname}${url.pathname === '/' ? '' : url.pathname}`
   } catch {
-    return sourceText.replace(/^file:\/\//, '')
+    return compactPath(sourceText)
   }
+}
+
+function compactPath(value: string) {
+  const cleaned = value.replace(/\\/g, '/').replace(/\/+$/g, '')
+  return cleaned.split('/').filter(Boolean).pop() || '本地来源'
 }
 
 function toolNameLabel(name: string) {
@@ -874,6 +886,19 @@ function safeFilename(value: string) {
   return value.trim().replace(/[\\/:*?"<>|]+/g, '-').replace(/\s+/g, '-').slice(0, 80) || 'wenyuan-session'
 }
 
+function startFallbackPolling() {
+  if (!pollTimer) {
+    pollTimer = window.setInterval(load, 2500)
+  }
+}
+
+function stopFallbackPolling() {
+  if (pollTimer) {
+    window.clearInterval(pollTimer)
+    pollTimer = undefined
+  }
+}
+
 async function applyDefaultViewPreference() {
   if (route.query.view) return
   const storage = typeof window === 'undefined' ? null : window.localStorage
@@ -892,13 +917,17 @@ onMounted(async () => {
   await applyDefaultViewPreference()
   await load()
   source = new EventSource(`/api/sessions/${id.value}/events`)
-  source.onmessage = () => load()
-  timer = window.setInterval(load, 1200)
+  source.onmessage = () => {
+    stopFallbackPolling()
+    load()
+  }
+  source.onerror = () => startFallbackPolling()
 })
 
 onBeforeUnmount(() => {
   source?.close()
-  if (timer) window.clearInterval(timer)
+  if (timer) window.clearTimeout(timer)
+  stopFallbackPolling()
 })
 </script>
 

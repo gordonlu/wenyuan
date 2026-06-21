@@ -20,6 +20,8 @@ pub struct LlmRequest {
     pub max_tokens: u32,
     pub prompt_version: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub override_model: Option<String>,
 }
 
@@ -102,6 +104,8 @@ pub struct OpenAiCompatibleConfig {
     pub base_url: String,
     pub api_key: String,
     pub model: String,
+    pub reasoning_effort: Option<String>,
+    pub max_tokens: Option<u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -124,6 +128,8 @@ struct OpenAiRequest<'a> {
     model: &'a str,
     messages: &'a [ChatMessage],
     max_tokens: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<&'a str>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -151,7 +157,18 @@ impl LlmProvider for OpenAiCompatibleProvider {
         let body = OpenAiRequest {
             model,
             messages: &request.messages,
-            max_tokens: request.max_tokens,
+            max_tokens: self
+                .config
+                .max_tokens
+                .map(|configured| configured.min(request.max_tokens))
+                .unwrap_or(request.max_tokens),
+            reasoning_effort: normalized_reasoning_effort(
+                model,
+                request
+                    .reasoning_effort
+                    .as_deref()
+                    .or(self.config.reasoning_effort.as_deref()),
+            ),
         };
         let response = self
             .client
@@ -184,6 +201,31 @@ impl LlmProvider for OpenAiCompatibleProvider {
             usage: payload.usage,
             upstream_status: Some(status.as_u16()),
         })
+    }
+}
+
+fn normalized_reasoning_effort(model: &str, effort: Option<&str>) -> Option<&'static str> {
+    let model = model.to_ascii_lowercase();
+    let raw = effort
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && !value.eq_ignore_ascii_case("none"));
+
+    if model.contains("deepseek") {
+        return match raw.map(|value| value.to_ascii_lowercase()).as_deref() {
+            Some("max") | Some("xhigh") | Some("extra_high") => Some("max"),
+            Some("low") | Some("medium") | Some("high") => Some("high"),
+            Some("auto") | None => None,
+            Some(_) => Some("high"),
+        };
+    }
+
+    match raw.map(|value| value.to_ascii_lowercase()).as_deref() {
+        Some("low") => Some("low"),
+        Some("medium") => Some("medium"),
+        Some("high") => Some("high"),
+        Some("xhigh") | Some("max") => Some("high"),
+        Some("auto") | None => None,
+        Some(_) => None,
     }
 }
 
@@ -391,8 +433,8 @@ fn scribe_json() -> String {
 
 pub mod search;
 pub use search::{
-    BingBackend, CustomSearchBackend, DoubaoBackend, DuckDuckGoBackend,
-    GoogleCustomSearchBackend, SearchPool, SearXNGSearchBackend, TavilyBackend, WikipediaBackend,
+    BingBackend, CustomSearchBackend, DoubaoBackend, DuckDuckGoBackend, GoogleCustomSearchBackend,
+    SearXNGSearchBackend, SearchPool, TavilyBackend, WikipediaBackend,
 };
 
 #[cfg(test)]
@@ -421,6 +463,7 @@ mod tests {
             repair_json: false,
             max_tokens: 800,
             prompt_version: "test".into(),
+            reasoning_effort: None,
             override_model: None,
         }
     }
@@ -431,6 +474,8 @@ mod tests {
             base_url: "http://127.0.0.1:1/v1".into(),
             api_key: "test".into(),
             model: "default-model".into(),
+            reasoning_effort: None,
+            max_tokens: None,
         });
         let request = LlmRequest {
             session_id: Uuid::new_v4(),
@@ -440,6 +485,7 @@ mod tests {
             repair_json: false,
             max_tokens: 800,
             prompt_version: "test".into(),
+            reasoning_effort: None,
             override_model: Some("override-model".into()),
         };
         // The request will fail due to connection refused, that's expected
@@ -477,6 +523,7 @@ mod tests {
                 repair_json: false,
                 max_tokens: 800,
                 prompt_version: "test".into(),
+                reasoning_effort: None,
                 override_model: None,
             })
             .await
@@ -496,6 +543,7 @@ mod tests {
                 repair_json: false,
                 max_tokens: 800,
                 prompt_version: "test".into(),
+                reasoning_effort: None,
                 override_model: None,
             })
             .await
@@ -510,6 +558,7 @@ mod tests {
                 repair_json: true,
                 max_tokens: 800,
                 prompt_version: "test".into(),
+                reasoning_effort: None,
                 override_model: None,
             })
             .await

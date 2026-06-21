@@ -99,6 +99,10 @@ pub enum SeatStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SeatModelConfig {
     pub model: Option<String>,
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
+    #[serde(default)]
+    pub max_tokens: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

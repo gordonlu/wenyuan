@@ -427,6 +427,7 @@ impl AgentRunner {
             repair_json: false,
             max_tokens: prompt.max_tokens,
             prompt_version: prompt.version.to_string(),
+            reasoning_effort: None,
             messages: vec![
                 ChatMessage {
                     role: "system".into(),
@@ -1292,16 +1293,20 @@ impl AgentRunner {
             String::new()
         };
         let schema = phase_schema(phase);
-        let override_model = model_config
-            .and_then(|mc| mc.get(&seat))
-            .and_then(|c| c.model.clone());
+        let seat_model_config = model_config.and_then(|mc| mc.get(&seat));
+        let override_model = seat_model_config.and_then(|c| c.model.clone());
+        let max_tokens = seat_model_config
+            .and_then(|c| c.max_tokens)
+            .unwrap_or(prompt.max_tokens);
+        let reasoning_effort = seat_model_config.and_then(|c| c.reasoning_effort.clone());
         LlmRequest {
             session_id,
             seat,
             phase,
             repair_json,
-            max_tokens: prompt.max_tokens,
+            max_tokens,
             prompt_version: prompt.version.to_string(),
+            reasoning_effort,
             messages: vec![
                 ChatMessage {
                     role: "system".into(),

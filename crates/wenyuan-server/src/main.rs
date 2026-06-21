@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{DefaultBodyLimit, Path, State},
     http::StatusCode,
     response::{
         IntoResponse,
@@ -22,7 +22,6 @@ use std::{
 use tokio::sync::{Mutex, broadcast};
 use tokio_stream::{Stream, StreamExt};
 use tower_http::{
-    cors::CorsLayer,
     services::{ServeDir, ServeFile},
     trace::TraceLayer,
 };
@@ -43,6 +42,13 @@ use wenyuan_tools::{
     CodeSearchResultSet, ParsedDocument, code_search_to_evidence, document_to_evidence,
     make_tool_run, parse_document_bytes, search_code,
 };
+
+const MAX_TITLE_CHARS: usize = 200;
+const MAX_TOPIC_CHARS: usize = 16_000;
+const MAX_CONTEXT_CHARS: usize = 80_000;
+const MAX_EXTERNAL_EVIDENCE_ITEMS: usize = 80;
+const MAX_EXTERNAL_TOOL_RUNS: usize = 40;
+const MAX_EXTERNAL_EVIDENCE_CHARS: usize = 3_500;
 
 #[derive(Clone)]
 struct AppState {
@@ -194,7 +200,7 @@ fn default_code_search_root() -> String {
 }
 
 fn default_max_file_size_mb() -> u64 {
-    20
+    max_file_size_mb_from_env()
 }
 
 #[derive(Debug, Deserialize)]
@@ -301,6 +307,25 @@ fn provider_timeout_from_env() -> Duration {
         .unwrap_or_else(|| Duration::from_secs(120))
 }
 
+fn max_request_body_bytes() -> usize {
+    env::var("WENYUAN_MAX_REQUEST_BODY_MB")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|mb| *mb > 0)
+        .unwrap_or(32)
+        .saturating_mul(1024 * 1024)
+}
+
+fn max_file_size_mb_from_env() -> u64 {
+    let body_budget_mb = (max_request_body_bytes() as u64).saturating_mul(3) / (4 * 1024 * 1024);
+    env::var("WENYUAN_MAX_FILE_SIZE_MB")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|mb| *mb > 0)
+        .unwrap_or(20)
+        .min(body_budget_mb.max(1))
+}
+
 fn preferences_path_from_env() -> PathBuf {
     env::var("WENYUAN_PREFERENCES_PATH")
         .map(PathBuf::from)
@@ -341,7 +366,10 @@ fn normalize_preferences(mut preferences: UserPreferences) -> UserPreferences {
     if preferences.tools.code_search_root.trim().is_empty() {
         preferences.tools.code_search_root = default_code_search_root();
     }
-    preferences.tools.max_file_size_mb = preferences.tools.max_file_size_mb.clamp(1, 100);
+    preferences.tools.max_file_size_mb = preferences
+        .tools
+        .max_file_size_mb
+        .clamp(1, max_file_size_mb_from_env());
     preferences
 }
 
@@ -431,7 +459,7 @@ fn app(state: AppState) -> Router {
         .route("/api/tools/code/search", post(search_code_tool))
         .route("/api/test-topics", get(test_topics))
         .fallback_service(ServeDir::new("web/dist").fallback(ServeFile::new("web/dist/index.html")))
-        .layer(CorsLayer::permissive())
+        .layer(DefaultBodyLimit::max(max_request_body_bytes()))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
@@ -539,6 +567,8 @@ fn routed_provider_from_env(
             base_url: default_base_url.clone(),
             api_key: default_api_key.clone(),
             model: default_model.clone(),
+            reasoning_effort: env::var("WENYUAN_LLM_REASONING_EFFORT").ok(),
+            max_tokens: env_u32("WENYUAN_LLM_MAX_TOKENS"),
         }))
     } else {
         Arc::new(MockProvider::new(mock_scenario_from_env()))
@@ -578,12 +608,24 @@ fn routed_provider_from_env(
                     } else {
                         model
                     },
+                    reasoning_effort: env::var(format!("WENYUAN_LLM_REASONING_EFFORT_{suffix}"))
+                        .ok()
+                        .or_else(|| env::var("WENYUAN_LLM_REASONING_EFFORT").ok()),
+                    max_tokens: env_u32(&format!("WENYUAN_LLM_MAX_TOKENS_{suffix}"))
+                        .or_else(|| env_u32("WENYUAN_LLM_MAX_TOKENS")),
                 })),
             );
         }
     }
 
     (Arc::new(routed), seat_models)
+}
+
+fn env_u32(key: &str) -> Option<u32> {
+    env::var(key)
+        .ok()
+        .and_then(|value| value.trim().parse::<u32>().ok())
+        .filter(|value| *value > 0)
 }
 
 fn seat_env_key(seat: SeatKind) -> &'static str {
@@ -696,7 +738,7 @@ async fn parse_document(
     let evidence = document_to_evidence(&document, SeatKind::Mouyuan);
     let tool_run = make_tool_run(
         "document_parse",
-        format!("filename={}", input.filename),
+        format!("filename={}", document.filename),
         "completed",
         started.elapsed(),
         evidence.iter().map(|item| item.id).collect(),
@@ -717,6 +759,7 @@ async fn search_code_tool(
     let preferences = load_preferences(&state.preferences_path)?;
     let root = env::var("WENYUAN_CODE_SEARCH_ROOT")
         .unwrap_or_else(|_| preferences.tools.code_search_root.clone());
+    let root = resolve_code_search_root(&root)?;
     let result =
         search_code(root, &input.query).map_err(|err| ApiError::bad_request(err.to_string()))?;
     let evidence = code_search_to_evidence(&result, SeatKind::Mouyuan);
@@ -733,6 +776,42 @@ async fn search_code_tool(
         evidence,
         tool_run,
     }))
+}
+
+fn resolve_code_search_root(input: &str) -> Result<PathBuf, ApiError> {
+    let root = FsPath::new(input)
+        .canonicalize()
+        .map_err(|err| ApiError::bad_request(format!("invalid code search root: {err}")))?;
+    let allowed_roots = allowed_code_search_roots();
+    if allowed_roots
+        .iter()
+        .any(|allowed| root.starts_with(allowed))
+    {
+        Ok(root)
+    } else {
+        Err(ApiError::bad_request(
+            "code search root is outside allowed roots",
+        ))
+    }
+}
+
+fn allowed_code_search_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if let Ok(cwd) = env::current_dir().and_then(|path| path.canonicalize()) {
+        roots.push(cwd);
+    }
+    if let Ok(extra) = env::var("WENYUAN_CODE_SEARCH_ALLOW_ROOTS") {
+        for entry in extra.split(';').flat_map(|part| part.split(',')) {
+            let entry = entry.trim();
+            if entry.is_empty() {
+                continue;
+            }
+            if let Ok(path) = FsPath::new(entry).canonicalize() {
+                roots.push(path);
+            }
+        }
+    }
+    roots
 }
 
 async fn config_status(State(state): State<AppState>) -> Json<ConfigStatus> {
@@ -756,6 +835,7 @@ async fn create_session(
     State(state): State<AppState>,
     Json(input): Json<CreateSessionRequest>,
 ) -> Result<Json<Session>, ApiError> {
+    validate_create_session_request(&input)?;
     let mut session = Session::new_with_mode(
         input.title,
         input.topic,
@@ -777,6 +857,47 @@ async fn create_session(
         .create_session_with_provider_refs(&session, &seat_provider_refs(&state.config))
         .await?;
     Ok(Json(session))
+}
+
+fn validate_create_session_request(input: &CreateSessionRequest) -> Result<(), ApiError> {
+    ensure_char_limit("title", &input.title, MAX_TITLE_CHARS)?;
+    ensure_char_limit("topic", &input.topic, MAX_TOPIC_CHARS)?;
+    if let Some(context) = &input.context {
+        ensure_char_limit("context", context, MAX_CONTEXT_CHARS)?;
+    }
+    if let Some(evidence) = &input.external_evidence {
+        if evidence.len() > MAX_EXTERNAL_EVIDENCE_ITEMS {
+            return Err(ApiError::bad_request(format!(
+                "too many external evidence items: max {MAX_EXTERNAL_EVIDENCE_ITEMS}"
+            )));
+        }
+        for item in evidence {
+            ensure_char_limit(
+                "external evidence content",
+                &item.content,
+                MAX_EXTERNAL_EVIDENCE_CHARS,
+            )?;
+            ensure_char_limit("external evidence source", &item.source, 1_000)?;
+        }
+    }
+    if let Some(runs) = &input.external_tool_runs
+        && runs.len() > MAX_EXTERNAL_TOOL_RUNS
+    {
+        return Err(ApiError::bad_request(format!(
+            "too many external tool runs: max {MAX_EXTERNAL_TOOL_RUNS}"
+        )));
+    }
+    Ok(())
+}
+
+fn ensure_char_limit(field: &str, value: &str, max: usize) -> Result<(), ApiError> {
+    if value.chars().count() > max {
+        Err(ApiError::bad_request(format!(
+            "{field} is too long: max {max} chars"
+        )))
+    } else {
+        Ok(())
+    }
 }
 
 fn seat_provider_refs(config: &ConfigStatus) -> HashMap<SeatKind, String> {
@@ -863,9 +984,29 @@ async fn start_session(
                 if let Some(final_session) = &artifacts.session {
                     if let Err(err) = store.update_session(final_session).await {
                         error!("failed to update session: {err}");
+                        let _ = store
+                            .fail_session(
+                                id,
+                                Some(execution_token),
+                                &format!("failed to persist final session: {err}"),
+                            )
+                            .await;
+                        let _ = event_tx.send(id);
+                        running_map.lock().await.remove(&id);
+                        return;
                     }
                     if let Err(err) = store.save_artifacts(id, &artifacts).await {
                         error!("failed to save artifacts: {err}");
+                        let _ = store
+                            .fail_session(
+                                id,
+                                Some(execution_token),
+                                &format!("failed to persist artifacts: {err}"),
+                            )
+                            .await;
+                        let _ = event_tx.send(id);
+                        running_map.lock().await.remove(&id);
+                        return;
                     }
                     if let Err(err) = store.complete_execution(id, execution_token).await {
                         error!("failed to complete session execution: {err}");

@@ -284,7 +284,7 @@ async function submit() {
   loading.value = true
   error.value = ''
   try {
-    const model_config: Record<string, { model: string }> = {}
+    const model_config: Record<string, { model?: string; reasoning_effort?: string; max_tokens?: number }> = {}
     for (const s of seatConfigs.value) {
       if (s.model) model_config[s.key] = { model: s.model }
     }

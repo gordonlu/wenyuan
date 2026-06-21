@@ -94,8 +94,11 @@ pub fn make_tool_run(
 pub fn sanitize_untrusted_text(input: &str, max_chars: usize) -> SanitizedText {
     let mut flags = SourceSafetyFlags::default();
     let mut out = String::new();
+    let mut written = 0;
+    let mut input_chars = 0;
 
     for ch in input.chars() {
+        input_chars += 1;
         if ch.is_control() && !matches!(ch, '\n' | '\r' | '\t') {
             flags.contains_control_chars = true;
             continue;
@@ -105,8 +108,9 @@ pub fn sanitize_untrusted_text(input: &str, max_chars: usize) -> SanitizedText {
             continue;
         }
         out.push(ch);
-        if out.chars().count() >= max_chars {
-            flags.truncated = input.chars().count() > max_chars;
+        written += 1;
+        if written >= max_chars {
+            flags.truncated = input_chars < input.chars().count();
             break;
         }
     }
@@ -165,7 +169,8 @@ pub fn parse_document_bytes(
     let mime = mime_type
         .map(str::to_string)
         .unwrap_or_else(|| mime_from_filename(filename).to_string());
-    let ext = Path::new(filename)
+    let display_filename = safe_source_filename(filename);
+    let ext = Path::new(&display_filename)
         .extension()
         .and_then(|ext| ext.to_str())
         .unwrap_or("")
@@ -205,7 +210,7 @@ pub fn parse_document_bytes(
     }
 
     Ok(ParsedDocument {
-        filename: filename.to_string(),
+        filename: display_filename,
         mime_type: mime,
         sha256: hash_hex(bytes),
         chunks,
@@ -254,7 +259,7 @@ pub fn search_code(root: impl AsRef<Path>, query: &str) -> Result<CodeSearchResu
 
     Ok(CodeSearchResultSet {
         query: query.to_string(),
-        root: root.to_string_lossy().into_owned(),
+        root: display_root_label(&root),
         matches,
     })
 }
@@ -307,13 +312,17 @@ fn parse_csv(bytes: &[u8], ext: &str) -> Result<Vec<(String, String)>, ToolError
         })
         .unwrap_or_default();
     let mut lines = Vec::new();
+    let mut total_chars = 0usize;
     if !headers.is_empty() {
+        total_chars += headers.chars().count();
         lines.push(headers);
     }
     for record in reader.records().take(2_000) {
         let record = record.map_err(|err| ToolError::Parse(err.to_string()))?;
-        lines.push(record.iter().collect::<Vec<_>>().join(" | "));
-        if lines.join("\n").chars().count() > MAX_TEXT_CHARS {
+        let line = record.iter().collect::<Vec<_>>().join(" | ");
+        total_chars += line.chars().count() + 1;
+        lines.push(line);
+        if total_chars > MAX_TEXT_CHARS {
             break;
         }
     }
@@ -330,14 +339,16 @@ fn parse_spreadsheet(bytes: &[u8]) -> Result<Vec<(String, String)>, ToolError> {
             .worksheet_range(&sheet)
             .map_err(|err| ToolError::Parse(err.to_string()))?;
         let mut lines = Vec::new();
+        let mut total_chars = 0usize;
         for row in range.rows().take(2_000) {
-            lines.push(
-                row.iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join(" | "),
-            );
-            if lines.join("\n").chars().count() > MAX_TEXT_CHARS {
+            let line = row
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(" | ");
+            total_chars += line.chars().count() + 1;
+            lines.push(line);
+            if total_chars > MAX_TEXT_CHARS {
                 break;
             }
         }
@@ -403,20 +414,26 @@ fn visit_code_files(
     if matches.len() >= MAX_CODE_MATCHES {
         return Ok(());
     }
-    let entries = fs::read_dir(dir).map_err(|err| ToolError::Parse(err.to_string()))?;
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(err) if dir == root => return Err(ToolError::Parse(err.to_string())),
+        Err(_) => return Ok(()),
+    };
     for entry in entries {
-        let entry = entry.map_err(|err| ToolError::Parse(err.to_string()))?;
+        let Ok(entry) = entry else {
+            continue;
+        };
         let path = entry.path();
-        let file_type = entry
-            .file_type()
-            .map_err(|err| ToolError::Parse(err.to_string()))?;
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
         if file_type.is_dir() {
             if should_skip_code_dir(&path) {
                 continue;
             }
-            visit_code_files(root, &path, query, matches)?;
+            let _ = visit_code_files(root, &path, query, matches);
         } else if file_type.is_file() && is_code_file(&path) {
-            collect_code_matches(root, &path, query, matches)?;
+            let _ = collect_code_matches(root, &path, query, matches);
         }
         if matches.len() >= MAX_CODE_MATCHES {
             break;
@@ -431,11 +448,17 @@ fn collect_code_matches(
     query: &str,
     matches: &mut Vec<CodeSearchMatch>,
 ) -> Result<(), ToolError> {
-    let metadata = fs::metadata(path).map_err(|err| ToolError::Parse(err.to_string()))?;
+    let metadata = match fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(_) => return Ok(()),
+    };
     if metadata.len() > MAX_CODE_FILE_BYTES {
         return Ok(());
     }
-    let bytes = fs::read(path).map_err(|err| ToolError::Parse(err.to_string()))?;
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(_) => return Ok(()),
+    };
     if bytes.contains(&0) {
         return Ok(());
     }
@@ -623,6 +646,36 @@ fn mime_from_filename(filename: &str) -> &'static str {
         "log" => "text/plain",
         _ => "application/octet-stream",
     }
+}
+
+fn safe_source_filename(filename: &str) -> String {
+    let raw_name = filename.rsplit(['/', '\\']).next().unwrap_or(filename);
+    let name = Path::new(raw_name)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(raw_name)
+        .trim();
+    let safe = name
+        .chars()
+        .map(|ch| match ch {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+            ch if ch.is_control() => '_',
+            ch => ch,
+        })
+        .collect::<String>();
+    if safe.is_empty() {
+        "source".into()
+    } else {
+        safe.chars().take(120).collect()
+    }
+}
+
+fn display_root_label(root: &Path) -> String {
+    root.file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or("code root")
+        .to_string()
 }
 
 fn hash_hex(input: impl AsRef<[u8]>) -> String {

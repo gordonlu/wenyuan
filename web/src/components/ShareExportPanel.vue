@@ -16,7 +16,7 @@
           >{{ p.label }}</button>
         </div>
 
-        <div class="share-card-preview" ref="cardRef">
+        <div class="share-card-preview">
           <div v-if="platform === 'x'" class="share-card share-card-x">
             <div class="share-card-header">
               <span class="share-card-brand">文渊阁 Wenyuan</span>
@@ -119,7 +119,6 @@ const platforms = [
 
 type PlatformId = (typeof platforms)[number]['id']
 const platform = ref<PlatformId>('x')
-const cardRef = ref<HTMLElement | null>(null)
 
 function copyText() {
   const lines: string[] = []
@@ -148,7 +147,8 @@ function copyText() {
     lines.push('')
     lines.push('#文渊阁 #AI合议 #决策工具')
   }
-  navigator.clipboard.writeText(lines.join('\n'))
+  const writePromise = navigator.clipboard?.writeText(lines.join('\n'))
+  if (writePromise) void writePromise.catch(() => {})
 }
 
 async function downloadImage() {
@@ -231,7 +231,7 @@ async function downloadImage() {
   // Footer
   ctx.fillStyle = '#3a5564'
   ctx.font = '12px sans-serif'
-  ctx.fillText('生成于 文渊阁 Wenyuan · wenyuan.dev', 40, height - 30)
+  ctx.fillText('Wenyuan local export', 40, height - 30)
 
   // Convert to blob and download
   canvas.toBlob((blob) => {
