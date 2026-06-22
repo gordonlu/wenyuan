@@ -26,6 +26,12 @@
 
     <p class="role-summary">{{ profile.summary }}</p>
 
+    <div v-if="!reportMode && currentActivity" :class="['role-live', currentActivity.tone]" aria-live="polite">
+      <span class="role-live-dot" aria-hidden="true" />
+      <strong>{{ currentActivity.label }}</strong>
+      <span v-if="currentActivity.detail" class="role-live-detail">{{ currentActivity.detail }}</span>
+    </div>
+
     <dl v-if="!reportMode" class="role-metrics">
       <div>
         <dt>模型</dt>
@@ -40,8 +46,8 @@
         <dd>{{ (stats.durationMs / 1000).toFixed(1) }} 秒</dd>
       </div>
       <div>
-        <dt>失败</dt>
-        <dd>{{ stats.failed }} 次</dd>
+        <dt>工具</dt>
+        <dd>{{ toolStats.calls }} 次</dd>
       </div>
     </dl>
 
@@ -58,22 +64,24 @@
 
     <div v-if="!reportMode" class="role-foot">
       <span class="prompt-version">{{ stats.promptVersions || '暂无 Prompt 版本' }}</span>
+      <span v-if="stats.failed || toolStats.failed" class="runtime-failures">失败 {{ stats.failed + toolStats.failed }} 次</span>
     </div>
   </article>
 </template>
 
 <script setup lang="ts">
 import { computed, ref } from 'vue'
-import { RotateCw } from '@lucide/vue'
 import {
   seatLabels,
   seatRunStats,
   seatStatus,
   seatStatusClass,
+  toolNameLabel,
   type SeatKind,
   type SeatRunTrace,
   type SessionEvent,
   type SessionPhase,
+  type ToolRun,
 } from '../domain/session'
 
 const props = withDefaults(defineProps<{
@@ -82,6 +90,7 @@ const props = withDefaults(defineProps<{
   events?: SessionEvent[]
   running?: boolean
   runs?: SeatRunTrace[]
+  toolRuns?: ToolRun[]
   providerRef?: string
   reportMode?: boolean
   inactive?: boolean
@@ -89,6 +98,7 @@ const props = withDefaults(defineProps<{
   events: () => [],
   running: false,
   runs: () => [],
+  toolRuns: () => [],
   providerRef: '',
   reportMode: false,
   inactive: false,
@@ -145,6 +155,31 @@ const stats = computed(() => seatRunStats(props.runs).find((item) => item.seat =
   hasUsage: false,
   promptVersions: '',
 })
+const seatToolRuns = computed(() => props.toolRuns.filter((run) => run.seat === props.seat))
+const toolStats = computed(() => ({
+  calls: seatToolRuns.value.length,
+  failed: seatToolRuns.value.filter((run) => run.status !== 'completed').length,
+}))
+const currentActivity = computed(() => {
+  if (props.reportMode || !props.running) return null
+  const latest = [...props.events]
+    .reverse()
+    .find((event) => runtimeEventForSeat(event, props.seat))
+  if (!latest) return { label: '等待调度', detail: '', tone: 'idle' }
+  const payload = eventPayload(latest)
+  const query = typeof payload.query === 'string' ? payload.query : ''
+  const count = typeof payload.count === 'number' ? payload.count : undefined
+  const toolName = typeof payload.tool_name === 'string' ? payload.tool_name : undefined
+  const toolLabel = toolActionLabel(toolName)
+
+  if (latest.event_type === 'tool_started') return { label: `${toolLabel}中`, detail: query, tone: 'tool' }
+  if (latest.event_type === 'tool_completed') return { label: `${toolLabel}完成`, detail: query ? `${query}${typeof count === 'number' ? ` · ${count} 条` : ''}` : '', tone: 'done' }
+  if (latest.event_type === 'tool_failed') return { label: `${toolLabel}失败`, detail: query, tone: 'warn' }
+  if (latest.event_type === 'seat_started') return { label: '模型调用中', detail: '', tone: 'model' }
+  if (latest.event_type === 'seat_completed') return { label: '模型已返回', detail: '', tone: 'done' }
+  if (latest.event_type === 'seat_failed') return { label: '模型调用失败', detail: '', tone: 'warn' }
+  return null
+})
 
 const badgeClass = computed(() => {
   if (statusClass.value === 'ok') return 'ok'
@@ -176,6 +211,20 @@ function resetPointer() {
     '--tilt-x': '0deg',
     '--tilt-y': '0deg',
   }
+}
+
+function runtimeEventForSeat(event: SessionEvent, seat: SeatKind) {
+  if (!['tool_started', 'tool_completed', 'tool_failed', 'seat_started', 'seat_completed', 'seat_failed'].includes(event.event_type)) return false
+  return eventPayload(event).seat === seat
+}
+
+function eventPayload(event: SessionEvent) {
+  return (typeof event.payload === 'object' && event.payload !== null) ? event.payload as Record<string, unknown> : {}
+}
+
+function toolActionLabel(name?: string) {
+  if (name === 'web_search') return '搜索'
+  return name ? toolNameLabel(name) : '工具'
 }
 </script>
 
@@ -317,28 +366,44 @@ function resetPointer() {
 
 /* ── Running state ── */
 .seat-role-card.is-running {
-  animation: seat-breath 2s ease-in-out infinite;
+  box-shadow:
+    0 0 0 5px rgba(255, 255, 255, 0.3),
+    0 20px 42px rgba(16, 24, 40, 0.18),
+    0 0 22px var(--role-glow),
+    inset 0 0 0 1px rgba(0, 0, 0, 0.18),
+    inset 0 1px 0 rgba(255, 255, 255, 0.42);
 }
 
 .seat-role-card.is-running::before {
   content: '';
   position: absolute;
   inset: 0;
-  z-index: 2;
-  border-radius: var(--radius-md);
+  z-index: 4;
+  padding: 2px;
+  border-radius: inherit;
   background:
-    conic-gradient(from 0deg at 50% 50%,
-      transparent 0deg,
-      rgba(255, 255, 255, 0.15) 45deg,
-      transparent 90deg,
-      transparent 180deg,
-      rgba(255, 255, 255, 0.08) 225deg,
-      transparent 270deg,
-      transparent 360deg);
-  animation: seat-shimmer 3s linear infinite;
+    conic-gradient(from 0deg,
+      rgba(94, 234, 212, 0.92),
+      rgba(250, 204, 21, 0.96),
+      rgba(244, 114, 182, 0.92),
+      rgba(96, 165, 250, 0.94),
+      rgba(94, 234, 212, 0.92));
+  animation: seat-marquee 1.3s linear infinite;
   pointer-events: none;
-  mask-image: radial-gradient(circle 140% at 50% 50%, black 82%, transparent 100%);
-  -webkit-mask-image: radial-gradient(circle 140% at 50% 50%, black 82%, transparent 100%);
+  mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  mask-composite: exclude;
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+}
+
+.seat-role-card.is-running::after {
+  content: '';
+  position: absolute;
+  inset: 2px;
+  z-index: 2;
+  border-radius: calc(var(--radius-md) - 2px);
+  box-shadow: inset 0 0 22px rgba(255, 255, 255, 0.18);
+  pointer-events: none;
 }
 
 .seat-role-card.is-running .role-status {
@@ -359,21 +424,7 @@ function resetPointer() {
   animation: seat-pulse 1.4s ease-in-out infinite;
 }
 
-@keyframes seat-breath {
-  0%, 100% { box-shadow:
-      0 0 0 5px rgba(255, 255, 255, 0.3),
-      0 20px 42px rgba(16, 24, 40, 0.18),
-      inset 0 0 0 1px rgba(0, 0, 0, 0.18),
-      inset 0 1px 0 rgba(255, 255, 255, 0.42); }
-  50% { box-shadow:
-      0 0 0 5px rgba(255, 255, 255, 0.34),
-      0 20px 52px rgba(16, 24, 40, 0.22),
-      0 0 24px var(--role-glow),
-      inset 0 0 0 1px rgba(0, 0, 0, 0.18),
-      inset 0 1px 0 rgba(255, 255, 255, 0.48); }
-}
-
-@keyframes seat-shimmer {
+@keyframes seat-marquee {
   0% { transform: rotate(0deg); }
   100% { transform: rotate(360deg); }
 }
@@ -390,14 +441,20 @@ function resetPointer() {
     outline-offset: 2px;
   }
   .seat-role-card.is-running::before,
+  .seat-role-card.is-running::after,
   .seat-role-card.is-running .role-status::before {
     animation: none;
     display: none;
+  }
+  .role-live.tool .role-live-dot,
+  .role-live.model .role-live-dot {
+    animation: none;
   }
 }
 
 .role-head,
 .role-summary,
+.role-live,
 .role-metrics,
 .role-foot,
 .ink-name {
@@ -454,6 +511,54 @@ function resetPointer() {
   font-size: 13px;
   line-height: 1.55;
   text-shadow: 0 1px 10px rgba(0, 0, 0, 0.2);
+}
+
+.role-live {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 32px;
+  margin: -2px 0 12px;
+  padding: 6px 9px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: var(--radius-sm);
+  background: rgba(7, 12, 18, 0.28);
+  color: rgba(255, 255, 255, 0.88);
+  font-size: 12px;
+  backdrop-filter: blur(10px);
+}
+
+.role-live strong {
+  flex: 0 0 auto;
+  color: #ffffff;
+  font-size: 12px;
+}
+
+.role-live-detail {
+  min-width: 0;
+  overflow: hidden;
+  color: rgba(255, 255, 255, 0.68);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.role-live-dot {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--role-soft);
+  box-shadow: 0 0 12px var(--role-soft);
+}
+
+.role-live.tool .role-live-dot,
+.role-live.model .role-live-dot {
+  animation: seat-pulse 1.2s ease-in-out infinite;
+}
+
+.role-live.warn {
+  border-color: rgba(255, 255, 255, 0.34);
+  background: rgba(82, 24, 31, 0.34);
 }
 
 .role-metrics {
@@ -525,6 +630,14 @@ function resetPointer() {
   color: rgba(255, 255, 255, 0.62);
   font-size: 11px;
   text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.runtime-failures {
+  flex: 0 0 auto;
+  color: rgba(255, 235, 235, 0.86);
+  font-size: 11px;
+  font-weight: 700;
   white-space: nowrap;
 }
 

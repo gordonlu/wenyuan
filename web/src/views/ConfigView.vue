@@ -79,10 +79,6 @@
 
       <div class="preferences-toggles">
         <label class="toggle-row">
-          <input type="checkbox" v-model="preferences.defaults.scribe_enabled" />
-          <span>新建议题默认启用书记官</span>
-        </label>
-        <label class="toggle-row">
           <input type="checkbox" v-model="preferences.defaults.search_enabled" />
           <span>新建议题默认启用联网搜索</span>
         </label>

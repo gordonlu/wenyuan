@@ -58,8 +58,8 @@
             <ChevronDown :size="16" />
           </button>
           <div v-if="showMdMenu" class="action-menu">
-            <button @click="downloadMarkdown('brief')">简报 (简明)</button>
-            <button @click="downloadMarkdown('standard')">完整报告</button>
+            <button @click="downloadMarkdown('brief')">普通报告</button>
+            <button @click="downloadMarkdown('standard')">深度研究报告</button>
             <button @click="downloadMarkdown('audit')">审计全文</button>
           </div>
         </div>
@@ -99,6 +99,7 @@
         :events="details.events"
         :running="details.execution.running"
         :runs="details.artifacts.seat_runs"
+        :tool-runs="toolRuns"
         :provider-ref="seatProviderRef(seat)"
         :inactive="details.session.mode === 'single_agent' && seat !== 'mouyuan'"
       />
@@ -128,6 +129,7 @@
       <span class="status-bar-phase">{{ phaseLabels[details.session.phase] }}</span>
       <span class="status-bar-sep">·</span>
       <span class="status-bar-seat">{{ runningSeatLabel }}</span>
+      <span v-if="runningActivityLabel" class="status-bar-tool">{{ runningActivityLabel }}</span>
       <span v-if="details.events?.length" class="status-bar-time">{{ lastEventTime }}</span>
     </div>
 
@@ -145,7 +147,7 @@
           <Pen :size="16" />
         </button>
       </div>
-      <p>{{ details.session.topic }}</p>
+      <p>{{ reportText(details.session.topic) }}</p>
       <template v-if="editingContext">
         <textarea v-model="newContext" rows="4" placeholder="补充背景信息…" style="margin-top: 12px" />
         <div class="actions" style="margin-top: 8px">
@@ -153,7 +155,7 @@
           <button @click="editingContext = false">取消</button>
         </div>
       </template>
-      <p v-else-if="details.session.context" class="muted" style="margin-top: 8px">{{ details.session.context }}</p>
+      <p v-else-if="reportText(details.session.context)" class="muted" style="margin-top: 8px">{{ reportText(details.session.context) }}</p>
     </section>
 
     <section v-if="externalEvidence.length" class="panel evidence-source-panel">
@@ -169,7 +171,7 @@
               {{ evidenceTrustLabels[ev.trust_level ?? 'internal'] ?? ev.trust_level }}
             </span>
           </div>
-          <p>{{ ev.content }}</p>
+          <p>{{ reportText(ev.content) }}</p>
           <p class="muted evidence-source-url">{{ compactSource(ev.source) }}</p>
           <div v-if="evidenceSafetyLabels(ev.safety_flags).length" class="evidence-safety-row">
             <span
@@ -204,7 +206,7 @@
             <span>{{ toolNameLabel(run.tool_name) }}</span>
             <span :class="['badge', run.status === 'completed' ? 'ok' : 'warn']">{{ run.status }}</span>
           </div>
-          <p>{{ run.input_summary }}</p>
+          <p>{{ reportText(run.input_summary) }}</p>
           <p class="muted">{{ (run.duration_ms / 1000).toFixed(1) }} 秒 · {{ run.evidence_ids?.length ?? 0 }} 条证据</p>
           <p v-if="run.error" class="muted tool-run-error">{{ run.error }}</p>
         </article>
@@ -278,7 +280,7 @@
     </section>
 
     <section v-if="details.artifacts.scribe_report" class="panel">
-      <h2>书记官报告</h2>
+      <h2>深度研究报告</h2>
       <div class="scribe-report">
         <h3>共识总结</h3>
         <p>{{ details.artifacts.scribe_report.consensus_summary }}</p>
@@ -295,7 +297,7 @@
           </ul>
         </div>
         <details>
-          <summary>完整报告</summary>
+          <summary>研究全文</summary>
           <div class="scribe-final-report">{{ details.artifacts.scribe_report.final_report }}</div>
         </details>
       </div>
@@ -309,10 +311,10 @@
             <span :class="['seat-tag', claim.proposed_by]">{{ seatLabels[claim.proposed_by] }}</span>
             <span class="badge ok">有证据</span>
           </div>
-          <p>{{ claim.content }}</p>
-          <p class="muted">来源：{{ claim.context }}</p>
+          <p>{{ reportText(claim.content) }}</p>
+          <p class="muted">来源：{{ reportText(claim.context) }}</p>
           <p v-if="detailEvidence(claim.evidence_ids)" class="muted">
-            证据：{{ detailEvidence(claim.evidence_ids)?.map((ev) => evidenceKindLabels[ev.kind] + ': ' + ev.content).join(' | ') }}
+            证据：{{ detailEvidence(claim.evidence_ids)?.map((ev) => evidenceKindLabels[ev.kind] + ': ' + reportText(ev.content)).join(' | ') }}
           </p>
         </article>
       </div>
@@ -325,10 +327,10 @@
             <span :class="['seat-tag', claim.proposed_by]">{{ seatLabels[claim.proposed_by] }}</span>
             <span class="badge warn">未验证</span>
           </div>
-          <p>{{ claim.content }}</p>
-          <p class="muted">来源：{{ claim.context }}</p>
+          <p>{{ reportText(claim.content) }}</p>
+          <p class="muted">来源：{{ reportText(claim.context) }}</p>
           <p v-if="detailEvidence(claim.evidence_ids)" class="muted">
-            证据：{{ detailEvidence(claim.evidence_ids)?.map((ev) => evidenceKindLabels[ev.kind] + ': ' + ev.content).join(' | ') }}
+            证据：{{ detailEvidence(claim.evidence_ids)?.map((ev) => evidenceKindLabels[ev.kind] + ': ' + reportText(ev.content)).join(' | ') }}
           </p>
         </article>
       </div>
@@ -411,9 +413,13 @@
 
       <section class="panel report-topic">
         <h2>议题</h2>
-        <p>{{ details.session.topic }}</p>
-        <p v-if="details.session.context" class="muted">{{ details.session.context }}</p>
+        <p>{{ reportText(details.session.topic) }}</p>
+        <p v-if="reportText(details.session.context)" class="muted">{{ reportText(details.session.context) }}</p>
       </section>
+
+      <DecisionSummary v-if="primaryDecision" :decision="primaryDecision" :vote-policy="details.session.vote_policy" :mode="details.session.mode" />
+
+      <ProposalCompare :proposals="details.artifacts.proposals" />
 
       <section v-if="externalEvidence.length" class="panel evidence-source-panel">
         <div class="row-head">
@@ -428,7 +434,7 @@
                 {{ evidenceTrustLabels[ev.trust_level ?? 'internal'] ?? ev.trust_level }}
               </span>
             </div>
-            <p>{{ ev.content }}</p>
+            <p>{{ reportText(ev.content) }}</p>
             <p class="muted evidence-source-url">{{ compactSource(ev.source) }}</p>
             <div v-if="evidenceSafetyLabels(ev.safety_flags).length" class="evidence-safety-row">
               <span
@@ -454,14 +460,12 @@
               <span>{{ toolNameLabel(run.tool_name) }}</span>
               <span :class="['badge', run.status === 'completed' ? 'ok' : 'warn']">{{ run.status }}</span>
             </div>
-            <p>{{ run.input_summary }}</p>
+            <p>{{ reportText(run.input_summary) }}</p>
             <p class="muted">{{ (run.duration_ms / 1000).toFixed(1) }} 秒 · {{ run.evidence_ids?.length ?? 0 }} 条证据</p>
             <p v-if="run.error" class="muted tool-run-error">{{ run.error }}</p>
           </article>
         </div>
       </section>
-
-    <DecisionSummary v-if="primaryDecision" :decision="primaryDecision" :vote-policy="details.session.vote_policy" :mode="details.session.mode" />
 
       <section class="role-card-row report-seat-row" aria-label="三席报告">
         <SeatRoleCard
@@ -472,12 +476,11 @@
           :events="details.events"
           :running="false"
           :runs="details.artifacts.seat_runs"
+          :tool-runs="toolRuns"
           :provider-ref="seatProviderRef(seat)"
           report-mode
         />
       </section>
-
-      <ProposalCompare :proposals="details.artifacts.proposals" />
 
       <VoteDisplay :votes="details.artifacts.votes" :proposals="details.artifacts.proposals" />
 
@@ -503,10 +506,10 @@
                 {{ claim.is_supported ? '已有依据' : '仍需核验' }}
               </span>
             </div>
-            <p>{{ claim.content }}</p>
-            <p class="muted">来源：{{ claim.context }}</p>
+            <p>{{ reportText(claim.content) }}</p>
+            <p class="muted">来源：{{ reportText(claim.context) }}</p>
             <p v-if="detailEvidence(claim.evidence_ids)" class="muted">
-              证据：{{ detailEvidence(claim.evidence_ids)?.map((ev) => evidenceKindLabels[ev.kind] + ': ' + ev.content).join(' | ') }}
+              证据：{{ detailEvidence(claim.evidence_ids)?.map((ev) => evidenceKindLabels[ev.kind] + ': ' + reportText(ev.content)).join(' | ') }}
             </p>
           </article>
         </div>
@@ -550,7 +553,7 @@ import SeatRoleCard from '../components/SeatRoleCard.vue'
 import VoteChanges from '../components/VoteChanges.vue'
 import VoteDisplay from '../components/VoteDisplay.vue'
 import { hasStoredViewMode, useViewMode } from '../composables/useViewMode'
-import { decisionDigest, evidenceSafetyLabels, evidenceSourceKindLabels, evidenceSummary, evidenceTrustLabels, exportSessionMarkdown, ideaStatusLabels, evidenceKindLabels, modeLabels, phaseLabels, qualityMetricRows, revisionDiffs, seatLabels, seatRunStats, toolRunSummary, voteStrategyLabels, type SeatKind, type SessionDetails } from '../domain/session'
+import { cleanReportText, decisionDigest, evidenceSafetyLabels, evidenceSourceKindLabels, evidenceSummary, evidenceTrustLabels, exportSessionMarkdown, ideaStatusLabels, evidenceKindLabels, modeLabels, phaseLabels, qualityMetricRows, revisionDiffs, seatLabels, seatRunStats, toolRunSummary, voteStrategyLabels, type SeatKind, type SessionDetails } from '../domain/session'
 
 const route = useRoute()
 const router = useRouter()
@@ -643,6 +646,17 @@ const runningSeatLabel = computed(() => {
   if (details.value.session.phase === 'convergence') return '合案复议'
   return '执行中'
 })
+const runningActivityLabel = computed(() => {
+  if (!details.value?.execution.running) return ''
+  const latest = [...(details.value.events ?? [])]
+    .reverse()
+    .find((event) => ['tool_started', 'tool_completed', 'tool_failed', 'seat_started', 'seat_completed', 'seat_failed'].includes(event.event_type))
+  if (!latest) return ''
+  if (latest.event_type === 'seat_started') return '模型调用中'
+  if (latest.event_type === 'seat_completed') return '模型返回'
+  if (latest.event_type === 'seat_failed') return '模型调用失败'
+  return eventLabel(latest)
+})
 const lastEventTime = computed(() => {
   void tick.value
   const events = details.value?.events ?? []
@@ -689,6 +703,10 @@ function detailEvidence(evidenceIds?: string[]) {
   return details.value.artifacts.evidence.filter((ev) => evidenceIds.includes(ev.id))
 }
 
+function reportText(value?: string | null) {
+  return cleanReportText(value)
+}
+
 function eventBadge(type: string) {
   if (type.includes('completed') || type.includes('majority')) return 'ok'
   if (type.includes('failed') || type.includes('error') || type.includes('cancelled')) return 'warn'
@@ -717,11 +735,22 @@ function topicTypeLabel(key: string) {
 }
 
 function eventLabel(event: { event_type: string; payload: unknown }) {
-  const seat = typeof event.payload === 'object' && event.payload !== null && 'seat' in event.payload
-    ? (event.payload as { seat?: string }).seat
-    : undefined
   const payload = (typeof event.payload === 'object' && event.payload !== null) ? event.payload as Record<string, unknown> : {}
-  const query = payload.query as string | undefined
+  const seat = typeof payload.seat === 'string' ? payload.seat : undefined
+  const query = typeof payload.query === 'string' ? payload.query : undefined
+  const toolName = typeof payload.tool_name === 'string' ? payload.tool_name : undefined
+  const count = typeof payload.count === 'number' ? payload.count : undefined
+  const error = typeof payload.error === 'string' ? payload.error : undefined
+
+  if (event.event_type.startsWith('tool_')) {
+    const actor = seat ? `${seatLabels[seat as SeatKind] || seat}` : ''
+    const toolLabel = toolActionLabel(toolName)
+    const queryText = query ? `：${query}` : ''
+    if (event.event_type === 'tool_started') return `${actor}执行了${toolLabel}${queryText}`
+    if (event.event_type === 'tool_completed') return `${actor}完成${toolLabel}${queryText}${typeof count === 'number' ? `（${count} 条）` : ''}`
+    if (event.event_type === 'tool_failed') return `${actor}${toolLabel}失败${queryText}${error ? `（${error}）` : ''}`
+  }
+
   const label = seatEventLabels[event.event_type] || artifactEventLabel(event.event_type) || event.event_type
   let result = label
   if (query) {
@@ -769,6 +798,11 @@ function toolNameLabel(name: string) {
     code_search: '代码搜索',
   }
   return labels[name] ?? name
+}
+
+function toolActionLabel(name?: string) {
+  if (name === 'web_search') return '搜索'
+  return name ? toolNameLabel(name) : '工具'
 }
 
 function downloadAndClose(format: 'json' | 'html') {
@@ -837,7 +871,7 @@ function generateHTML(details: SessionDetails): string {
   const digest = decisionDigest(details, evSum)
   return `<!DOCTYPE html>
 <html lang="zh-CN">
-<head><meta charset="utf-8"><title>${escapeHTML(details.session.title)} — 文渊阁</title>
+<head><meta charset="utf-8"><title>${escapeHTML(reportText(details.session.title) || details.session.title)} — 文渊阁</title>
 <style>
   body { font-family: Inter, "Noto Sans SC", system-ui, sans-serif; background: #f7f4ed; color: #20231f; max-width: 900px; margin: 0 auto; padding: 32px; line-height: 1.7; }
   h1 { font-family: "Noto Serif SC", serif; font-size: 28px; margin-bottom: 4px; }
@@ -856,7 +890,7 @@ function generateHTML(details: SessionDetails): string {
   .flag-danger { background: #fdf0ee; color: #9a3f34; border: 1px solid rgba(154,63,52,0.2); }
 </style></head>
 <body>
-  <h1>${escapeHTML(details.session.title)}</h1>
+  <h1>${escapeHTML(reportText(details.session.title) || details.session.title)}</h1>
   <p class="cover-meta">${phaseLabels[details.session.phase]} · ${evSum.total} 项来源 · ${digest.vote_count} 票</p>
 
   ${digest.has_decision ? `<p><span class="badge ${digest.status_class === 'ok' ? 'badge-ok' : 'badge-warn'}">${escapeHTML(digest.status_label)}</span>${digest.selected_proposal_title ? ` <strong>${escapeHTML(digest.selected_proposal_title)}</strong>` : ''}</p>` : ''}
@@ -864,11 +898,11 @@ function generateHTML(details: SessionDetails): string {
   <div>${digest.has_risk_blocker ? '<span class="flag flag-warn">存在风险阻塞</span>' : ''}${digest.has_untrusted_external ? '<span class="flag flag-warn">含不可信外部来源</span>' : ''}${digest.has_injection_risk ? '<span class="flag flag-danger">检测到疑似注入</span>' : ''}</div>
 
   <h2>议题</h2>
-  <div class="section"><p>${escapeHTML(details.session.topic)}</p></div>
+  <div class="section"><p>${escapeHTML(reportText(details.session.topic))}</p></div>
   ${details.artifacts.ideas.length ? `<h2>创意池（${details.artifacts.ideas.length}）</h2>
-  ${details.artifacts.ideas.map(i => `<div class="section"><h3>${escapeHTML(i.title)}</h3><p>${escapeHTML(i.summary)}</p></div>`).join('')}` : ''}
+  ${details.artifacts.ideas.map(i => `<div class="section"><h3>${escapeHTML(reportText(i.title))}</h3><p>${escapeHTML(reportText(i.summary))}</p></div>`).join('')}` : ''}
   ${details.artifacts.proposals.length ? `<h2>策案对比</h2>
-  ${details.artifacts.proposals.map(p => `<div class="section"><h3>${escapeHTML(p.title)}</h3><p>${escapeHTML(p.summary)}</p></div>`).join('')}` : ''}
+  ${details.artifacts.proposals.map(p => `<div class="section"><h3>${escapeHTML(reportText(p.title))}</h3><p>${escapeHTML(reportText(p.summary))}</p></div>`).join('')}` : ''}
   ${decision ? `<h2>表决结果</h2><div class="section"><p>${decision.status === 'majority_reached' ? '形成多数' : decision.status === 'conditionally_adopted' ? '有条件通过' : '未形成多数'}${decision.has_risk_blocker ? ' ⚠️存在风险阻塞' : ''}</p></div>` : ''}
 </body></html>`
 }
@@ -962,7 +996,7 @@ async function loadTrajectory() {
 function downloadMarkdown(level: 'brief' | 'standard' | 'audit') {
   if (!details.value) return
   showMdMenu.value = false
-  const name = level === 'brief' ? '简报' : level === 'standard' ? '完整报告' : '审计全文'
+  const name = level === 'brief' ? '普通报告' : level === 'standard' ? '深度研究报告' : '审计全文'
   const markdown = exportSessionMarkdown(details.value, level)
   const blob = new Blob([markdown], { type: 'text/markdown;charset=utf-8' })
   const url = URL.createObjectURL(blob)
@@ -1259,6 +1293,18 @@ onBeforeUnmount(() => {
 
 .status-bar-seat {
   color: var(--color-text);
+}
+
+.status-bar-tool {
+  overflow: hidden;
+  max-width: min(46vw, 520px);
+  padding: 2px 8px;
+  border: 1px solid rgba(15, 138, 161, 0.22);
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.58);
+  color: var(--color-text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .status-bar-time {

@@ -60,13 +60,13 @@
           </select>
         </label>
         <details class="vote-policy-config" :open="scribeOpen">
-          <summary>书记官</summary>
+          <summary>报告深度</summary>
           <div class="vote-policy-body">
             <label class="toggle-row">
               <input type="checkbox" v-model="scribeEnabled" />
-              <span>启用书记官</span>
+              <span>深度研究报告</span>
             </label>
-            <p class="scribe-note">书记官不参与投票，负责整理共识、汇总冲突、生成最终报告</p>
+            <p class="scribe-note">默认关闭。开启后会额外整理共识、冲突和研究型长报告；普通报告会保持简短。</p>
           </div>
         </details>
         <details class="vote-policy-config" :open="true">
@@ -152,7 +152,6 @@ const templates = [
     topic: '我们的产品是一个面向开发者的API管理工具，目前月活5万。团队正在争论应该深耕现有用户做企业版，还是横向扩展做一个面向非技术用户的低代码版本。',
     context: '现有用户反馈企业版需求强烈，但新市场可能更大。团队只有10人，资源有限。使用三年数据：API调用量年增40%，免费用户流失率60%。企业用户续费率95%，平均客单价$2000/月。',
     suggest_search: true,
-    suggest_scribe: true,
   },
   {
     id: 'code',
@@ -161,7 +160,6 @@ const templates = [
     topic: '团队提交了新的API网关设计方案，需要从架构合理性、资源成本和长期可维护性三个角度评估。\n\n需要判断：\n1. 该方案是否适合当前每秒2000请求的流量规模。\n2. 与现有Nginx+OpenResty方案相比，迁移成本是否合理。\n3. 方案的扩展性设计是否足够支撑未来12个月的增长预期。',
     context: '方案使用Rust重写核心路由层，引入gRPC取代REST内部通信。预计开发周期3个月。团队有2人熟悉Rust。当前基础设施运行在Kubernetes上。',
     suggest_search: false,
-    suggest_scribe: true,
   },
   {
     id: 'fact',
@@ -170,7 +168,6 @@ const templates = [
     topic: '产品团队提交了Q2产品白皮书初稿，其中包含多项关于市场占有率、用户增长和性能指标的数据声明。需要逐条核验数据来源、时效性和准确性。',
     context: '白皮书引用了第三方报告、内部Dashboard数据和竞品对比。部分数据无明确来源标注。预计将在下月面向客户发布。',
     suggest_search: true,
-    suggest_scribe: false,
   },
 ]
 
@@ -179,7 +176,7 @@ function applyTemplate(t: typeof templates[number]) {
   topic.value = t.topic
   context.value = t.context
   searchEnabled.value = t.suggest_search
-  scribeEnabled.value = t.suggest_scribe
+  scribeEnabled.value = false
   sourceAreaOpen.value = false
 }
 
@@ -235,7 +232,6 @@ onMounted(async () => {
     }
     if (preferences) {
       mode.value = preferences.defaults.mode
-      scribeEnabled.value = preferences.defaults.scribe_enabled
       searchEnabled.value = preferences.defaults.search_enabled
       voteStrategy.value = preferences.defaults.vote_strategy
       allowSelfVote.value = preferences.defaults.allow_self_vote
