@@ -79,7 +79,7 @@
             <p class="scribe-note">在讨论前根据议题内容搜索网络，搜索结果作为证据供各席参考</p>
           </div>
         </details>
-        <details class="vote-policy-config" :open="votePolicyOpen">
+        <details v-if="mode !== 'single_agent'" class="vote-policy-config" :open="votePolicyOpen">
           <summary>投票策略</summary>
           <div class="vote-policy-body">
             <label>
@@ -281,6 +281,7 @@ const activeSeats = computed(() =>
 )
 
 async function submit() {
+  if (!window.confirm('确认创建并开始合议？')) return
   loading.value = true
   error.value = ''
   try {

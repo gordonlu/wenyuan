@@ -64,13 +64,16 @@ function proposalTitle(id: string) {
   font-weight: 600;
   font-size: 13px;
   font-family: var(--font-display);
+  align-self: center;
 }
 .vote-choice {
   justify-self: center;
+  margin-top: -5px;
 }
 .vote-target {
   font-size: 13px;
   line-height: 1.4;
+  align-self: center;
 }
 .vote-reason {
   grid-column: 1 / -1;

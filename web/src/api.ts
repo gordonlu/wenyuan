@@ -1,4 +1,4 @@
-import type { CodeSearchResponse, ConfigStatus, EvidenceItem, ParseDocumentResponse, SessionDetails, SessionRecord, SessionSummary, ToolRun, UserPreferences } from './domain/session'
+import type { CodeSearchResponse, ConfigStatus, EvidenceItem, ParseDocumentResponse, SearchTestResponse, SessionDetails, SessionRecord, SessionSummary, ToolRun, UserPreferences } from './domain/session'
 
 const base = ''
 
@@ -7,11 +7,17 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
     headers: { 'content-type': 'application/json', ...(options?.headers ?? {}) },
     ...options,
   })
+  const text = await response.text()
   if (!response.ok) {
-    const payload = await response.json().catch(() => ({ error: response.statusText }))
-    throw new Error(payload.error ?? response.statusText)
+    let error = response.statusText
+    try { const payload = JSON.parse(text); error = payload.error ?? error } catch { /* ignore */ }
+    throw new Error(error)
   }
-  return response.json() as Promise<T>
+  try {
+    return JSON.parse(text) as T
+  } catch {
+    throw new Error(`server returned non-JSON (status ${response.status})`)
+  }
 }
 
 export const api = {
@@ -83,6 +89,12 @@ export const api = {
   },
   searchCode(input: { query: string }) {
     return request<CodeSearchResponse>('/api/tools/code/search', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    })
+  },
+  searchTest(input: { topic: string }) {
+    return request<SearchTestResponse>('/api/tools/search-test', {
       method: 'POST',
       body: JSON.stringify(input),
     })

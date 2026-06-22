@@ -4,10 +4,13 @@
       <div>
         <p class="phase-label">{{ phaseLabels[details.session.phase] }}</p>
         <h1>{{ details.session.title }}</h1>
-        <span class="badge flat" style="margin-top: 4px">{{ modeLabels[details.session.mode] }}</span>
-        <span v-if="details.session.vote_policy" class="badge flat" style="margin-top: 4px; margin-left: 6px">
-          {{ voteStrategyLabels[details.session.vote_policy.strategy] }}
-        </span>
+        <div class="title-tag-row" style="margin-top: 4px">
+          <span v-if="details.artifacts.topic_type" class="badge flat topic-tag">{{ topicTypeLabel(details.artifacts.topic_type) }}</span>
+          <span class="badge flat">{{ modeLabels[details.session.mode] }}</span>
+          <span v-if="details.session.vote_policy && details.session.mode !== 'single_agent'" class="badge flat" style="margin-left: 6px">
+            {{ voteStrategyLabels[details.session.vote_policy.strategy] }}
+          </span>
+        </div>
       </div>
       <div class="actions workspace-actions">
         <div class="view-switch" role="tablist" aria-label="视图模式">
@@ -71,7 +74,7 @@
             <RotateCw :size="18" />
           </button>
           <button v-if="!details.execution.running && details.execution.recovery_state !== 'paused'" class="retry-phase" title="重试当前阶段" @click="retryCurrentPhase">
-            <RefreshCw :size="18" />
+            <RotateCw :size="14" />
             重试阶段
           </button>
           <button class="retry-session" title="重试整个议题" @click="retry">
@@ -97,7 +100,7 @@
         :running="details.execution.running"
         :runs="details.artifacts.seat_runs"
         :provider-ref="seatProviderRef(seat)"
-        @retry="retrySeat"
+        :inactive="details.session.mode === 'single_agent' && seat !== 'mouyuan'"
       />
     </section>
 
@@ -107,7 +110,7 @@
       <h2>最近失败调用</h2>
       <ul class="failure-list">
         <li v-for="run in recentFailedRuns" :key="run.id">
-          <span>{{ seatLabels[run.seat] }} · {{ phaseLabels[run.phase] }}</span>
+          <span :class="['seat-tag', run.seat]">{{ seatLabels[run.seat] }} · {{ phaseLabels[run.phase] }}</span>
           <strong>{{ run.error || '模型返回内容无法解析' }}</strong>
         </li>
       </ul>
@@ -133,7 +136,7 @@
       <EvidenceSummary v-if="currentEvidenceSummary" :summary="currentEvidenceSummary" />
     </div>
 
-    <DecisionSummary v-if="primaryDecision" :decision="primaryDecision" :vote-policy="details.session.vote_policy" />
+    <DecisionSummary v-if="primaryDecision" :decision="primaryDecision" :vote-policy="details.session.vote_policy" :mode="details.session.mode" />
 
     <section class="panel">
       <div class="row-head">
@@ -193,7 +196,7 @@
         <span v-for="(count, name) in toolRunSummaryData.by_tool" :key="name" class="tool-run-chip">
           {{ toolNameLabel(name) }} {{ count }} 次
         </span>
-        <span class="tool-run-meta">{{ toolRunSummaryData.total_ms }} ms · {{ toolRunSummaryData.failed }} 次失败</span>
+        <span class="tool-run-meta">{{ (toolRunSummaryData.total_ms / 1000).toFixed(1) }} 秒 · {{ toolRunSummaryData.failed }} 次失败</span>
       </div>
       <div v-else class="item-grid tool-run-grid">
         <article v-for="run in toolRuns" :key="run.id" class="item tool-run-item">
@@ -202,7 +205,7 @@
             <span :class="['badge', run.status === 'completed' ? 'ok' : 'warn']">{{ run.status }}</span>
           </div>
           <p>{{ run.input_summary }}</p>
-          <p class="muted">{{ run.duration_ms }} ms · {{ run.evidence_ids?.length ?? 0 }} 条证据</p>
+          <p class="muted">{{ (run.duration_ms / 1000).toFixed(1) }} 秒 · {{ run.evidence_ids?.length ?? 0 }} 条证据</p>
           <p v-if="run.error" class="muted tool-run-error">{{ run.error }}</p>
         </article>
       </div>
@@ -220,7 +223,7 @@
       <div class="item-grid">
         <article v-for="critique in details.artifacts.critiques" :key="`${critique.reviewer}-${critique.target_seat}`" class="item">
           <div class="item-head">
-            <span>{{ seatLabels[critique.reviewer] }} → {{ seatLabels[critique.target_seat] }}</span>
+            <span :class="['seat-tag', critique.reviewer]">{{ seatLabels[critique.reviewer] }}</span> → <span :class="['seat-tag', critique.target_seat]">{{ seatLabels[critique.target_seat] }}</span>
           </div>
           <p class="muted" v-if="critique.strongest_point">强点：{{ critique.strongest_point }}</p>
           <p class="muted" v-if="critique.weakest_point">弱点：{{ critique.weakest_point }}</p>
@@ -244,7 +247,7 @@
       <div class="item-grid">
         <article v-for="diff in revisionDiffs(details)" :key="diff.seat" class="item">
           <div class="item-head">
-            <span>{{ seatLabels[diff.seat] }}</span>
+            <span :class="['seat-tag', diff.seat]">{{ seatLabels[diff.seat] }}</span>
             <span v-if="diff.titleChanged || diff.summaryChanged" class="badge ok">已调整</span>
             <span v-else class="badge">延续</span>
           </div>
@@ -298,15 +301,29 @@
       </div>
     </section>
 
-    <section v-if="details.artifacts.claims?.length" class="panel">
-      <h2>证据池</h2>
+    <section v-if="supportedClaims.length" class="panel">
+      <h2>有证据的主张</h2>
       <div class="item-grid">
-        <article v-for="claim in details.artifacts.claims" :key="claim.id" class="item">
+        <article v-for="claim in supportedClaims" :key="claim.id" class="item">
           <div class="item-head">
-            <span>{{ seatLabels[claim.proposed_by] }}</span>
-            <span :class="['badge', claim.is_supported ? 'ok' : 'warn']">
-              {{ claim.is_supported ? '有证据' : '未验证' }}
-            </span>
+            <span :class="['seat-tag', claim.proposed_by]">{{ seatLabels[claim.proposed_by] }}</span>
+            <span class="badge ok">有证据</span>
+          </div>
+          <p>{{ claim.content }}</p>
+          <p class="muted">来源：{{ claim.context }}</p>
+          <p v-if="detailEvidence(claim.evidence_ids)" class="muted">
+            证据：{{ detailEvidence(claim.evidence_ids)?.map((ev) => evidenceKindLabels[ev.kind] + ': ' + ev.content).join(' | ') }}
+          </p>
+        </article>
+      </div>
+    </section>
+    <section v-if="unsupportedClaims.length" class="panel">
+      <h2>未验证的主张</h2>
+      <div class="item-grid">
+        <article v-for="claim in unsupportedClaims" :key="claim.id" class="item">
+          <div class="item-head">
+            <span :class="['seat-tag', claim.proposed_by]">{{ seatLabels[claim.proposed_by] }}</span>
+            <span class="badge warn">未验证</span>
           </div>
           <p>{{ claim.content }}</p>
           <p class="muted">来源：{{ claim.context }}</p>
@@ -324,16 +341,13 @@
       </p>
       <div class="stat-grid">
         <article v-for="stat in seatRunStats(details.artifacts.seat_runs)" :key="stat.seat" class="stat">
-          <span>{{ seatLabels[stat.seat] }}</span>
+          <span :class="['seat-tag', stat.seat]">{{ seatLabels[stat.seat] }}</span>
           <strong>{{ stat.calls }} 次调用</strong>
           <p>
-            {{ stat.durationMs }} ms · {{ stat.failed }} 次失败 · {{ stat.repaired }} 次修复
+            {{ stat.durationMs ? (stat.durationMs / 1000).toFixed(1) : 0 }} 秒 · {{ stat.failed }} 次失败 · {{ stat.repaired }} 次修复
             <template v-if="stat.hasUsage"> · {{ stat.tokens }} tokens</template>
           </p>
           <p class="muted">{{ stat.promptVersions || '暂无 Prompt 版本' }}</p>
-          <button v-if="!details.execution.running && stat.failed > 0" class="stat-action" title="重试该席位" @click="retrySeat(stat.seat)">
-            <RotateCw :size="14" /> 重试
-          </button>
         </article>
       </div>
     </section>
@@ -349,7 +363,7 @@
         <ol class="timeline">
           <li v-for="event in timelineEvents" :key="event.id">
             <time>{{ new Date(event.created_at).toLocaleString() }}</time>
-            <span :class="['badge', eventBadge(event.event_type)]">{{ event.event_type }}</span>
+            <span :class="['badge', eventBadge(event.event_type)]">{{ eventLabel(event) }}</span>
           </li>
         </ol>
       </div>
@@ -374,6 +388,7 @@
           <span>{{ phaseLabels[details.session.phase] }}</span>
           <span>·</span>
           <span>{{ modeLabels[details.session.mode] }}</span>
+          <span v-if="details.artifacts.topic_type" class="report-topic-tag">· {{ topicTypeLabel(details.artifacts.topic_type) }}</span>
           <span>·</span>
           <span>{{ currentDigest.evidence_total }} 项来源</span>
           <span>·</span>
@@ -440,13 +455,13 @@
               <span :class="['badge', run.status === 'completed' ? 'ok' : 'warn']">{{ run.status }}</span>
             </div>
             <p>{{ run.input_summary }}</p>
-            <p class="muted">{{ run.duration_ms }} ms · {{ run.evidence_ids?.length ?? 0 }} 条证据</p>
+            <p class="muted">{{ (run.duration_ms / 1000).toFixed(1) }} 秒 · {{ run.evidence_ids?.length ?? 0 }} 条证据</p>
             <p v-if="run.error" class="muted tool-run-error">{{ run.error }}</p>
           </article>
         </div>
       </section>
 
-    <DecisionSummary v-if="primaryDecision" :decision="primaryDecision" :vote-policy="details.session.vote_policy" />
+    <DecisionSummary v-if="primaryDecision" :decision="primaryDecision" :vote-policy="details.session.vote_policy" :mode="details.session.mode" />
 
       <section class="role-card-row report-seat-row" aria-label="三席报告">
         <SeatRoleCard
@@ -483,7 +498,7 @@
         <div class="item-grid">
           <article v-for="claim in details.artifacts.claims" :key="claim.id" class="item">
             <div class="item-head">
-              <span>{{ seatLabels[claim.proposed_by] }}</span>
+              <span :class="['seat-tag', claim.proposed_by]">{{ seatLabels[claim.proposed_by] }}</span>
               <span :class="['badge', claim.is_supported ? 'ok' : 'warn']">
                 {{ claim.is_supported ? '已有依据' : '仍需核验' }}
               </span>
@@ -512,14 +527,15 @@
   />
 
   <section v-else class="page">
-    <ApiErrorState :message="error || '加载中'" />
+    <p v-if="error" class="error-state">{{ error }}</p>
+    <p v-else-if="loading" class="loading-state">加载中…</p>
   </section>
 </template>
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { Ban, ChevronDown, ChevronUp, Copy, Download, FileText, Pause, Pen, Play, RefreshCw, RotateCw } from '@lucide/vue'
+import { Ban, ChevronDown, ChevronUp, Copy, Download, FileText, Pause, Pen, Play, RefreshCw, RotateCw, Share2 } from '@lucide/vue'
 import { api } from '../api'
 import ApiErrorState from '../components/ApiErrorState.vue'
 import CritiqueGraph from '../components/CritiqueGraph.vue'
@@ -542,6 +558,7 @@ const { viewMode, setViewMode } = useViewMode({ route, router })
 const id = computed(() => String(route.params.id))
 const seats: SeatKind[] = ['mouyuan', 'jingshi', 'chizheng']
 const details = ref<SessionDetails | null>(null)
+const loading = ref(true)
 const error = ref('')
 const editingContext = ref(false)
 const newContext = ref('')
@@ -597,7 +614,16 @@ const currentDigest = computed(() => {
   const evSum = currentEvidenceSummary.value ?? undefined
   return decisionDigest(details.value, evSum)
 })
-const timelineEvents = computed(() => [...(details.value?.events ?? [])].reverse())
+const timelineEvents = computed(() => {
+  const items: Array<{ id: string; event_type: string; payload: unknown; created_at: string }> = []
+  for (const event of details.value?.events ?? []) {
+    items.push({ id: `evt-${event.id}`, event_type: event.event_type, payload: event.payload, created_at: event.created_at })
+  }
+  for (const text of details.value?.artifacts.events ?? []) {
+    items.push({ id: `art-${text}`, event_type: text, payload: null, created_at: '' })
+  }
+  return items.reverse()
+})
 
 const seatEvents = computed(() => (details.value?.events ?? []).filter((e) =>
   ['seat_started', 'seat_completed', 'seat_failed'].includes(e.event_type)
@@ -618,6 +644,7 @@ const runningSeatLabel = computed(() => {
   return '执行中'
 })
 const lastEventTime = computed(() => {
+  void tick.value
   const events = details.value?.events ?? []
   if (!events.length) return ''
   const last = events[events.length - 1]
@@ -634,8 +661,21 @@ const trajectoryEvents = computed(() => [...trajectory.value].reverse())
 const externalEvidence = computed(() =>
   (details.value?.artifacts.evidence ?? []).filter((ev) => ev.source_kind && ev.source_kind !== 'internal'),
 )
+const supportedClaims = computed(() =>
+  (details.value?.artifacts.claims ?? []).filter((c) => c.is_supported),
+)
+const unsupportedClaims = computed(() =>
+  (details.value?.artifacts.claims ?? []).filter((c) => !c.is_supported),
+)
 const toolRuns = computed(() => details.value?.artifacts.tool_runs ?? [])
 const toolRunSummaryData = computed(() => toolRunSummary(toolRuns.value))
+
+// Tick every 3s so lastEventTime refreshes even without new SSE events
+const tick = ref(0)
+let tickTimer: number | undefined
+onMounted(() => { tickTimer = window.setInterval(() => { tick.value++ }, 3000) })
+onBeforeUnmount(() => { if (tickTimer) window.clearInterval(tickTimer) })
+
 let source: EventSource | null = null
 let timer: number | undefined
 let pollTimer: number | undefined
@@ -653,6 +693,52 @@ function eventBadge(type: string) {
   if (type.includes('completed') || type.includes('majority')) return 'ok'
   if (type.includes('failed') || type.includes('error') || type.includes('cancelled')) return 'warn'
   return ''
+}
+
+const seatEventLabels: Record<string, string> = {
+  seat_started: '开始',
+  seat_completed: '完成',
+  seat_failed: '失败',
+}
+
+function topicTypeLabel(key: string) {
+  const labels: Record<string, string> = {
+    PersonalLife: '生活决策',
+    Consumer: '消费决策',
+    Legal: '法律问题',
+    Academic: '学术问题',
+    Medical: '医疗健康',
+    Financial: '财务投资',
+    Technical: '技术产品',
+    Product: '产品战略',
+    Strategy: '企业战略',
+  }
+  return labels[key] || key
+}
+
+function eventLabel(event: { event_type: string; payload: unknown }) {
+  const seat = typeof event.payload === 'object' && event.payload !== null && 'seat' in event.payload
+    ? (event.payload as { seat?: string }).seat
+    : undefined
+  const payload = (typeof event.payload === 'object' && event.payload !== null) ? event.payload as Record<string, unknown> : {}
+  const query = payload.query as string | undefined
+  const label = seatEventLabels[event.event_type] || artifactEventLabel(event.event_type) || event.event_type
+  let result = label
+  if (query) {
+    result += ` 查询：${query}`
+  }
+  if (seat) {
+    result = `${result} · ${seatLabels[seat as SeatKind] || seat}`
+  }
+  return result
+}
+
+function artifactEventLabel(type: string): string | undefined {
+  if (type.startsWith('search_completed')) return '搜索完成'
+  if (type.startsWith('search_failed')) return '搜索失败'
+  if (type.startsWith('scribe_completed')) return '书记官完成'
+  if (type.startsWith('scribe_failed')) return '书记官失败'
+  return undefined
 }
 
 function compactSource(sourceText: string) {
@@ -792,10 +878,19 @@ function escapeHTML(s: string) {
 }
 
 async function load() {
+  loading.value = true
   try {
-    details.value = await api.getSession(id.value)
+    const data = await api.getSession(id.value)
+    if (data) {
+      details.value = data
+      error.value = ''
+    } else {
+      error.value = '未找到合议记录'
+    }
   } catch (err) {
     error.value = err instanceof Error ? err.message : '加载失败'
+  } finally {
+    loading.value = false
   }
 }
 
@@ -827,11 +922,13 @@ async function resume() {
 }
 
 async function retry() {
+  if (!window.confirm('确认重新开议？')) return
   details.value = await api.retrySession(id.value)
   timer = window.setTimeout(load, 500)
 }
 
 async function retryCurrentPhase() {
+  if (!window.confirm('确认重试当前阶段？')) return
   try {
     details.value = await api.retryPhase(id.value)
   } catch (err) {
@@ -840,22 +937,16 @@ async function retryCurrentPhase() {
 }
 
 async function cancel() {
+  if (!window.confirm('确认取消本次合议？')) return
   details.value = await api.cancelSession(id.value)
 }
 
 async function manualRevision() {
+  if (!window.confirm('确认手动触发复议？')) return
   try {
     details.value = await api.manualRevision(id.value)
   } catch (err) {
     error.value = err instanceof Error ? err.message : '触发失败'
-  }
-}
-
-async function retrySeat(seat: string) {
-  try {
-    details.value = await api.retrySeat(id.value, seat)
-  } catch (err) {
-    error.value = err instanceof Error ? err.message : '重试席位失败'
   }
 }
 
@@ -1141,6 +1232,7 @@ onBeforeUnmount(() => {
   background: var(--color-accent-light);
   border: 1px solid rgba(15, 138, 161, 0.25);
   color: var(--color-accent-text);
+  margin-bottom: 10px;
 }
 
 .status-bar-dot {
@@ -1174,6 +1266,44 @@ onBeforeUnmount(() => {
   font-size: 11px;
   color: var(--color-text-dim);
   white-space: nowrap;
+}
+
+.seat-tag {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 5px;
+  font-size: 12px;
+  font-weight: 600;
+}
+.seat-tag.mouyuan {
+  background: #e2eef9;
+  color: #1a5a8c;
+}
+.seat-tag.jingshi {
+  background: #f0e6d3;
+  color: #7a5a2e;
+}
+.seat-tag.chizheng {
+  background: #f5e8e8;
+  color: #8c3a3a;
+}
+
+.title-tag-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.topic-tag {
+  background: #e8f0fe;
+  color: #1a5a8c;
+  border: 1px solid #c6dafc;
+}
+
+.report-topic-tag {
+  color: var(--color-text-muted);
+  font-size: 13px;
 }
 
 @media (prefers-reduced-motion: reduce) {

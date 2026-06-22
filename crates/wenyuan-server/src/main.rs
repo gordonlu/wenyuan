@@ -29,13 +29,13 @@ use tracing::{error, info};
 use uuid::Uuid;
 use wenyuan_agent::{AgentError, AgentRunner, CancellationFlag, ProgressSink};
 use wenyuan_core::{
-    DeliberationMode, Evidence, SearchBackend, SeatKind, SeatModelConfig, Session, SessionPhase,
-    VotePolicy, VoteStrategy,
+    ChatMessage, DeliberationMode, Evidence, SearchBackend, SearchResult, SeatKind, SeatModelConfig,
+    Session, SessionPhase, VotePolicy, VoteStrategy,
 };
 use wenyuan_provider::{
-    BingBackend, CustomSearchBackend, DoubaoBackend, DuckDuckGoBackend, GoogleCustomSearchBackend,
-    LlmProvider, MockProvider, MockScenario, OpenAiCompatibleConfig, OpenAiCompatibleProvider,
-    SearXNGSearchBackend, SearchPool, SeatRoutedProvider, TavilyBackend, WikipediaBackend,
+    CustomSearchBackend, DoubaoBackend, GoogleCustomSearchBackend,
+    LlmProvider, LlmRequest, MockProvider, MockScenario, OpenAiCompatibleConfig, OpenAiCompatibleProvider,
+    SearXNGSearchBackend, SearchPool, SeatRoutedProvider, TavilyBackend,
 };
 use wenyuan_store::{SessionDetails, Store};
 use wenyuan_tools::{
@@ -58,6 +58,7 @@ struct AppState {
     event_tx: broadcast::Sender<Uuid>,
     config: ConfigStatus,
     search_backend: Option<Arc<dyn SearchBackend>>,
+    search_pool: Option<Arc<SearchPool>>,
     preferences_path: Arc<PathBuf>,
 }
 
@@ -107,6 +108,7 @@ struct ConfigStatus {
     seat_models: HashMap<String, String>,
     database_url: String,
     version: String,
+    search_provider: String,
     available_models: Vec<ModelOption>,
     seat_available_models: HashMap<String, Vec<ModelOption>>,
 }
@@ -262,7 +264,7 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "wenyuan_server=info,tower_http=info".into()),
+                .unwrap_or_else(|_| "wenyuan_server=info,wenyuan_agent=info,tower_http=info".into()),
         )
         .init();
 
@@ -276,7 +278,9 @@ async fn main() -> anyhow::Result<()> {
         info!("marked {recovered} stale session execution(s) as retry_required");
     }
     let (provider, config) = provider_from_env(&database_url);
-    let search_backend = search_backend_from_env();
+    let search_pool = search_backend_from_env();
+    let search_backend: Option<Arc<dyn SearchBackend>> =
+        search_pool.clone().map(|p| p as Arc<dyn SearchBackend>);
     if search_backend.is_some() {
         info!("search backend configured");
     }
@@ -287,6 +291,7 @@ async fn main() -> anyhow::Result<()> {
         event_tx: broadcast::channel(128).0,
         config,
         search_backend,
+        search_pool,
         preferences_path,
     };
 
@@ -373,24 +378,19 @@ fn normalize_preferences(mut preferences: UserPreferences) -> UserPreferences {
     preferences
 }
 
-fn search_backend_from_env() -> Option<Arc<dyn SearchBackend>> {
+fn search_backend_from_env() -> Option<Arc<SearchPool>> {
     let provider = env::var("WENYUAN_SEARCH_PROVIDER")
-        .unwrap_or_else(|_| "bing,duckduckgo,wikipedia".into())
-        .to_lowercase();
-    let provider = if provider.trim().is_empty() {
-        "bing,duckduckgo,wikipedia".to_string()
-    } else {
-        provider
-    };
-    if matches!(provider.trim(), "none" | "off" | "disabled") {
+        .unwrap_or_default()
+        .to_lowercase()
+        .trim()
+        .to_string();
+    if provider.is_empty() || matches!(provider.as_str(), "none" | "off" | "disabled") {
+        info!("WENYUAN_SEARCH_PROVIDER not set; search disabled");
         return None;
     }
     let mut backends: Vec<Box<dyn SearchBackend>> = Vec::new();
     for name in provider.split(',') {
         match name.trim() {
-            "bing" => backends.push(Box::new(BingBackend::new())),
-            "wikipedia" => backends.push(Box::new(WikipediaBackend::new())),
-            "duckduckgo" => backends.push(Box::new(DuckDuckGoBackend::new())),
             "custom" => {
                 let url = env::var("WENYUAN_SEARCH_API_URL").unwrap_or_default();
                 if !url.is_empty() {
@@ -427,9 +427,8 @@ fn search_backend_from_env() -> Option<Arc<dyn SearchBackend>> {
         }
     }
     if backends.is_empty() {
-        backends.push(Box::new(BingBackend::new()));
-        backends.push(Box::new(DuckDuckGoBackend::new()));
-        backends.push(Box::new(WikipediaBackend::new()));
+        info!("WENYUAN_SEARCH_PROVIDER={provider} but no backends could be initialized (missing keys/URLs); search disabled");
+        return None;
     }
     Some(Arc::new(SearchPool::new(backends)))
 }
@@ -457,6 +456,7 @@ fn app(state: AppState) -> Router {
         .route("/api/sessions/{id}/events", get(events_sse))
         .route("/api/tools/documents/parse", post(parse_document))
         .route("/api/tools/code/search", post(search_code_tool))
+        .route("/api/tools/search-test", post(web_search_test))
         .route("/api/test-topics", get(test_topics))
         .fallback_service(ServeDir::new("web/dist").fallback(ServeFile::new("web/dist/index.html")))
         .layer(DefaultBodyLimit::max(max_request_body_bytes()))
@@ -507,6 +507,8 @@ fn provider_from_env(database_url: &str) -> (Arc<dyn LlmProvider>, ConfigStatus)
             seat_models,
             database_url: database_url.to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),
+            search_provider: env::var("WENYUAN_SEARCH_PROVIDER")
+                .unwrap_or_default(),
             available_models,
             seat_available_models,
         },
@@ -778,6 +780,151 @@ async fn search_code_tool(
     }))
 }
 
+#[derive(Deserialize)]
+struct WebSearchTestRequest {
+    topic: String,
+}
+
+#[derive(Serialize)]
+struct WebSearchTestStep {
+    prompt: String,
+    raw_response: String,
+    extracted: String,
+    note: String,
+}
+
+#[derive(Serialize)]
+struct BackendResult {
+    name: String,
+    results: Vec<SearchResult>,
+    error: Option<String>,
+}
+
+#[derive(Serialize)]
+struct WebSearchTestResponse {
+    keyword_step: WebSearchTestStep,
+    search_query: String,
+    backends: Vec<BackendResult>,
+}
+
+async fn web_search_test(
+    State(state): State<AppState>,
+    Json(input): Json<WebSearchTestRequest>,
+) -> Result<Json<WebSearchTestResponse>, ApiError> {
+    // Step 1: LLM extracts search keywords from topic
+    let prompt = format!(
+        "从以下议题中提取 2-3 个搜索关键词，输出 JSON：{{\"query\": \"关键词1 关键词2 关键词3\"}}\n\n议题：{}",
+        input.topic
+    );
+    let request = LlmRequest {
+        session_id: Uuid::nil(),
+        seat: SeatKind::Mouyuan,
+        phase: SessionPhase::Draft,
+        messages: vec![
+            ChatMessage {
+                role: "system".into(),
+                content: "你是一个搜索关键词提取助手。根据用户提供的议题，提取 2-3 个搜索关键词并输出 JSON。只输出 JSON，不要输出其他文字。".into(),
+            },
+            ChatMessage {
+                role: "user".into(),
+                content: prompt.clone(),
+            },
+        ],
+        repair_json: false,
+        max_tokens: 100,
+        prompt_version: "search-test-v1".into(),
+        reasoning_effort: None,
+        override_model: None,
+    };
+
+    let (extracted, raw_response, note) = match state.runner.provider().complete(request).await {
+        Ok(response) => {
+            let raw = response.content.trim().to_string();
+            if raw.is_empty() {
+                let fallback: String = input.topic.chars().take(60).collect();
+                (fallback, raw, "LLM 返回空内容，回退到议题前 60 字符".into())
+            } else if let Some(q) = try_extract_query_json(&raw) {
+                if q.chars().filter(|c| !c.is_whitespace()).count() >= 3 {
+                    (q, raw, "从 LLM JSON 中提取".into())
+                } else {
+                    let fallback: String = input.topic.chars().take(60).collect();
+                    (fallback, raw, "LLM 输出太短，回退到议题前 60 字符".into())
+                }
+            } else {
+                let cleaned = raw.trim().to_string();
+                if cleaned.chars().filter(|c| !c.is_whitespace()).count() >= 3 {
+                    (cleaned, raw, "LLM 未输出合法 JSON，直接使用原文".into())
+                } else {
+                    let fallback: String = input.topic.chars().take(60).collect();
+                    (fallback, raw, "LLM 输出无法解析，回退到议题前 60 字符".into())
+                }
+            }
+        }
+        Err(err) => {
+            let fallback: String = input.topic.chars().take(60).collect();
+            (fallback, format!("LLM 调用失败：{err}"), "LLM 调用失败，回退到议题前 60 字符".into())
+        }
+    };
+
+    // Step 2: search each backend individually
+    let pool = state
+        .search_pool
+        .ok_or_else(|| ApiError::internal("search backend not configured"))?;
+    let grouped = pool.search_grouped(&extracted, 5).await;
+    let mut backends: Vec<BackendResult> = grouped
+        .into_iter()
+        .map(|(name, (results, error))| BackendResult { name, results, error })
+        .collect();
+    backends.sort_by(|a, b| a.name.cmp(&b.name));
+
+    Ok(Json(WebSearchTestResponse {
+        keyword_step: WebSearchTestStep {
+            prompt,
+            raw_response,
+            extracted: extracted.clone(),
+            note,
+        },
+        search_query: extracted,
+        backends,
+    }))
+}
+
+/// Try to extract the "query" field from a JSON object string.
+/// Handles markdown fences and common prefixes.
+fn try_extract_query_json(s: &str) -> Option<String> {
+    // Strip markdown code fences
+    let s = s
+        .trim()
+        .trim_start_matches("```json")
+        .trim_start_matches("```")
+        .trim_end_matches("```")
+        .trim();
+    // Try direct JSON parse
+    if let Some(val) = serde_json::from_str::<serde_json::Value>(s).ok() {
+        if let Some(q) = val.get("query").and_then(|v| v.as_str()) {
+            let trimmed = q.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+    // Try to find a JSON-like substring if the response has extra text
+    if let Some(start) = s.find('{') {
+        if let Some(end) = s[start..].rfind('}') {
+            let json_str = &s[start..=start + end];
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(json_str) {
+                if let Some(q) = val.get("query").and_then(|v| v.as_str()) {
+                    let trimmed = q.trim();
+                    if !trimmed.is_empty() {
+                        return Some(trimmed.to_string());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 fn resolve_code_search_root(input: &str) -> Result<PathBuf, ApiError> {
     let root = FsPath::new(input)
         .canonicalize()
@@ -969,7 +1116,7 @@ async fn start_session(
             event_tx: event_tx.clone(),
         });
         let result = runner
-            .run_session_with_progress(session, cancel, Some(progress))
+            .run_session_with_progress(session, None, cancel, Some(progress))
             .await;
         match result {
             Ok(artifacts) => {
@@ -1121,8 +1268,75 @@ async fn retry_phase(
     if state.running.lock().await.contains_key(&id) {
         return Err(ApiError::conflict("session is running, cancel first"));
     }
-    state.store.retry_phase(id).await?;
-    start_session(State(state), Path(id)).await
+    let artifacts = state.store.retry_phase(id).await?;
+    let details = state.store.get_session(id).await?;
+    let Some(execution_token) = state.store.try_acquire_execution(id, 900).await? else {
+        return Err(ApiError::conflict("session is already running"));
+    };
+    let mut running = state.running.lock().await;
+    if running.contains_key(&id) {
+        state.store.complete_execution(id, execution_token).await.map_err(ApiError::from)?;
+        return Err(ApiError::conflict("session is already running"));
+    }
+    let cancel = CancellationFlag::default();
+    running.insert(id, cancel.clone());
+    drop(running);
+
+    let store = state.store.clone();
+    let running_map = state.running.clone();
+    let event_tx = state.event_tx.clone();
+    let session = details.session.clone();
+    let mut runner = state.runner.clone();
+    if session.search_enabled {
+        if let Some(ref search) = state.search_backend {
+            runner = runner.with_search(search.clone());
+        }
+    }
+    tokio::spawn(async move {
+        let progress = Arc::new(StoreProgressSink {
+            session_id: id,
+            store: store.clone(),
+            event_tx: event_tx.clone(),
+        });
+        let result = runner
+            .run_session_with_progress(session, Some(artifacts), cancel, Some(progress))
+            .await;
+        let _ = match result {
+            Ok(result_artifacts) => {
+                let active = store.is_execution_active(id, execution_token).await.unwrap_or(false);
+                if !active { running_map.lock().await.remove(&id); return; }
+                if let Some(final_session) = &result_artifacts.session {
+                    if let Err(err) = store.update_session(final_session).await {
+                        error!("failed to update session: {err}");
+                        let _ = store.fail_session(id, Some(execution_token), &format!("failed to persist final session: {err}")).await;
+                        let _ = event_tx.send(id);
+                        running_map.lock().await.remove(&id);
+                        return;
+                    }
+                    if let Err(err) = store.save_artifacts(id, &result_artifacts).await {
+                        error!("failed to save artifacts: {err}");
+                        let _ = store.fail_session(id, Some(execution_token), &format!("failed to persist artifacts: {err}")).await;
+                        let _ = event_tx.send(id);
+                        running_map.lock().await.remove(&id);
+                        return;
+                    }
+                    if let Err(err) = store.complete_execution(id, execution_token).await {
+                        error!("failed to complete session execution: {err}");
+                    }
+                }
+            }
+            Err(AgentError::Cancelled) => {
+                running_map.lock().await.remove(&id);
+            }
+            Err(err) => {
+                let _ = store.fail_session(id, Some(execution_token), &err.to_string()).await;
+                let _ = event_tx.send(id);
+                running_map.lock().await.remove(&id);
+            }
+        };
+        let _ = event_tx.send(id);
+    });
+    Ok(Json(details))
 }
 
 async fn manual_revision(

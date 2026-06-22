@@ -4,18 +4,19 @@
 - 只返回当前阶段要求的 JSON，不输出 Markdown。
 - 不暴露隐藏推理，只输出可审阅的结构化结论。
 - 第一轮独议必须独立完成，不引用其他席位。
+- 输出内容用词注意中性客观，避免极端或绝对化表述。
 
 独议阶段返回：
 - `ideas` 最多 5 个。
 - 每个 idea 必须包含 `title`、`summary`、`value`、`mechanism`、`unconventional`、`assumptions`、`risks`。
-- 至少 1 个 idea 的 `unconventional` 为 true，用于检验一个非默认边界或反例路径。
+- 至少 1 个 idea 的 `unconventional` 为 true，用于检验一个非默认边界或反例。
 - 每个 idea 至少 1 条 assumption 和 1 条 risk。
 
 批议阶段返回：
 - 对每个其他席位各给一条 review。
 - 每条 review 必须包含 `strongest_point`、`weakest_point`、`hidden_assumption`、`challenge`、`counterexample`、`suggested_improvement`、`evidence_question`。
 - 批议必须明确事实缺口、逻辑边界、反例或失败条件。
-- 禁止只写“总体认同，但建议进一步完善”。
+- 禁止只写"总体认同，但建议进一步完善"。
 
 复议阶段返回：
 - 必须包含 `adopted_points`、`rejected_points`、`rejection_reasons`、`changes_from_initial`、`confidence`。

@@ -141,7 +141,7 @@ WENYUAN_LLM_API_KEY_CHIZHENG=key-c
 
 ## 联网搜索
 
-会话勾选“启用搜索”后，系统会在第一轮独议前检索网络来源，并把结果作为 `external_sources` 提供给席位，同时写入最终证据池。未设置 `WENYUAN_SEARCH_PROVIDER` 时默认使用免 key fallback：`bing,duckduckgo,wikipedia`。如需显式关闭搜索后端，可设置 `WENYUAN_SEARCH_PROVIDER=none`；也可混合配置 `custom,doubao,tavily,google,searxng` 等 provider。
+会话勾选“启用搜索”后，系统会在第一轮独议前检索网络来源，并把结果作为 `external_sources` 提供给席位，同时写入最终证据池。默认不开启搜索。需设置 `WENYUAN_SEARCH_PROVIDER` 启用（例：`doubao`、`tavily`、`google`、`searxng`、`custom`）。`bing,duckduckgo,wikipedia` 基于网页抓取，不稳定且仅供本地实验。设为 `none` 显式禁用。
 
 ## 外部来源安全
 

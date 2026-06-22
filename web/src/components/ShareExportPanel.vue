@@ -32,6 +32,10 @@
               <span class="share-card-label">依据</span>
               <span class="share-card-value">{{ digest.majority_summary }}</span>
             </div>
+            <div class="share-card-row">
+              <span class="share-card-label">三席观点</span>
+              <span class="share-card-value">{{ seatSummary }}</span>
+            </div>
             <div v-if="digest.risk_summary" class="share-card-row share-card-risk">
               <span class="share-card-label">风险</span>
               <span class="share-card-value">{{ digest.risk_summary }}</span>
@@ -113,12 +117,12 @@ defineEmits<{
 }>()
 
 const platforms = [
-  { id: 'x', label: 'X (Twitter)' },
   { id: 'xiaohongshu', label: '小红书' },
+  { id: 'x', label: 'X (Twitter)' },
 ] as const
 
 type PlatformId = (typeof platforms)[number]['id']
-const platform = ref<PlatformId>('x')
+const platform = ref<PlatformId>('xiaohongshu')
 
 function copyText() {
   const lines: string[] = []
@@ -337,7 +341,8 @@ function roundRect(ctx: CanvasRenderingContext2D, x: number, y: number, w: numbe
 
 .share-tab.active {
   border-color: var(--color-accent);
-  background: var(--color-accent-light);
+  border-bottom-color: #fff;
+  background: #fff;
   color: var(--color-accent-text);
 }
 

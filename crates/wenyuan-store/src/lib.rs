@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::str::FromStr;
 use thiserror::Error;
 use uuid::Uuid;
-use wenyuan_agent::{DiscussionArtifacts, SeatRunStatus, SeatRunTrace, system_prompt};
+use wenyuan_agent::{DiscussionArtifacts, DiscussionQualityMetrics, SeatRunStatus, SeatRunTrace, system_prompt};
 use wenyuan_core::{
     ChatMessage, DeliberationMode, Evidence, SeatKind, Session, SessionPhase, ToolRun,
 };
@@ -836,6 +836,7 @@ impl Store {
             .transpose()?
             .unwrap_or_default();
         artifacts.seat_runs = self.seat_runs(id).await?;
+        artifacts.quality = DiscussionQualityMetrics::calculate(&artifacts);
         Ok(SessionDetails {
             session: session_from_row(&row)?,
             artifacts,
@@ -976,34 +977,99 @@ impl Store {
         Ok(())
     }
 
-    pub async fn retry_phase(&self, session_id: Uuid) -> Result<(), StoreError> {
-        let row = sqlx::query("select mode from sessions where id = ?1")
+    pub async fn retry_phase(&self, session_id: Uuid) -> Result<DiscussionArtifacts, StoreError> {
+        use SessionPhase::*;
+        let row = sqlx::query("select mode, phase, artifacts_json from sessions where id = ?1")
             .bind(session_id.to_string())
             .fetch_optional(&self.pool)
             .await?
             .ok_or(StoreError::NotFound)?;
         let mode: String = row.try_get("mode")?;
+        let phase_str: String = row.try_get("phase")?;
+        let artifacts_str: String = row.try_get("artifacts_json")?;
+        let current_phase: SessionPhase = serde_json::from_value(serde_json::json!(phase_str))
+            .map_err(StoreError::Json)?;
         let seats: &[SeatKind] = if mode == "single_agent" {
             &SeatKind::SINGLE
         } else {
             &SeatKind::ALL
         };
-        let empty_artifacts = serde_json::to_string(&DiscussionArtifacts::default())?;
+
+        // Retain artifacts from completed phases, clear current + future
+        let mut artifacts: DiscussionArtifacts =
+            serde_json::from_str(&artifacts_str).unwrap_or_default();
+        match current_phase {
+            IndependentDeliberation | Draft => {
+                // No prior phases — clear everything
+                artifacts = DiscussionArtifacts::default();
+            }
+            CrossCritique => {
+                // Keep ideas, clear everything else
+                let ideas = std::mem::take(&mut artifacts.ideas);
+                artifacts = DiscussionArtifacts::default();
+                artifacts.ideas = ideas;
+            }
+            Revision | Convergence => {
+                // Keep ideas + critiques
+                let ideas = std::mem::take(&mut artifacts.ideas);
+                let critiques = std::mem::take(&mut artifacts.critiques);
+                let events = std::mem::take(&mut artifacts.events);
+                let seat_runs = std::mem::take(&mut artifacts.seat_runs);
+                let tool_runs = std::mem::take(&mut artifacts.tool_runs);
+                artifacts = DiscussionArtifacts::default();
+                artifacts.ideas = ideas;
+                artifacts.critiques = critiques;
+                artifacts.events = events;
+                artifacts.seat_runs = seat_runs;
+                artifacts.tool_runs = tool_runs;
+            }
+            Voting => {
+                // Keep ideas + critiques + proposals
+                let ideas = std::mem::take(&mut artifacts.ideas);
+                let critiques = std::mem::take(&mut artifacts.critiques);
+                let proposals = std::mem::take(&mut artifacts.proposals);
+                let events = std::mem::take(&mut artifacts.events);
+                let seat_runs = std::mem::take(&mut artifacts.seat_runs);
+                let tool_runs = std::mem::take(&mut artifacts.tool_runs);
+                artifacts = DiscussionArtifacts::default();
+                artifacts.ideas = ideas;
+                artifacts.critiques = critiques;
+                artifacts.proposals = proposals;
+                artifacts.events = events;
+                artifacts.seat_runs = seat_runs;
+                artifacts.tool_runs = tool_runs;
+            }
+            _ => {
+                // Completed / Failed / Cancelled — reset entirely
+                artifacts = DiscussionArtifacts::default();
+            }
+        }
+
+        let artifacts_json = serde_json::to_string(&artifacts)?;
+        let target_phase = match current_phase {
+            Draft | IndependentDeliberation => "draft",
+            CrossCritique => "cross_critique",
+            Revision => "revision",
+            Voting => "voting",
+            Convergence => "voting",
+            _ => "draft",
+        };
         sqlx::query(
             "update sessions
-             set phase = 'draft',
+             set phase = ?2,
                  result_json = null,
                  failure_reason = null,
                  convergence_used = 0,
-                 artifacts_json = ?2,
+                 artifacts_json = ?3,
                  execution_token = null,
                  lease_expires_at = null,
                  recovery_state = 'idle',
-                 updated_at = ?3
+                 updated_at = ?4
              where id = ?1",
         )
         .bind(session_id.to_string())
-        .bind(empty_artifacts)
+        .bind(target_phase)
+        .bind(&artifacts_json)
         .bind(Utc::now().to_rfc3339())
         .execute(&self.pool)
         .await?;
@@ -1019,10 +1085,10 @@ impl Store {
         self.append_event(
             session_id,
             "phase_retry_prepared",
-            serde_json::json!({"mode": mode}),
+            serde_json::json!({"mode": mode, "target_phase": target_phase}),
         )
         .await?;
-        Ok(())
+        Ok(artifacts)
     }
 
     pub async fn manual_revision_trigger(&self, id: Uuid) -> Result<(), StoreError> {

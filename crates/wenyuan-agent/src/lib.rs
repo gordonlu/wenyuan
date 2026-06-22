@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use futures::future::join_all;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashMap;
+use tracing::{debug, info, warn};
 use std::collections::HashSet;
 use std::sync::{
     Arc,
@@ -15,7 +16,7 @@ use wenyuan_core::{
     Assessment, ChatMessage, Claim, ClaimEvidenceLink, Critique, Decision, DecisionStatus,
     DeliberationMode, Evidence, EvidenceSourceKind, EvidenceTrustLevel, IdeaCard, IdeaStatus,
     Proposal, SearchBackend, SearchError, SearchResult, SeatKind, SeatModelConfig, SeatStatus,
-    Session, SessionPhase, SourceSafetyFlags, ToolRun, Vote, VoteOutcome, VotePolicy,
+    Session, SessionPhase, SourceSafetyFlags, ToolRun, TopicType, Vote, VoteOutcome, VotePolicy,
     build_decision, generate_merged_proposal, phase_barrier_completed,
 };
 use wenyuan_provider::{LlmProvider, LlmRequest, LlmResponse, ProviderError};
@@ -109,17 +110,22 @@ impl AgentRunner {
         self
     }
 
+    pub fn provider(&self) -> &Arc<dyn LlmProvider> {
+        &self.provider
+    }
+
     pub async fn run_session(
         &self,
         session: Session,
         cancel: CancellationFlag,
     ) -> Result<DiscussionArtifacts, AgentError> {
-        self.run_session_with_progress(session, cancel, None).await
+        self.run_session_with_progress(session, None, cancel, None).await
     }
 
     pub async fn run_session_with_progress(
         &self,
         mut session: Session,
+        saved_artifacts: Option<DiscussionArtifacts>,
         cancel: CancellationFlag,
         progress: Option<Arc<dyn ProgressSink>>,
     ) -> Result<DiscussionArtifacts, AgentError> {
@@ -127,7 +133,7 @@ impl AgentRunner {
             return self.run_single_agent(session, cancel, progress).await;
         }
 
-        let mut artifacts = DiscussionArtifacts::default();
+        let mut artifacts = saved_artifacts.unwrap_or_default();
         artifacts
             .tool_runs
             .extend(session.external_tool_runs.clone());
@@ -136,16 +142,17 @@ impl AgentRunner {
         let mut external_evidence = session.external_evidence.clone();
 
         if session.search_enabled {
+            info!("RUN_SEARCH: multi-agent path");
             let search_started = Instant::now();
             let search_results = self.run_search(&session, &cancel, progress.as_ref()).await;
             match search_results {
-                Ok(results) => {
+                Ok((results, query)) => {
                     let search_evidence = search_results_to_evidence(&results);
                     let evidence_ids = search_evidence.iter().map(|item| item.id).collect();
                     external_evidence.extend(search_evidence);
                     artifacts.tool_runs.push(make_tool_run(
                         "web_search",
-                        format!("query={}", session.topic),
+                        format!("query={}", query),
                         "completed",
                         search_started.elapsed(),
                         evidence_ids,
@@ -158,7 +165,7 @@ impl AgentRunner {
                 Err(err) => {
                     artifacts.tool_runs.push(make_tool_run(
                         "web_search",
-                        format!("query={}", session.topic),
+                        format!("query={}", search_query(&session.topic)),
                         "failed",
                         search_started.elapsed(),
                         vec![],
@@ -167,94 +174,121 @@ impl AgentRunner {
                     artifacts.events.push(format!("search_failed:{err}"));
                 }
             }
+        } else {
+            info!("RUN_SEARCH: multi-agent path, search disabled");
+        }
+
+        let topic_type = self.classify_topic(&session, &cancel).await;
+        let base_rules = topic_type.domain_rules().join("\n");
+        let domain_rules = format!(
+            "席位中文名称：谋远席、经世席、持正席。引用席位时使用中文名称。\n{}",
+            base_rules
+        );
+        artifacts.topic_type = Some(topic_type);
+
+        self.ensure_not_cancelled(&cancel)?;
+        if artifacts.ideas.is_empty() {
+            session
+                .transition_to(SessionPhase::IndependentDeliberation)
+                .map_err(|err| AgentError::Core(err.to_string()))?;
+            artifacts
+                .events
+                .push("phase_started:independent_deliberation".into());
+            emit_progress(
+                progress.as_ref(),
+                "phase_started",
+                serde_json::json!({ "phase": SessionPhase::IndependentDeliberation }),
+            )
+            .await;
+            let (ideas, traces) = self
+                .run_independent(&session, &external_evidence, &cancel, progress.as_ref(), &domain_rules, session.search_enabled)
+                .await?;
+            artifacts.ideas = ideas;
+            artifacts.seat_runs.extend(traces);
+            artifacts
+                .events
+                .push("phase_completed:independent_deliberation".into());
+        } else {
+            info!("retry: skipping independent_deliberation ({} existing ideas)", artifacts.ideas.len());
+            session.phase = SessionPhase::CrossCritique;
+        }
+        emit_progress(
+            progress.as_ref(),
+            "phase_completed",
+            serde_json::json!({ "phase": SessionPhase::IndependentDeliberation }),
+        )
+        .await;
+
+        self.ensure_not_cancelled(&cancel)?;
+        if artifacts.critiques.is_empty() {
+            session
+                .transition_to(SessionPhase::CrossCritique)
+                .map_err(|err| AgentError::Core(err.to_string()))?;
+            artifacts.events.push("phase_started:cross_critique".into());
+            emit_progress(
+                progress.as_ref(),
+                "phase_started",
+                serde_json::json!({ "phase": SessionPhase::CrossCritique }),
+            )
+            .await;
+            let (critiques, traces) = self
+                .run_critiques(session.id, &artifacts.ideas, &cancel, progress.as_ref(), mc, &domain_rules, session.search_enabled)
+                .await?;
+            compute_idea_statuses(&mut artifacts.ideas, &critiques, &[], None);
+            artifacts.critiques = critiques;
+            artifacts.seat_runs.extend(traces);
+            artifacts
+                .events
+                .push("phase_completed:cross_critique".into());
+            emit_progress(
+                progress.as_ref(),
+                "phase_completed",
+                serde_json::json!({ "phase": SessionPhase::CrossCritique }),
+            )
+            .await;
+        } else {
+            info!("retry: skipping cross_critique ({} existing critiques)", artifacts.critiques.len());
+            session.phase = SessionPhase::Revision;
         }
 
         self.ensure_not_cancelled(&cancel)?;
-        session
-            .transition_to(SessionPhase::IndependentDeliberation)
-            .map_err(|err| AgentError::Core(err.to_string()))?;
-        artifacts
-            .events
-            .push("phase_started:independent_deliberation".into());
-        emit_progress(
-            progress.as_ref(),
-            "phase_started",
-            serde_json::json!({ "phase": SessionPhase::IndependentDeliberation }),
-        )
-        .await;
-        let (ideas, traces) = self
-            .run_independent(&session, &external_evidence, &cancel, progress.as_ref())
-            .await?;
-        artifacts.ideas = ideas;
-        artifacts.seat_runs.extend(traces);
-        artifacts
-            .events
-            .push("phase_completed:independent_deliberation".into());
-        emit_progress(
-            progress.as_ref(),
-            "phase_completed",
-            serde_json::json!({ "phase": SessionPhase::IndependentDeliberation }),
-        )
-        .await;
-
-        self.ensure_not_cancelled(&cancel)?;
-        session
-            .transition_to(SessionPhase::CrossCritique)
-            .map_err(|err| AgentError::Core(err.to_string()))?;
-        artifacts.events.push("phase_started:cross_critique".into());
-        emit_progress(
-            progress.as_ref(),
-            "phase_started",
-            serde_json::json!({ "phase": SessionPhase::CrossCritique }),
-        )
-        .await;
-        let (critiques, traces) = self
-            .run_critiques(session.id, &artifacts.ideas, &cancel, progress.as_ref(), mc)
-            .await?;
-        compute_idea_statuses(&mut artifacts.ideas, &critiques, &[], None);
-        artifacts.critiques = critiques;
-        artifacts.seat_runs.extend(traces);
-        artifacts
-            .events
-            .push("phase_completed:cross_critique".into());
-        emit_progress(
-            progress.as_ref(),
-            "phase_completed",
-            serde_json::json!({ "phase": SessionPhase::CrossCritique }),
-        )
-        .await;
-
-        self.ensure_not_cancelled(&cancel)?;
-        session
-            .transition_to(SessionPhase::Revision)
-            .map_err(|err| AgentError::Core(err.to_string()))?;
-        artifacts.events.push("phase_started:revision".into());
-        emit_progress(
-            progress.as_ref(),
-            "phase_started",
-            serde_json::json!({ "phase": SessionPhase::Revision }),
-        )
-        .await;
-        let (proposals, traces) = self
-            .run_revision(
-                session.id,
-                &artifacts.ideas,
-                &artifacts.critiques,
-                &cancel,
+        if artifacts.proposals.is_empty() {
+            session
+                .transition_to(SessionPhase::Revision)
+                .map_err(|err| AgentError::Core(err.to_string()))?;
+            artifacts.events.push("phase_started:revision".into());
+            emit_progress(
                 progress.as_ref(),
-                mc,
+                "phase_started",
+                serde_json::json!({ "phase": SessionPhase::Revision }),
             )
-            .await?;
-        compute_idea_statuses(&mut artifacts.ideas, &[], &proposals, None);
-        artifacts.proposals = proposals;
-        artifacts.seat_runs.extend(traces);
-        artifacts.events.push("phase_completed:revision".into());
-        emit_progress(
-            progress.as_ref(),
-            "phase_completed",
-            serde_json::json!({ "phase": SessionPhase::Revision }),
-        )
-        .await;
+            .await;
+            let (proposals, traces) = self
+                .run_revision(
+                    session.id,
+                    &artifacts.ideas,
+                    &artifacts.critiques,
+                    &cancel,
+                    progress.as_ref(),
+                    mc,
+                    &domain_rules,
+                    session.search_enabled,
+                )
+                .await?;
+            compute_idea_statuses(&mut artifacts.ideas, &[], &proposals, None);
+            artifacts.proposals = proposals;
+            artifacts.seat_runs.extend(traces);
+            artifacts.events.push("phase_completed:revision".into());
+            emit_progress(
+                progress.as_ref(),
+                "phase_completed",
+                serde_json::json!({ "phase": SessionPhase::Revision }),
+            )
+            .await;
+        } else {
+            info!("retry: skipping revision ({} existing proposals)", artifacts.proposals.len());
+            session.phase = SessionPhase::Voting;
+        }
 
         self.ensure_not_cancelled(&cancel)?;
         session
@@ -274,6 +308,7 @@ impl AgentRunner {
                 &cancel,
                 progress.as_ref(),
                 mc,
+                &domain_rules,
             )
             .await?;
         artifacts.votes = votes;
@@ -330,6 +365,7 @@ impl AgentRunner {
                         &cancel,
                         progress.as_ref(),
                         mc,
+                        &domain_rules,
                     )
                     .await?;
                 artifacts.seat_runs.extend(traces);
@@ -480,11 +516,14 @@ impl AgentRunner {
         session: &Session,
         cancel: &CancellationFlag,
         progress: Option<&Arc<dyn ProgressSink>>,
-    ) -> Result<Vec<SearchResult>, AgentError> {
+    ) -> Result<(Vec<SearchResult>, String), AgentError> {
         self.ensure_not_cancelled(cancel)?;
         let Some(search) = &self.search else {
+            warn!("search not configured, skipping");
             return Err(AgentError::Core("search not configured".into()));
         };
+
+        info!("run_search: starting (search_enabled={})", session.search_enabled);
 
         emit_progress(
             progress,
@@ -493,19 +532,144 @@ impl AgentRunner {
         )
         .await;
 
-        let results = search
-            .search(&session.topic, 5)
-            .await
-            .map_err(|err| AgentError::Core(format!("search failed: {err}")))?;
+        // Let the LLM distill the topic into focused search keywords.
+        // If the LLM call fails or returns invalid keywords, extract_search_query
+        // falls back to search_query() (which strips question preambles).
+        let query = self.extract_search_query(session, cancel).await?;
+        info!("run_search: query ({query:?}) ({} chars)", query.chars().count());
 
-        emit_progress(
-            progress,
-            "phase_completed",
-            serde_json::json!({ "phase": "search", "count": results.len() }),
-        )
-        .await;
+        match search.search(&query, 5).await {
+            Ok(results) => {
+                emit_progress(
+                    progress,
+                    "phase_completed",
+                    serde_json::json!({ "phase": "search", "count": results.len(), "query": query }),
+                )
+                .await;
+                Ok((results, query))
+            }
+            Err(err) => {
+                let msg = format!("search failed: {err}");
+                emit_progress(
+                    progress,
+                    "search_failed",
+                    serde_json::json!({ "query": query, "error": msg }),
+                )
+                .await;
+                Err(AgentError::Core(msg))
+            }
+        }
+    }
 
-        Ok(results)
+    async fn extract_search_query(
+        &self,
+        session: &Session,
+        cancel: &CancellationFlag,
+    ) -> Result<String, AgentError> {
+        let example = r#"{"query": "关键词1 关键词2 关键词3"}"#;
+        let prompt = format!(
+            "从以下议题中提取 2-3 个搜索关键词，输出 JSON：{example}\n\n议题：{}",
+            session.topic
+        );
+        let request = LlmRequest {
+            session_id: Uuid::nil(),
+            seat: SeatKind::Mouyuan,
+            phase: SessionPhase::Draft,
+            messages: vec![
+                ChatMessage {
+                    role: "system".into(),
+                    content: "你是一个搜索关键词提取助手。根据用户提供的议题，提取 2-3 个搜索关键词并输出 JSON。只输出 JSON，不要输出其他文字。".into(),
+                },
+                ChatMessage {
+                    role: "user".into(),
+                    content: prompt,
+                },
+            ],
+            repair_json: false,
+            max_tokens: 100,
+            prompt_version: "search-keywords-v1".into(),
+            reasoning_effort: None,
+            override_model: None,
+        };
+        let (result, _duration_ms) = self.call_provider(request, cancel).await;
+        match result {
+            Ok(response) => {
+                let raw = response.content.trim();
+                let cleaned = clean_search_query(raw);
+                let query = if valid_search_query(&cleaned) {
+                    debug!("extracted search keywords: {cleaned}");
+                    cleaned
+                } else {
+                    let fallback = search_query(&session.topic);
+                    warn!(
+                        "invalid search keywords from LLM (raw={raw:?}, cleaned={cleaned:?}); fallback: {fallback:?}"
+                    );
+                    fallback
+                };
+                Ok(query)
+            }
+            Err(err) => {
+                let fallback = search_query(&session.topic);
+                warn!("keyword extraction LLM call failed: {err}; fallback: {fallback:?}");
+                Ok(fallback)
+            }
+        }
+    }
+
+    async fn classify_topic(
+        &self,
+        session: &Session,
+        cancel: &CancellationFlag,
+    ) -> TopicType {
+        let prompt = format!(
+            "{}\n\n议题：{}",
+            TopicType::classification_prompt(),
+            session.topic
+        );
+        let request = LlmRequest {
+            session_id: Uuid::nil(),
+            seat: SeatKind::Mouyuan,
+            phase: SessionPhase::Draft,
+            messages: vec![ChatMessage {
+                role: "user".into(),
+                content: prompt,
+            }],
+            repair_json: false,
+            max_tokens: 50,
+            prompt_version: "topic-classification-v1".into(),
+            reasoning_effort: None,
+            override_model: None,
+        };
+        let (result, _duration_ms) = self.call_provider(request, cancel).await;
+        let default = TopicType::Technical;
+        match result {
+            Ok(response) => {
+                let text = response.content.trim().to_lowercase();
+                if text.contains("personal_life") {
+                    TopicType::PersonalLife
+                } else if text.contains("consumer") {
+                    TopicType::Consumer
+                } else if text.contains("legal") {
+                    TopicType::Legal
+                } else if text.contains("academic") {
+                    TopicType::Academic
+                } else if text.contains("medical") {
+                    TopicType::Medical
+                } else if text.contains("financial") {
+                    TopicType::Financial
+                } else if text.contains("product") {
+                    TopicType::Product
+                } else if text.contains("strategy") {
+                    TopicType::Strategy
+                } else {
+                    default
+                }
+            }
+            Err(err) => {
+                warn!("topic classification failed: {err}; defaulting to technical");
+                default
+            }
+        }
     }
 
     async fn run_independent(
@@ -514,6 +678,8 @@ impl AgentRunner {
         external_evidence: &[Evidence],
         cancel: &CancellationFlag,
         progress: Option<&Arc<dyn ProgressSink>>,
+        domain_rules: &str,
+        search_enabled: bool,
     ) -> Result<(Vec<IdeaCard>, Vec<SeatRunTrace>), AgentError> {
         let input = serde_json::json!({
             "title": session.title,
@@ -521,7 +687,8 @@ impl AgentRunner {
             "context": session.context,
             "external_sources": external_evidence,
             "untrusted_source_notice": untrusted_evidence_notice(),
-            "rule": "第一轮独议完全隔离，不引用其他席位输出。"
+            "rule": "第一轮独议完全隔离，不引用其他席位输出。",
+            "domain_rules": domain_rules,
         });
         let mc = session.model_config.as_ref();
         let run = self
@@ -532,6 +699,7 @@ impl AgentRunner {
                 cancel,
                 progress,
                 mc,
+                search_enabled,
             )
             .await?;
         let mut ideas = Vec::new();
@@ -574,10 +742,13 @@ impl AgentRunner {
         cancel: &CancellationFlag,
         progress: Option<&Arc<dyn ProgressSink>>,
         model_config: Option<&HashMap<SeatKind, SeatModelConfig>>,
+        domain_rules: &str,
+        search_enabled: bool,
     ) -> Result<(Vec<Critique>, Vec<SeatRunTrace>), AgentError> {
         let input = serde_json::json!({
             "ideas": ideas,
-            "rule": "只批议其他席位的独议结果，必须逐席给出结构化批议。"
+            "rule": "只批议其他席位的独议结果，必须逐席给出结构化批议。",
+            "domain_rules": domain_rules,
         });
         let run = self
             .run_three::<CritiqueOutput>(
@@ -587,6 +758,7 @@ impl AgentRunner {
                 cancel,
                 progress,
                 model_config,
+                search_enabled,
             )
             .await?;
         Ok((
@@ -618,11 +790,14 @@ impl AgentRunner {
         cancel: &CancellationFlag,
         progress: Option<&Arc<dyn ProgressSink>>,
         model_config: Option<&HashMap<SeatKind, SeatModelConfig>>,
+        domain_rules: &str,
+        search_enabled: bool,
     ) -> Result<(Vec<Proposal>, Vec<SeatRunTrace>), AgentError> {
         let input = serde_json::json!({
             "ideas": ideas,
             "critiques": critiques,
-            "rule": "形成正式策案，说明采纳、拒绝、相较独议修改和置信度。"
+            "rule": "形成正式策案，说明采纳、拒绝、相较独议修改和置信度。",
+            "domain_rules": domain_rules,
         });
         let run = self
             .run_three::<ProposalOutput>(
@@ -632,6 +807,7 @@ impl AgentRunner {
                 cancel,
                 progress,
                 model_config,
+                search_enabled,
             )
             .await?;
         Ok((
@@ -665,10 +841,12 @@ impl AgentRunner {
         cancel: &CancellationFlag,
         progress: Option<&Arc<dyn ProgressSink>>,
         model_config: Option<&HashMap<SeatKind, SeatModelConfig>>,
+        domain_rules: &str,
     ) -> Result<(Vec<Vote>, Vec<SeatRunTrace>), AgentError> {
         let input = serde_json::json!({
             "proposals": proposals,
-            "rule": "对三个策案匿名投票，proposal_ref 使用 proposal_0、proposal_1、proposal_2。"
+            "rule": "对三个策案匿名投票，proposal_ref 按序使用 方策一、方策二、方策三。引用策案时使用方策一/二/三称呼，不要使用 proposal_0 等内部编号。",
+            "domain_rules": domain_rules,
         });
         let run = self
             .run_three::<VoteOutput>(
@@ -678,27 +856,24 @@ impl AgentRunner {
                 cancel,
                 progress,
                 model_config,
+                false,
             )
             .await?;
         let mut votes = Vec::new();
         for (voter, output) in run.outputs {
             for raw in output.votes {
-                let index = raw
-                    .proposal_ref
-                    .trim_start_matches("proposal_")
-                    .parse::<usize>()
-                    .unwrap_or(0);
+                let index = parse_proposal_ref(&raw.proposal_ref);
                 let Some(proposal) = proposals.get(index) else {
                     continue;
                 };
                 votes.push(Vote {
                     voter,
                     proposal_id: proposal.id,
-                    value_score: raw.value_score,
-                    novelty_score: raw.novelty_score,
-                    feasibility_score: raw.feasibility_score,
-                    risk_score: raw.risk_score,
-                    roi_score: raw.roi_score,
+                    value_score: raw.value_score as u8,
+                    novelty_score: raw.novelty_score as u8,
+                    feasibility_score: raw.feasibility_score as u8,
+                    risk_score: raw.risk_score as u8,
+                    roi_score: raw.roi_score as u8,
                     final_choice: raw.final_choice,
                     reason: raw.reason,
                     confidence: raw.confidence,
@@ -720,6 +895,7 @@ impl AgentRunner {
         cancel: &CancellationFlag,
         progress: Option<&Arc<dyn ProgressSink>>,
         model_config: Option<&HashMap<SeatKind, SeatModelConfig>>,
+        search_enabled: bool,
     ) -> Result<(Option<T>, Vec<SeatRunTrace>), AgentError>
     where
         T: for<'de> Deserialize<'de> + Send + 'static,
@@ -734,6 +910,7 @@ impl AgentRunner {
                 cancel,
                 progress,
                 model_config,
+                search_enabled,
             )
             .await?;
         Ok((result.parsed, result.traces))
@@ -754,16 +931,17 @@ impl AgentRunner {
         let mut external_evidence = session.external_evidence.clone();
 
         if session.search_enabled {
+            info!("RUN_SEARCH: single-agent path");
             let search_started = Instant::now();
             let search_results = self.run_search(&session, &cancel, progress.as_ref()).await;
             match search_results {
-                Ok(results) => {
+                Ok((results, query)) => {
                     let search_evidence = search_results_to_evidence(&results);
                     let evidence_ids = search_evidence.iter().map(|item| item.id).collect();
                     external_evidence.extend(search_evidence);
                     artifacts.tool_runs.push(make_tool_run(
                         "web_search",
-                        format!("query={}", session.topic),
+                        format!("query={}", query),
                         "completed",
                         search_started.elapsed(),
                         evidence_ids,
@@ -776,7 +954,7 @@ impl AgentRunner {
                 Err(err) => {
                     artifacts.tool_runs.push(make_tool_run(
                         "web_search",
-                        format!("query={}", session.topic),
+                        format!("query={}", search_query(&session.topic)),
                         "failed",
                         search_started.elapsed(),
                         vec![],
@@ -785,7 +963,18 @@ impl AgentRunner {
                     artifacts.events.push(format!("search_failed:{err}"));
                 }
             }
+        } else {
+            info!("RUN_SEARCH: single-agent path, search disabled");
         }
+
+        // Classify topic type and generate domain-specific rules
+        let topic_type = self.classify_topic(&session, &cancel).await;
+        let base_rules = topic_type.domain_rules().join("\n");
+        let domain_rules = format!(
+            "席位中文名称：谋远席、经世席、持正席。引用席位时使用中文名称。\n{}",
+            base_rules
+        );
+        artifacts.topic_type = Some(topic_type);
 
         // Phase 1: IndependentDeliberation (single seat)
         self.ensure_not_cancelled(&cancel)?;
@@ -807,7 +996,8 @@ impl AgentRunner {
             "context": session.context,
             "external_sources": external_evidence,
             "untrusted_source_notice": untrusted_evidence_notice(),
-            "rule": "第一轮独议完全隔离，不引用其他席位输出。"
+            "rule": "第一轮独议完全隔离，不引用其他席位输出。",
+            "domain_rules": domain_rules,
         });
         let (ideas_result, traces) = self
             .run_one::<IndependentOutput>(
@@ -818,6 +1008,7 @@ impl AgentRunner {
                 &cancel,
                 progress.as_ref(),
                 mc,
+                session.search_enabled,
             )
             .await?;
         let mut ideas = Vec::new();
@@ -867,7 +1058,8 @@ impl AgentRunner {
         .await;
         let critique_input = serde_json::json!({
             "ideas": artifacts.ideas,
-            "rule": "对你自己的创意进行自我批议，逐条输出结构化批评。"
+            "rule": "对你自己的创意进行自我批议，逐条输出结构化批评。",
+            "domain_rules": domain_rules,
         });
         let (critique_result, traces) = self
             .run_one::<CritiqueOutput>(
@@ -878,6 +1070,7 @@ impl AgentRunner {
                 &cancel,
                 progress.as_ref(),
                 mc,
+                session.search_enabled,
             )
             .await?;
         let mut critiques = Vec::new();
@@ -923,7 +1116,8 @@ impl AgentRunner {
         let revision_input = serde_json::json!({
             "ideas": artifacts.ideas,
             "critiques": artifacts.critiques,
-            "rule": "根据自我批议形成最终策案，说明采纳、拒绝、修改和置信度。"
+            "rule": "根据自我批议形成最终策案，说明采纳、拒绝、修改和置信度。",
+            "domain_rules": domain_rules,
         });
         let (proposal_result, traces) = self
             .run_one::<ProposalOutput>(
@@ -934,6 +1128,7 @@ impl AgentRunner {
                 &cancel,
                 progress.as_ref(),
                 mc,
+                session.search_enabled,
             )
             .await?;
         let mut proposals = Vec::new();
@@ -995,6 +1190,22 @@ impl AgentRunner {
         artifacts.assessments = assessments;
         artifacts.claim_evidence_links = links;
         artifacts.quality = DiscussionQualityMetrics::calculate(&artifacts);
+
+        if session.scribe_enabled {
+            let scribe_result = self
+                .run_scribe(&session, &artifacts, &cancel, progress.as_ref())
+                .await;
+            match scribe_result {
+                Ok(report) => {
+                    artifacts.scribe_report = Some(report);
+                    artifacts.events.push("scribe_completed".into());
+                }
+                Err(err) => {
+                    artifacts.events.push(format!("scribe_failed: {err}"));
+                }
+            }
+        }
+
         artifacts.session = Some(session);
         artifacts.events.push("session_completed".into());
         Ok(artifacts)
@@ -1008,6 +1219,7 @@ impl AgentRunner {
         cancel: &CancellationFlag,
         progress: Option<&Arc<dyn ProgressSink>>,
         model_config: Option<&HashMap<SeatKind, SeatModelConfig>>,
+        search_enabled: bool,
     ) -> Result<PhaseRun<T>, AgentError>
     where
         T: for<'de> Deserialize<'de> + Send + 'static,
@@ -1022,6 +1234,7 @@ impl AgentRunner {
                 cancel,
                 progress,
                 model_config,
+                search_enabled,
             )
         });
         let results = join_all(futures).await;
@@ -1075,8 +1288,7 @@ impl AgentRunner {
         Ok(PhaseRun { outputs, traces })
     }
 
-    #[allow(clippy::too_many_arguments)]
-    async fn call_and_parse<T>(
+async fn call_and_parse<T>(
         &self,
         session_id: Uuid,
         seat: SeatKind,
@@ -1085,12 +1297,25 @@ impl AgentRunner {
         cancel: &CancellationFlag,
         progress: Option<&Arc<dyn ProgressSink>>,
         model_config: Option<&HashMap<SeatKind, SeatModelConfig>>,
+        search_enabled: bool,
     ) -> Result<SeatCallResult<T>, AgentError>
     where
         T: for<'de> Deserialize<'de>,
     {
         let mut traces = Vec::new();
         let prompt = prompt_config(seat);
+
+        // Search tool loop
+        if search_enabled {
+            if let Some(ref search_backend) = self.search {
+                return self
+                    .call_and_parse_with_search::<T>(
+                        session_id, seat, phase, &phase_input, cancel, progress, model_config, &prompt, search_backend,
+                    )
+                    .await;
+            }
+        }
+
         emit_progress(
             progress,
             "seat_started",
@@ -1117,7 +1342,7 @@ impl AgentRunner {
             emit_progress(
                 progress,
                 "seat_failed",
-                serde_json::json!({ "seat": seat, "phase": phase, "error": error.to_string() }),
+                serde_json::json!({ "seat": seat, "phase": phase, "duration_ms": first_duration_ms, "prompt_version": prompt.version, "error": error.to_string() }),
             )
             .await;
             traces.push(SeatRunTrace::failed_provider(
@@ -1136,7 +1361,7 @@ impl AgentRunner {
                 emit_progress(
                     progress,
                     "seat_completed",
-                    serde_json::json!({ "seat": seat, "phase": phase }),
+                    serde_json::json!({ "seat": seat, "phase": phase, "duration_ms": first_duration_ms, "prompt_version": prompt.version }),
                 )
                 .await;
                 traces.push(SeatRunTrace::completed(
@@ -1176,7 +1401,7 @@ impl AgentRunner {
                     emit_progress(
                         progress,
                         "seat_failed",
-                        serde_json::json!({ "seat": seat, "phase": phase, "error": error.to_string() }),
+                        serde_json::json!({ "seat": seat, "phase": phase, "duration_ms": repair_duration_ms, "prompt_version": prompt.version, "repair_attempted": true, "error": error.to_string() }),
                     )
                     .await;
                     traces.push(SeatRunTrace::failed_provider(
@@ -1201,7 +1426,7 @@ impl AgentRunner {
                         emit_progress(
                             progress,
                             "seat_completed",
-                            serde_json::json!({ "seat": seat, "phase": phase, "repair_attempted": true }),
+                            serde_json::json!({ "seat": seat, "phase": phase, "duration_ms": repair_duration_ms, "prompt_version": prompt.version, "repair_attempted": true }),
                         )
                         .await;
                         traces.push(SeatRunTrace::completed(
@@ -1225,7 +1450,7 @@ impl AgentRunner {
                         emit_progress(
                             progress,
                             "seat_failed",
-                            serde_json::json!({ "seat": seat, "phase": phase, "error": err.to_string(), "repair_attempted": true }),
+                            serde_json::json!({ "seat": seat, "phase": phase, "duration_ms": repair_duration_ms, "prompt_version": prompt.version, "repair_attempted": true, "error": err.to_string() }),
                         )
                         .await;
                         traces.push(SeatRunTrace::failed_parse(
@@ -1249,6 +1474,139 @@ impl AgentRunner {
                 }
             }
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn call_and_parse_with_search<T>(
+        &self,
+        session_id: Uuid,
+        seat: SeatKind,
+        phase: SessionPhase,
+        phase_input: &serde_json::Value,
+        cancel: &CancellationFlag,
+        progress: Option<&Arc<dyn ProgressSink>>,
+        model_config: Option<&HashMap<SeatKind, SeatModelConfig>>,
+        prompt: &SeatPrompt,
+        search: &Arc<dyn SearchBackend>,
+    ) -> Result<SeatCallResult<T>, AgentError>
+    where
+        T: for<'de> Deserialize<'de>,
+    {
+        let mut traces = Vec::new();
+        emit_progress(progress, "seat_started", serde_json::json!({ "seat": seat, "phase": phase })).await;
+
+        // Build system message with search tool instruction appended
+        let search_instruction = SEARCH_TOOL_INSTRUCTION;
+        let system_content = format!("{}{}", prompt.content, search_instruction);
+
+        // Build initial user message (phase input with schema)
+        let schema = phase_schema(phase);
+        let user_content = format!(
+            "请执行当前阶段并只返回合法 JSON。\n\n硬性输出规则：\n- 只输出一个 JSON object。\n- 不要输出 Markdown，不要使用 ```json 代码块。\n- 不要输出解释性文字。\n- 字段名必须与 schema 完全一致。\n- 缺少信息时使用空字符串、空数组或 0，不要省略 schema 字段。\n\n阶段：{phase:?}\n\n必须匹配的 JSON schema 示例：\n{schema}\n\n输入：{}",
+            serde_json::to_string(phase_input).unwrap_or_else(|_| "{}".into())
+        );
+
+        let mut messages = vec![
+            ChatMessage { role: "system".into(), content: system_content },
+            ChatMessage { role: "user".into(), content: user_content },
+        ];
+
+        let seat_model_config = model_config.and_then(|mc| mc.get(&seat));
+        let override_model = seat_model_config.and_then(|c| c.model.clone());
+        let reasoning_effort = seat_model_config.and_then(|c| c.reasoning_effort.clone());
+        let max_tokens = seat_model_config.and_then(|c| c.max_tokens).unwrap_or(prompt.max_tokens);
+
+        for round in 0..3 {
+            let request = LlmRequest {
+                session_id,
+                seat,
+                phase,
+                messages: messages.clone(),
+                repair_json: false,
+                max_tokens,
+                prompt_version: prompt.version.to_string(),
+                reasoning_effort: reasoning_effort.clone(),
+                override_model: override_model.clone(),
+            };
+            let (result, duration_ms) = self.call_provider(request, cancel).await;
+            let Ok(response) = result else {
+                if matches!(result, Err(ProviderError::Cancelled)) {
+                    return Err(AgentError::Cancelled);
+                }
+                let error = result.err().unwrap_or_else(unknown_provider_error);
+                emit_progress(progress, "seat_failed", serde_json::json!({ "seat": seat, "phase": phase, "duration_ms": duration_ms, "prompt_version": prompt.version, "error": error.to_string() })).await;
+                traces.push(SeatRunTrace::failed_provider(TraceContext::new(session_id, seat, phase, prompt, false, duration_ms), error));
+                return Ok(SeatCallResult { seat, parsed: None, traces });
+            };
+
+            // Check for search tool call
+            if round < 2 {
+                if let Some(query) = try_extract_search_tool(&response.content) {
+                    let results = search.search(&query, 5).await.unwrap_or_default();
+                    let results_text = format_search_results(&results, &query);
+                    messages.push(ChatMessage { role: "assistant".into(), content: response.content.clone() });
+                    messages.push(ChatMessage { role: "user".into(), content: results_text });
+                    continue;
+                }
+            }
+
+            // No more tool calls — try to parse as phase output
+            match parse_model_json::<T>(&response.content) {
+                Ok(parsed) => {
+                    emit_progress(progress, "seat_completed", serde_json::json!({ "seat": seat, "phase": phase, "duration_ms": duration_ms, "prompt_version": prompt.version })).await;
+                    traces.push(SeatRunTrace::completed(TraceContext::new(session_id, seat, phase, prompt, false, duration_ms), &response));
+                    return Ok(SeatCallResult { seat, parsed: Some(parsed), traces });
+                }
+                Err(parse_err) => {
+                    traces.push(SeatRunTrace::failed_parse(TraceContext::new(session_id, seat, phase, prompt, false, duration_ms), &response, parse_err.to_string()));
+                    // Try repair
+                    let repair_request = LlmRequest {
+                        session_id,
+                        seat,
+                        phase,
+                        messages: vec![
+                            ChatMessage { role: "system".into(), content: prompt.content.to_string() },
+                            ChatMessage { role: "user".into(), content: format!(
+                                "解析错误：{}\n上一轮原始输出：{}\n\n请只返回合法 JSON，schema 如下：\n{}",
+                                parse_err, response.content, schema
+                            )},
+                        ],
+                        repair_json: true,
+                        max_tokens,
+                        prompt_version: prompt.version.to_string(),
+                        reasoning_effort: reasoning_effort.clone(),
+                        override_model: override_model.clone(),
+                    };
+                    let (repair_result, repair_ms) = self.call_provider(repair_request, cancel).await;
+                    let Ok(repair_response) = repair_result else {
+                        if matches!(repair_result, Err(ProviderError::Cancelled)) {
+                            return Err(AgentError::Cancelled);
+                        }
+                        let err = repair_result.err().unwrap_or_else(unknown_provider_error);
+                        emit_progress(progress, "seat_failed", serde_json::json!({ "seat": seat, "phase": phase, "duration_ms": repair_ms, "prompt_version": prompt.version, "repair_attempted": true, "error": err.to_string() })).await;
+                        traces.push(SeatRunTrace::failed_provider(TraceContext::new(session_id, seat, phase, prompt, true, repair_ms), err));
+                        return Ok(SeatCallResult { seat, parsed: None, traces });
+                    };
+                    match parse_model_json::<T>(&repair_response.content) {
+                        Ok(parsed) => {
+                            emit_progress(progress, "seat_completed", serde_json::json!({ "seat": seat, "phase": phase, "duration_ms": repair_ms, "prompt_version": prompt.version, "repair_attempted": true })).await;
+                            traces.push(SeatRunTrace::completed(TraceContext::new(session_id, seat, phase, prompt, true, repair_ms), &repair_response));
+                            return Ok(SeatCallResult { seat, parsed: Some(parsed), traces });
+                        }
+                        Err(err) => {
+                            emit_progress(progress, "seat_failed", serde_json::json!({ "seat": seat, "phase": phase, "duration_ms": repair_ms, "prompt_version": prompt.version, "repair_attempted": true, "error": err.to_string() })).await;
+                            traces.push(SeatRunTrace::failed_parse(TraceContext::new(session_id, seat, phase, prompt, true, repair_ms), &repair_response, err.to_string()));
+                            return Ok(SeatCallResult { seat, parsed: None, traces });
+                        }
+                    }
+                }
+            }
+        }
+
+        // Exceeded max search rounds
+        let error = "exceeded maximum search rounds".to_string();
+        emit_progress(progress, "seat_failed", serde_json::json!({ "seat": seat, "phase": phase, "prompt_version": prompt.version, "error": error })).await;
+        Err(AgentError::Core(error))
     }
 
     async fn call_provider(
@@ -1334,6 +1692,28 @@ impl AgentRunner {
     }
 }
 
+const SEARCH_TOOL_INSTRUCTION: &str = "\n\n你可以搜索互联网来获取信息。如果需要搜索，输出 JSON：{\"tool\":\"search\",\"query\":\"你的搜索词\"}。收到搜索结果后，如果还需要搜索可以继续输出工具调用，否则输出你的阶段输出。";
+
+fn try_extract_search_tool(content: &str) -> Option<String> {
+    let val: serde_json::Value = serde_json::from_str(content.trim()).ok()?;
+    if val.get("tool")?.as_str()? != "search" {
+        return None;
+    }
+    let query = val.get("query")?.as_str()?;
+    let trimmed = query.trim();
+    if trimmed.is_empty() { None } else { Some(trimmed.to_string()) }
+}
+
+fn format_search_results(results: &[SearchResult], query: &str) -> String {
+    if results.is_empty() {
+        return format!("搜索 [{}] 无结果。如果需要换词搜索请继续输出工具调用。", query);
+    }
+    let lines: Vec<String> = results.iter().map(|r| {
+        format!("- {}\n  {}\n  {} ({})", r.title, r.snippet, r.url, r.source)
+    }).collect();
+    format!("搜索 [{}] 的结果：\n{}\n\n如果还需要搜索请输出工具调用 JSON，否则输出你的阶段输出。", query, lines.join("\n"))
+}
+
 fn phase_schema(phase: SessionPhase) -> &'static str {
     match phase {
         SessionPhase::IndependentDeliberation => {
@@ -1387,7 +1767,7 @@ fn phase_schema(phase: SessionPhase) -> &'static str {
             r#"{
   "votes": [
     {
-      "proposal_ref": "proposal_0",
+      "proposal_ref": "方策一",
       "value_score": 0,
       "novelty_score": 0,
       "feasibility_score": 0,
@@ -1430,15 +1810,19 @@ pub struct DiscussionArtifacts {
     pub events: Vec<String>,
     #[serde(default)]
     pub scribe_report: Option<ScribeReport>,
+    #[serde(default)]
+    pub topic_type: Option<TopicType>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScribeReport {
+    #[serde(default)]
     pub consensus_summary: String,
     #[serde(default)]
     pub structural_gaps: Vec<String>,
     #[serde(default)]
     pub unresolved_conflicts: Vec<String>,
+    #[serde(default)]
     pub final_report: String,
 }
 
@@ -1457,7 +1841,7 @@ pub struct DiscussionQualityMetrics {
 }
 
 impl DiscussionQualityMetrics {
-    fn calculate(artifacts: &DiscussionArtifacts) -> Self {
+    pub fn calculate(artifacts: &DiscussionArtifacts) -> Self {
         let completed_runs: Vec<_> = artifacts
             .seat_runs
             .iter()
@@ -1658,17 +2042,17 @@ pub fn system_prompt(seat: SeatKind) -> &'static str {
 fn prompt_config(seat: SeatKind) -> SeatPrompt {
     match seat {
         SeatKind::Mouyuan => SeatPrompt {
-            version: "mouyuan-v1",
+            version: "mouyuan-v2",
             content: include_str!("../prompts/mouyuan-v1.md"),
             max_tokens: 32_000,
         },
         SeatKind::Jingshi => SeatPrompt {
-            version: "jingshi-v1",
+            version: "jingshi-v2",
             content: include_str!("../prompts/jingshi-v1.md"),
             max_tokens: 32_000,
         },
         SeatKind::Chizheng => SeatPrompt {
-            version: "chizheng-v1",
+            version: "chizheng-v2",
             content: include_str!("../prompts/chizheng-v1.md"),
             max_tokens: 32_000,
         },
@@ -1996,6 +2380,113 @@ fn ratio_float(sum: f32, count: usize) -> f32 {
     if count == 0 { 0.0 } else { sum / count as f32 }
 }
 
+/// Parse a proposal reference string to a zero-based index.
+/// Supports both new Chinese format (方策一/二/三) and old format (proposal_0/1/2).
+fn parse_proposal_ref(ref_str: &str) -> usize {
+    match ref_str {
+        "方策一" | "方案一" | "proposal_0" => 0,
+        "方策二" | "方案二" | "proposal_1" => 1,
+        "方策三" | "方案三" | "proposal_2" => 2,
+        _ => ref_str
+            .trim_start_matches("proposal_")
+            .parse::<usize>()
+            .unwrap_or(0),
+    }
+}
+
+/// Clean a raw LLM response into a usable query string.
+/// Handles JSON {"query":"..."}, markdown code fences, and common prefixes.
+fn clean_search_query(raw: &str) -> String {
+    let s = raw.trim();
+    // Try direct JSON parse first
+    if let Some(q) = try_extract_json_query(s) {
+        return q;
+    }
+    // Strip common prefixes
+    let mut s = s;
+    if let Some(rest) = s.strip_prefix("关键词：") { s = rest; }
+    if let Some(rest) = s.strip_prefix("关键词:") { s = rest; }
+    if let Some(rest) = s.strip_prefix("Keywords:") { s = rest; }
+    if let Some(rest) = s.strip_prefix("keywords:") { s = rest; }
+    // Remove markdown code fences and try JSON again
+    let s = s
+        .trim_start_matches("```json")
+        .trim_start_matches("```")
+        .trim_end_matches("```")
+        .trim();
+    if let Some(q) = try_extract_json_query(s) {
+        return q;
+    }
+    // Take only the first line if multiple lines
+    let s = s.lines().next().unwrap_or(s).trim().to_string();
+    s
+}
+
+/// Try to extract the "query" field from a JSON value string.
+fn try_extract_json_query(s: &str) -> Option<String> {
+    let val: serde_json::Value = serde_json::from_str(s).ok()?;
+    let q = val.get("query")?.as_str()?;
+    let trimmed = q.trim();
+    if trimmed.is_empty() { None } else { Some(trimmed.to_string()) }
+}
+
+/// Check whether a query string is usable for search.
+/// Rejects single-char queries (including Chinese), empty strings, and whitespace-only strings.
+fn valid_search_query(query: &str) -> bool {
+    let non_ws_count = query.chars().filter(|c| !c.is_whitespace()).count();
+    non_ws_count >= 3
+}
+
+/// Extract a search-friendly query from a potentially long topic.
+/// Strips common Chinese question/reflection preambles, then takes first 50 chars.
+fn search_query(topic: &str) -> String {
+    const MAX: usize = 50;
+    let mut s = topic.trim();
+    let prefixes = [
+        "我正在考虑是否",
+        "我在考虑是否",
+        "我正在思考是否",
+        "我在思考是否",
+        "我正在考虑",
+        "我在考虑",
+        "我正在思考",
+        "我在思考",
+        "我想知道的是",
+        "我想知道",
+        "我想问的是",
+        "我想问",
+        "请问",
+        "是否应该",
+        "该不该",
+        "如何",
+    ];
+    for prefix in &prefixes {
+        if let Some(rest) = s.strip_prefix(prefix) {
+            s = rest.trim_start();
+            break;
+        }
+    }
+    // Take first MAX chars at a char boundary
+    let end = s
+        .char_indices()
+        .nth(MAX)
+        .map(|(i, _)| i)
+        .unwrap_or(s.len());
+    let result = if end == 0 {
+        // Prefix stripped everything; fall back to raw topic truncated
+        let raw_end = topic
+            .char_indices()
+            .nth(MAX)
+            .map(|(i, _)| i)
+            .unwrap_or(topic.len());
+        topic[..raw_end].trim().to_string()
+    } else {
+        s[..end].trim().to_string()
+    };
+    info!("search_query: fallback ({result}) ({} chars)", result.chars().count());
+    result
+}
+
 fn duplicate_rate(values: impl Iterator<Item = String>) -> f32 {
     let mut seen = HashSet::new();
     let mut total = 0usize;
@@ -2064,7 +2555,64 @@ fn parse_model_json<T>(content: &str) -> Result<T, serde_json::Error>
 where
     T: for<'de> Deserialize<'de>,
 {
-    serde_json::from_str(content).or_else(|_| serde_json::from_str(strip_markdown_json(content)))
+    let cleaned = clean_json_string(content);
+    serde_json::from_str(&cleaned)
+}
+
+/// Attempt to fix common LLM JSON issues: markdown fences, extra text, trailing commas,
+/// single quotes, truncated content.
+fn clean_json_string(raw: &str) -> String {
+    let s = strip_markdown_json(raw).trim().to_string();
+
+    // Try direct parse first
+    if serde_json::from_str::<serde_json::Value>(&s).is_ok() {
+        return s;
+    }
+
+    // Find the outermost JSON object ({...})
+    let Some(start) = s.find('{') else {
+        return s;
+    };
+    let tail = &s[start..];
+
+    // Find matching closing brace via brace counter
+    let mut depth = 0u32;
+    let end = tail
+        .char_indices()
+        .find(|&(_, c)| {
+            match c {
+                '{' => depth += 1,
+                '}' => depth = depth.saturating_sub(1),
+                _ => {}
+            }
+            depth == 0
+        })
+        .map(|(i, _)| i + 1)
+        .unwrap_or(tail.len());
+    let mut cleaned = tail[..end].to_string();
+
+    // Remove trailing commas before } or ] (do iteratively until stable)
+    loop {
+        let before = cleaned.clone();
+        cleaned = cleaned.replace(",\n}", "\n}").replace(",}", "}")
+            .replace(",\n]", "\n]").replace(",]", "]");
+        if cleaned == before { break; }
+    }
+
+    // If still invalid, try replacing single quotes with double quotes
+    if serde_json::from_str::<serde_json::Value>(&cleaned).is_err() && cleaned.contains('\'') {
+        let mut in_single = false;
+        let mut out = String::with_capacity(cleaned.len());
+        for ch in cleaned.chars() {
+            match ch {
+                '\'' => { in_single = !in_single; out.push('"'); }
+                _ => out.push(ch),
+            }
+        }
+        cleaned = out;
+    }
+
+    cleaned
 }
 
 fn strip_markdown_json(content: &str) -> &str {
@@ -2089,6 +2637,25 @@ where
         .into_iter()
         .filter_map(|value| Uuid::parse_str(value.trim()).ok())
         .collect())
+}
+
+/// Deserialize a string field that may be a JSON string, an array of strings (take first),
+/// or null/missing (default to empty string).
+fn deserialize_string_loose<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(match value {
+        serde_json::Value::String(s) => s,
+        serde_json::Value::Array(arr) => {
+            arr.first()
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .unwrap_or_default()
+        }
+        _ => String::new(),
+    })
 }
 
 fn deserialize_boolish<'de, D>(deserializer: D) -> Result<bool, D::Error>
@@ -2134,13 +2701,19 @@ struct IndependentOutput {
 
 #[derive(Debug, Deserialize)]
 struct RawIdea {
+    #[serde(default, deserialize_with = "deserialize_string_loose")]
     title: String,
+    #[serde(default, deserialize_with = "deserialize_string_loose")]
     summary: String,
+    #[serde(default, deserialize_with = "deserialize_string_loose")]
     value: String,
+    #[serde(default, deserialize_with = "deserialize_string_loose")]
     mechanism: String,
     #[serde(default)]
     unconventional: bool,
+    #[serde(default)]
     assumptions: Vec<String>,
+    #[serde(default)]
     risks: Vec<String>,
 }
 
@@ -2153,22 +2726,27 @@ struct CritiqueOutput {
 struct RawCritique {
     #[serde(alias = "seat")]
     target_seat: SeatKind,
+    #[serde(default, deserialize_with = "deserialize_string_loose")]
     strongest_point: String,
+    #[serde(default, deserialize_with = "deserialize_string_loose")]
     weakest_point: String,
+    #[serde(default, deserialize_with = "deserialize_string_loose")]
     hidden_assumption: String,
+    #[serde(default, deserialize_with = "deserialize_string_loose")]
     challenge: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string_loose")]
     counterexample: String,
+    #[serde(default, deserialize_with = "deserialize_string_loose")]
     suggested_improvement: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string_loose")]
     evidence_question: String,
 }
 
 #[derive(Debug, Deserialize)]
 struct ProposalOutput {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string_loose")]
     title: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string_loose")]
     summary: String,
     #[serde(default, deserialize_with = "deserialize_uuid_vec_lossy")]
     source_idea_ids: Vec<Uuid>,
@@ -2180,9 +2758,9 @@ struct ProposalOutput {
     rejection_reasons: Vec<String>,
     #[serde(default)]
     changes_from_initial: Vec<String>,
-    #[serde(default, alias = "value", alias = "user_benefit")]
+    #[serde(default, alias = "value", alias = "user_benefit", deserialize_with = "deserialize_string_loose")]
     user_value: String,
-    #[serde(default, alias = "implementation_plan", alias = "action_plan")]
+    #[serde(default, alias = "implementation_plan", alias = "action_plan", deserialize_with = "deserialize_string_loose")]
     implementation_path: String,
     #[serde(default)]
     risks: Vec<String>,
@@ -2199,27 +2777,27 @@ struct VoteOutput {
 
 #[derive(Debug, Deserialize)]
 struct RawVote {
-    #[serde(alias = "proposal_id", alias = "proposal", alias = "choice")]
+    #[serde(default, alias = "proposal_id", alias = "proposal", alias = "choice", deserialize_with = "deserialize_string_loose")]
     proposal_ref: String,
     #[serde(default)]
-    value_score: u8,
+    value_score: f32,
     #[serde(default)]
-    novelty_score: u8,
+    novelty_score: f32,
     #[serde(default)]
-    feasibility_score: u8,
+    feasibility_score: f32,
     #[serde(default)]
-    risk_score: u8,
+    risk_score: f32,
     #[serde(default)]
-    roi_score: u8,
+    roi_score: f32,
     #[serde(default, deserialize_with = "deserialize_boolish")]
     final_choice: bool,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string_loose")]
     reason: String,
     #[serde(default)]
     confidence: f32,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string_loose")]
     key_evidence: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string_loose")]
     blocking_issue: String,
 }
 
@@ -2302,6 +2880,7 @@ mod tests {
         runner(MockScenario::SuccessMajority)
             .run_session_with_progress(
                 Session::new("title", "topic", ""),
+                None,
                 CancellationFlag::default(),
                 Some(sink.clone()),
             )
@@ -2318,7 +2897,7 @@ mod tests {
     #[test]
     fn prompt_versions_are_seat_specific() {
         let prompts = SeatKind::ALL.map(prompt_config);
-        assert_eq!(prompts[0].version, "mouyuan-v1");
+        assert_eq!(prompts[0].version, "mouyuan-v2");
         assert_eq!(prompts[1].max_tokens, 32_000);
         assert!(prompts[2].content.contains("持正席"));
     }
@@ -2787,5 +3366,169 @@ mod tests {
         assert!(!report.consensus_summary.is_empty());
         assert!(!report.final_report.is_empty());
         assert!(artifacts.events.iter().any(|e| e == "scribe_completed"));
+    }
+
+    struct CapturingSearchBackend {
+        mock: MockSearchBackend,
+        captured: Arc<std::sync::Mutex<Option<String>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl SearchBackend for CapturingSearchBackend {
+        fn name(&self) -> &'static str {
+            "capturing"
+        }
+
+        async fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>, SearchError> {
+            {
+                let mut guard = self.captured.lock().unwrap();
+                *guard = Some(query.to_string());
+            }
+            self.mock.search(query, limit).await
+        }
+    }
+
+    #[tokio::test]
+    async fn search_passes_full_cjk_topic_as_query() {
+        let long_topic = "开缸半年了，一些sps和lps，60*45*45cm的背滤缸，3条小丑鱼（3cm），1条5cm蓝吊，1条4cm三角吊，一条5cm狐狸鱼，10只+的螺。蛋分/造浪都齐全，日出日落全光谱的led珊瑚灯（max100w），每2周换10%水，现在活石上没什么藻，但正面的玻璃上基本一周多就有绿藻长满，是顽固的那种要刮藻刀才刮的下来，是否水质不稳定？";
+
+        let captured = Arc::new(std::sync::Mutex::new(None));
+        let search_backend = CapturingSearchBackend {
+            mock: MockSearchBackend::new(),
+            captured: captured.clone(),
+        };
+
+        let mut session = Session::new("CJK search test", long_topic, "");
+        session.search_enabled = true;
+
+        AgentRunner::new(Arc::new(MockProvider::new(MockScenario::SuccessMajority)))
+            .with_search(Arc::new(search_backend))
+            .run_session(session, CancellationFlag::default())
+            .await
+            .unwrap();
+
+        let captured_query = captured.lock().unwrap().take();
+        assert!(
+            captured_query.is_some(),
+            "search backend was never called"
+        );
+        let query = captured_query.unwrap();
+        // The mock returns {"query":"鱼缸 水质 褐藻"} for search-keywords-v1.
+        // After clean_search_query, the query should be "鱼缸 水质 褐藻".
+        assert!(
+            query.len() < long_topic.len(),
+            "extracted query should be shorter than full topic.\nTopic ({} bytes): {}\nQuery ({} bytes): {}",
+            long_topic.len(), long_topic,
+            query.len(), query
+        );
+        assert!(
+            query.contains("鱼缸"),
+            "query should contain extracted keywords, got: {query}"
+        );
+    }
+
+    #[tokio::test]
+    async fn search_query_extracts_first_sentence_from_very_long_topic() {
+        // Build a topic well over 200 Unicode chars to ensure keyword extraction is required
+        let long_base = "开缸半年了，一些sps和lps，60*45*45cm的背滤缸。";
+        let padding: String = std::iter::repeat("这是一个非常长的重复填充文本，目的是让整个话题超过两百个Unicode字符的限制以确保搜索查询被截断。").take(5).collect();
+        let very_long = format!("{long_base}{padding}");
+        assert!(very_long.chars().count() > 200, "test topic must exceed 200 chars");
+
+        let captured = Arc::new(std::sync::Mutex::new(None));
+        let search_backend = CapturingSearchBackend {
+            mock: MockSearchBackend::new(),
+            captured: captured.clone(),
+        };
+
+        let mut session = Session::new("very long topic", &very_long, "");
+        session.search_enabled = true;
+
+        AgentRunner::new(Arc::new(MockProvider::new(MockScenario::SuccessMajority)))
+            .with_search(Arc::new(search_backend))
+            .run_session(session, CancellationFlag::default())
+            .await
+            .unwrap();
+
+        let captured_query = captured.lock().unwrap().take();
+        assert!(captured_query.is_some(), "search should have been called");
+        let query = captured_query.unwrap();
+        // Mock returns {"query":"鱼缸 水质 褐藻"} for search-keywords-v1.
+        // Verify extracted query is shorter than full topic and contains keywords.
+        assert!(
+            query.len() < very_long.len(),
+            "extracted query should be shorter than full topic: query={} bytes vs topic={} bytes",
+            query.len(), very_long.len()
+        );
+        assert!(
+            query.contains("鱼缸"),
+            "query should contain extracted keywords, got: {query}"
+        );
+    }
+
+    #[test]
+    fn clean_search_query_parses_json() {
+        let result = clean_search_query(r#"{"query":"鱼缸 水质 褐藻"}"#);
+        assert_eq!(result, "鱼缸 水质 褐藻");
+    }
+
+    #[test]
+    fn clean_search_query_parses_json_with_spaces() {
+        let result = clean_search_query(r#"{"query": "鱼缸 水质 褐藻"}"#);
+        assert_eq!(result, "鱼缸 水质 褐藻");
+    }
+
+    #[test]
+    fn clean_search_query_strips_prefix() {
+        let result = clean_search_query("关键词：鱼缸 水质");
+        assert_eq!(result, "鱼缸 水质");
+    }
+
+    #[test]
+    fn clean_search_query_strips_markdown_fence() {
+        let result = clean_search_query("```json\n{\"query\": \"鱼缸 水质\"}\n```");
+        assert_eq!(result, "鱼缸 水质");
+    }
+
+    #[test]
+    fn clean_search_query_takes_first_line() {
+        let result = clean_search_query("鱼缸 水质\n褐藻 造浪");
+        assert_eq!(result, "鱼缸 水质");
+    }
+
+    #[test]
+    fn clean_search_query_fallback_to_plain_text() {
+        let result = clean_search_query("鱼缸 水质 褐藻");
+        assert_eq!(result, "鱼缸 水质 褐藻");
+    }
+
+    #[test]
+    fn valid_search_query_rejects_single_chinese_char() {
+        assert!(!valid_search_query("鱼"));
+    }
+
+    #[test]
+    fn valid_search_query_rejects_two_chinese_chars() {
+        assert!(!valid_search_query("鱼缸"));
+    }
+
+    #[test]
+    fn valid_search_query_accepts_three_chinese_chars() {
+        assert!(valid_search_query("鱼缸水"));
+    }
+
+    #[test]
+    fn valid_search_query_accepts_chinese_with_spaces() {
+        assert!(valid_search_query("鱼缸 水质"));
+    }
+
+    #[test]
+    fn valid_search_query_rejects_empty() {
+        assert!(!valid_search_query(""));
+    }
+
+    #[test]
+    fn valid_search_query_rejects_whitespace_only() {
+        assert!(!valid_search_query("   "));
     }
 }

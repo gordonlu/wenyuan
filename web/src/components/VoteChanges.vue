@@ -6,7 +6,7 @@
         <h3>第一轮（原始策案）</h3>
         <div v-for="(round, ri) in roundVotes" :key="ri" class="vote-block">
           <p v-for="v in round.first" :key="v.voter" class="vote-row">
-            <span class="tag">{{ seatLabels[v.voter] }}</span>
+            <span :class="['seat-tag', v.voter]">{{ seatLabels[v.voter] }}</span>
             <span :class="['badge', v.final_choice ? 'ok' : 'warn']">{{ v.final_choice ? '支持' : '反对' }}</span>
             <span class="sep">{{ proposalTitle(v.proposal_id) }}</span>
           </p>
@@ -16,7 +16,7 @@
         <h3>第二轮（含合案）</h3>
         <div v-for="(round, ri) in roundVotes" :key="ri" class="vote-block">
           <p v-for="v in round.second" :key="v.voter" class="vote-row">
-            <span class="tag">{{ seatLabels[v.voter] }}</span>
+            <span :class="['seat-tag', v.voter]">{{ seatLabels[v.voter] }}</span>
             <span :class="['badge', v.final_choice ? 'ok' : 'warn']">{{ v.final_choice ? '支持' : '反对' }}</span>
             <span class="sep">{{ proposalTitle(v.proposal_id) }}</span>
           </p>
@@ -53,7 +53,7 @@ const roundVotes = computed(() => {
 const hasTwoRounds = computed(() => roundVotes.value.length > 0 && roundVotes.value[0].second.length > 0)
 
 function proposalTitle(id: string) {
-  return props.proposals.find((p) => p.id === id)?.title ?? id.slice(0, 8)
+  return props.proposals.find((p) => p.id === id)?.title ?? '未知策案'
 }
 </script>
 
@@ -65,4 +65,14 @@ function proposalTitle(id: string) {
 .vote-row { display: flex; align-items: center; gap: 8px; font-size: 13px; }
 .tag { background: var(--color-bg-dim); border: 1px solid var(--color-border); border-radius: 4px; padding: 1px 8px; font-size: 12px; white-space: nowrap; }
 .sep { color: var(--color-text); }
+.seat-tag {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 5px;
+  font-size: 12px;
+  font-weight: 600;
+}
+.seat-tag.mouyuan { background: #e2eef9; color: #1a5a8c; }
+.seat-tag.jingshi { background: #f0e6d3; color: #7a5a2e; }
+.seat-tag.chizheng { background: #f5e8e8; color: #8c3a3a; }
 </style>

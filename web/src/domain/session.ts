@@ -170,6 +170,7 @@ export interface DiscussionArtifacts {
   }>
   events: string[]
   scribe_report?: ScribeReport | null
+  topic_type?: string | null
   tool_runs?: ToolRun[]
 }
 
@@ -285,6 +286,32 @@ export interface CodeSearchResponse {
   tool_run: ToolRun
 }
 
+export interface SearchResultItem {
+  title: string
+  snippet: string
+  url: string
+  source: string
+}
+
+export interface SearchTestStep {
+  prompt: string
+  raw_response: string
+  extracted: string
+  note: string
+}
+
+export interface BackendResult {
+  name: string
+  results: SearchResultItem[]
+  error: string | null
+}
+
+export interface SearchTestResponse {
+  keyword_step: SearchTestStep
+  search_query: string
+  backends: BackendResult[]
+}
+
 export interface ToolRun {
   id: string
   seat?: SeatKind | null
@@ -322,6 +349,7 @@ export interface ConfigStatus {
   seat_models: Record<string, string>
   database_url: string
   version: string
+  search_provider: string
   available_models: Array<{ value: string; label: string }>
   seat_available_models: Record<string, Array<{ value: string; label: string }>>
 }
@@ -530,7 +558,7 @@ export function qualityMetricRows(metrics?: DiscussionQualityMetrics, hasUsage =
     { label: '票数集中度', value: formatPercent(safe.vote_concentration) },
     { label: '少数留议率', value: formatPercent(safe.minority_retention_rate) },
     { label: '平均 token', value: hasUsage ? String(Math.round(safe.average_tokens)) : '暂无' },
-    { label: '平均耗时', value: `${Math.round(safe.average_duration_ms)} ms` },
+    { label: '平均耗时', value: `${(safe.average_duration_ms / 1000).toFixed(1)} 秒` },
   ]
 }
 
@@ -699,7 +727,7 @@ export function exportSessionMarkdown(details: SessionDetails, level: 'brief' | 
     if (details.artifacts.claims?.length) {
       lines.push('', '## 主张池（Audit）', '')
       for (const claim of details.artifacts.claims) {
-        lines.push(`- ${claim.proposed_by}：${markdownText(claim.content)}${claim.is_supported ? ' ✅' : ' ❌'}`)
+        lines.push(`- ${seatLabels[claim.proposed_by as SeatKind] || claim.proposed_by}：${markdownText(claim.content)}${claim.is_supported ? ' ✅' : ' ❌'}`)
       }
     }
     if (details.artifacts.evidence?.length) {
@@ -715,7 +743,7 @@ export function exportSessionMarkdown(details: SessionDetails, level: 'brief' | 
     if (details.artifacts.tool_runs?.length) {
       lines.push('', '## 工具轨迹（Audit）', '')
       for (const run of details.artifacts.tool_runs) {
-        lines.push(`- ${run.tool_name}：${run.status}，${run.duration_ms} ms，${run.evidence_ids?.length ?? 0} 条证据`)
+        lines.push(`- ${run.tool_name}：${run.status}，${(run.duration_ms / 1000).toFixed(1)} 秒，${run.evidence_ids?.length ?? 0} 条证据`)
         lines.push(`  - 输入：${markdownText(run.input_summary)}`)
         if (run.error) lines.push(`  - 错误：${markdownText(run.error)}`)
       }

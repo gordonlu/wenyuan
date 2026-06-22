@@ -7,8 +7,11 @@ use uuid::Uuid;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SeatKind {
+    #[serde(alias = "谋远席")]
     Mouyuan,
+    #[serde(alias = "经世席")]
     Jingshi,
+    #[serde(alias = "持正席")]
     Chizheng,
 }
 
@@ -31,6 +34,110 @@ pub enum DeliberationMode {
     #[default]
     ThreeSeat,
     SingleAgent,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TopicType {
+    PersonalLife,
+    Consumer,
+    Legal,
+    Academic,
+    Medical,
+    Financial,
+    Technical,
+    Product,
+    Strategy,
+}
+
+impl TopicType {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::PersonalLife => "生活决策",
+            Self::Consumer => "消费决策",
+            Self::Legal => "法律问题",
+            Self::Academic => "学术问题",
+            Self::Medical => "医疗健康",
+            Self::Financial => "财务投资",
+            Self::Technical => "技术产品",
+            Self::Product => "产品战略",
+            Self::Strategy => "企业战略",
+        }
+    }
+
+    pub fn domain_rules(self) -> Vec<&'static str> {
+        match self {
+            Self::PersonalLife => vec![
+                "议题为个人生活决策，聚焦切身因素和具体选项。",
+                "避免使用企业管理框架和术语（漏斗、OKR、KPI、MVP、TCO等）。",
+                "方案应轻量、可执行，不需要过度结构化分析。",
+            ],
+            Self::Consumer => vec![
+                "议题为消费决策，聚焦预算、使用频率、替代方案和长期成本。",
+                "避免使用企业管理框架和术语。",
+                "建议应具体、可操作，基于实际使用场景。",
+            ],
+            Self::Legal => vec![
+                "议题涉及法律问题。以下规则适用：",
+                "- 必须先识别适用的国家、地区、管辖地和时间背景。",
+                "- 管辖地不明确时，必须把确认管辖地列为关键未决问题。",
+                "- 不得声称提供正式法律意见。",
+                "- 不得编造法条、案例、监管规则或具体处罚标准。",
+                "- 不确定的法律点必须标记为需律师确认或需查证。",
+                "- 必须区分：已知事实、待确认事实、可能涉及的法律问题、风险等级、可采取的低风险行动、需要专业律师介入的情形。",
+                "- 不得直接建议用户起诉、签署、付款、承认责任、销毁材料或公开指控。",
+                "- 对高风险行动，优先建议保留证据、停止扩大损失、咨询当地专业律师。",
+                "- 持正席在识别法律风险、证据风险和管辖地不明方面承担主要责任。",
+            ],
+            Self::Academic => vec![
+                "议题为学术问题。以下规则适用：",
+                "- 必须先明确核心概念和问题边界。",
+                "- 必须区分事实、理论解释、学派观点和个人推断。",
+                "- 不得编造论文、作者、年份、DOI、数据集或引用。",
+                "- 没有来源时不得假装有来源。",
+                "- 必须指出需要查证的关键文献或数据。",
+                "- 争议问题必须呈现至少两种主要解释路径。",
+                "- 研究设计问题必须说明样本、方法、变量、偏差和局限。",
+                "- 历史或社会科学问题必须避免单因果解释。",
+                "- 自然科学问题必须说明证据等级、实验条件和可重复性。",
+            ],
+            Self::Medical => vec![
+                "议题涉及医疗健康问题。以下规则适用：",
+                "- 必须明确声明AI不能提供专业医疗诊断或治疗方案。",
+                "- 所有建议必须优先考虑安全风险。",
+                "- 必须建议用户咨询持证专业医生。",
+                "- 不得编造药品剂量、治疗方案、临床试验数据或医学指南。",
+                "- 必须区分：已知医学共识、待确认的个体情况、需要专业医生判断的情形。",
+            ],
+            Self::Financial => vec![
+                "议题涉及财务投资问题。以下规则适用：",
+                "- 必须评估和声明风险承受能力的重要性。",
+                "- 不得直接推荐购买或出售具体金融产品。",
+                "- 必须区分：事实信息、市场观点、风险评估和行动建议。",
+                "- 投资建议应基于分散风险和长期视角。",
+                "- 必须建议用户咨询持牌财务顾问。",
+            ],
+            Self::Technical => vec![
+                "议题为技术或产品问题，可以使用完整分析框架。",
+            ],
+            Self::Product => vec![
+                "议题为产品战略问题，可以使用完整的产品分析框架。",
+            ],
+            Self::Strategy => vec![
+                "议题为企业战略问题，可以使用完整的战略分析框架和术语。",
+            ],
+        }
+    }
+
+    pub fn classification_prompt() -> &'static str {
+        "识别以下议题所属类型，只输出一个类型名称，不要解释。\n\n可选类型：personal_life consumer legal academic medical financial technical product strategy"
+    }
+}
+
+impl std::fmt::Display for TopicType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.label())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -111,6 +218,7 @@ pub struct Session {
     pub title: String,
     pub topic: String,
     pub context: String,
+    #[serde(default)]
     pub mode: DeliberationMode,
     pub phase: SessionPhase,
     pub created_at: DateTime<Utc>,
@@ -120,7 +228,9 @@ pub struct Session {
     pub convergence_used: bool,
     pub model_config: Option<HashMap<SeatKind, SeatModelConfig>>,
     pub vote_policy: Option<VotePolicy>,
+    #[serde(default)]
     pub scribe_enabled: bool,
+    #[serde(default)]
     pub search_enabled: bool,
     #[serde(default)]
     pub external_evidence: Vec<Evidence>,

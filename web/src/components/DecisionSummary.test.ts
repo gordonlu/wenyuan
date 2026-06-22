@@ -18,9 +18,9 @@ const decision: Decision = {
   vote_count: 3,
   majority_reasons: ['更容易落地'],
   minority_opinion: ['需要关注风险'],
-  adoption_conditions: [],
-  unresolved_questions: [],
-  next_steps: [],
+  adoption_conditions: ['先完成单元测试'],
+  unresolved_questions: ['如何评估效果？'],
+  next_steps: ['部署到 staging'],
   self_vote_count: 1,
 }
 
@@ -29,6 +29,7 @@ describe('DecisionSummary', () => {
     const wrapper = mount(DecisionSummary, { props: { decision } })
     expect(wrapper.text()).toContain('形成多数')
     expect(wrapper.text()).toContain('更容易落地')
-    expect(wrapper.text()).toContain('需要关注风险')
+    expect(wrapper.text()).toContain('行动清单')
+    expect(wrapper.text()).toContain('需要注意')
   })
 })

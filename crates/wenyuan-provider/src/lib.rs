@@ -186,10 +186,15 @@ impl LlmProvider for OpenAiCompatibleProvider {
                 message,
             });
         }
-        let payload = response
-            .json::<OpenAiResponse>()
+        let body_bytes = response
+            .bytes()
             .await
-            .map_err(|err| ProviderError::InvalidResponse(err.to_string()))?;
+            .map_err(|err| ProviderError::InvalidResponse(format!("read body failed: {err}")))?;
+        if body_bytes.is_empty() {
+            return Err(ProviderError::InvalidResponse("upstream returned empty body".into()));
+        }
+        let payload: OpenAiResponse = serde_json::from_slice(&body_bytes)
+            .map_err(|err| ProviderError::InvalidResponse(format!("parse failed: {err}")))?;
         let content = payload
             .choices
             .into_iter()
@@ -257,6 +262,9 @@ impl MockProvider {
     fn content_for(&self, request: &LlmRequest) -> String {
         if request.prompt_version == "scribe-v1" {
             return scribe_json();
+        }
+        if request.prompt_version == "search-keywords-v1" && request.phase == SessionPhase::Draft {
+            return r#"{"query":"鱼缸 水质 褐藻"}"#.to_string();
         }
         match request.phase {
             SessionPhase::IndependentDeliberation => independent_json(request.seat),
@@ -433,8 +441,8 @@ fn scribe_json() -> String {
 
 pub mod search;
 pub use search::{
-    BingBackend, CustomSearchBackend, DoubaoBackend, DuckDuckGoBackend, GoogleCustomSearchBackend,
-    SearXNGSearchBackend, SearchPool, TavilyBackend, WikipediaBackend,
+    CustomSearchBackend, DoubaoBackend, GoogleCustomSearchBackend,
+    SearXNGSearchBackend, SearchPool, TavilyBackend,
 };
 
 #[cfg(test)]

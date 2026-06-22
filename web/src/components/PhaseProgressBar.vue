@@ -27,12 +27,12 @@ const props = defineProps<{
 }>()
 
 const steps = [
-  { phase: 'draft' as SessionPhase, label: '待陈策', icon: '①' },
-  { phase: 'independent_deliberation' as SessionPhase, label: '独议', icon: '②' },
-  { phase: 'cross_critique' as SessionPhase, label: '批议', icon: '③' },
-  { phase: 'revision' as SessionPhase, label: '复议', icon: '④' },
-  { phase: 'voting' as SessionPhase, label: '阁议', icon: '⑤' },
-  { phase: 'convergence' as SessionPhase, label: '合案', icon: '⑥' },
+  { phase: 'draft' as SessionPhase, label: '待陈策', icon: '1' },
+  { phase: 'independent_deliberation' as SessionPhase, label: '独议', icon: '2' },
+  { phase: 'cross_critique' as SessionPhase, label: '批议', icon: '3' },
+  { phase: 'revision' as SessionPhase, label: '复议', icon: '4' },
+  { phase: 'voting' as SessionPhase, label: '阁议', icon: '5' },
+  { phase: 'convergence' as SessionPhase, label: '合案', icon: '6' },
   { phase: 'completed' as SessionPhase, label: '完成', icon: '✓' },
 ]
 

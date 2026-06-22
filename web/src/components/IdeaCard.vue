@@ -76,5 +76,8 @@ function statusLabel(key?: string) {
 }
 .idea-tags .badge {
   font-size: 11px;
+  white-space: normal;
+  max-width: 100%;
+  overflow-wrap: break-word;
 }
 </style>

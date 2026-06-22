@@ -1,7 +1,7 @@
 <template>
   <section class="panel" v-if="proposals.length">
     <h2>策案对比</h2>
-    <div class="compare-grid">
+    <div class="compare-grid" :style="{ '--col-count': proposals.length }">
       <div class="compare-header">维度</div>
       <template v-for="proposal in proposals" :key="proposal.id">
         <div class="compare-header seat-col">
@@ -72,7 +72,7 @@ function seatLabel(key: string) {
 <style scoped>
 .compare-grid {
   display: grid;
-  grid-template-columns: 100px repeat(auto-fit, minmax(200px, 1fr));
+  grid-template-columns: 100px repeat(var(--col-count), 1fr);
   gap: 1px;
   background: #d8dfd9;
   border: 1px solid var(--color-border);
@@ -81,9 +81,7 @@ function seatLabel(key: string) {
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.62);
 }
 .compare-header {
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.88), rgba(238, 243, 239, 0.88)),
-    #eef3ef;
+  background: #f3f6f2;
   padding: 12px;
   font-weight: 600;
   font-size: 13px;
@@ -104,14 +102,10 @@ function seatLabel(key: string) {
   white-space: nowrap;
 }
 .compare-cell {
-  background: rgba(255, 255, 255, 0.72);
+  background: #fff;
   padding: 10px 12px;
   font-size: 13px;
   line-height: 1.5;
   color: var(--color-text);
-}
-
-.compare-cell:nth-child(odd) {
-  background: rgba(250, 252, 249, 0.78);
 }
 </style>

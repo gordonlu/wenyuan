@@ -24,6 +24,10 @@
           <Settings :size="17" />
           <span>配置状态</span>
         </RouterLink>
+        <RouterLink to="/search-test">
+          <Search :size="17" />
+          <span>搜索测试</span>
+        </RouterLink>
       </nav>
     </aside>
     <main class="main">
@@ -33,5 +37,5 @@
 </template>
 
 <script setup lang="ts">
-import { History, Library, PlusCircle, Settings } from '@lucide/vue'
+import { History, Library, PlusCircle, Search, Settings } from '@lucide/vue'
 </script>

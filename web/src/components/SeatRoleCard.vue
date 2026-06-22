@@ -1,6 +1,6 @@
 <template>
   <article
-    :class="['seat-role-card', profile.className, statusClass, { 'report-mode': reportMode, 'is-running': isRunning, 'is-active': isActive }]"
+    :class="['seat-role-card', profile.className, statusClass, { 'report-mode': reportMode, 'is-running': isRunning, 'is-active': isActive, 'is-inactive': inactive }]"
     :style="cardStyle"
     :aria-busy="isRunning"
     role="region"
@@ -29,7 +29,7 @@
     <dl v-if="!reportMode" class="role-metrics">
       <div>
         <dt>模型</dt>
-        <dd>{{ providerRef || '默认配置' }}</dd>
+        <dd>{{ modelName(providerRef) }}</dd>
       </div>
       <div>
         <dt>调用</dt>
@@ -37,7 +37,7 @@
       </div>
       <div>
         <dt>耗时</dt>
-        <dd>{{ stats.durationMs }} ms</dd>
+        <dd>{{ (stats.durationMs / 1000).toFixed(1) }} 秒</dd>
       </div>
       <div>
         <dt>失败</dt>
@@ -52,16 +52,12 @@
       </div>
       <div>
         <dt>耗时</dt>
-        <dd>{{ stats.durationMs }} ms</dd>
+        <dd>{{ (stats.durationMs / 1000).toFixed(1) }} 秒</dd>
       </div>
     </dl>
 
     <div v-if="!reportMode" class="role-foot">
       <span class="prompt-version">{{ stats.promptVersions || '暂无 Prompt 版本' }}</span>
-      <button v-if="stats.failed > 0 && !running" class="stat-action" @click="$emit('retry', seat)">
-        <RotateCw :size="14" />
-        重试
-      </button>
     </div>
   </article>
 </template>
@@ -88,13 +84,21 @@ const props = withDefaults(defineProps<{
   runs?: SeatRunTrace[]
   providerRef?: string
   reportMode?: boolean
+  inactive?: boolean
 }>(), {
   events: () => [],
   running: false,
   runs: () => [],
   providerRef: '',
   reportMode: false,
+  inactive: false,
 })
+
+function modelName(ref: string) {
+  if (!ref) return '默认配置'
+  const stripped = ref.replace(/^(openai-compatible[=:]|openai[:=])/i, '')
+  return stripped || ref
+}
 
 const cardStyle = ref<Record<string, string>>({
   '--pointer-x': '76%',
@@ -103,9 +107,7 @@ const cardStyle = ref<Record<string, string>>({
   '--tilt-y': '0deg',
 })
 
-defineEmits<{
-  retry: [seat: SeatKind]
-}>()
+
 
 const profiles: Record<SeatKind, { kicker: string; summary: string; className: string; inkUrl: string }> = {
   mouyuan: {
@@ -530,5 +532,17 @@ function resetPointer() {
   .seat-role-card {
     transform: none;
   }
+}
+
+.seat-role-card.is-inactive {
+  opacity: 0.45;
+  filter: grayscale(0.86);
+  pointer-events: none;
+}
+.seat-role-card.is-inactive .holo-layer {
+  opacity: 0 !important;
+}
+.seat-role-card.is-inactive .ink-name {
+  opacity: 0.15;
 }
 </style>

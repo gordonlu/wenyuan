@@ -22,6 +22,13 @@
       <dd>{{ config.database_url }}</dd>
       <dt>服务版本</dt>
       <dd>{{ config.version }}</dd>
+      <dt>搜索 Provider</dt>
+      <dd>
+        {{ config.search_provider || '未配置' }}
+        <p v-if="config.search_provider?.includes('bing') || config.search_provider?.includes('duckduckgo')" class="search-warning">
+          ⚠ bing/duckduckgo 仅供本地实验。生产环境请配置 authorized search provider（custom / tavily / doubao / google / searxng）。
+        </p>
+      </dd>
     </dl>
 
     <form v-if="preferences" class="form-panel preferences-panel" @submit.prevent="savePreferences">
@@ -173,5 +180,11 @@ async function savePreferences() {
 .toggle-row input {
   width: 18px;
   height: 18px;
+}
+.search-warning {
+  font-size: 12px;
+  color: var(--color-warning, #b8860b);
+  margin: 4px 0 0;
+  line-height: 1.4;
 }
 </style>

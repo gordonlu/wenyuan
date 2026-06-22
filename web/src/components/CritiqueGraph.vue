@@ -22,7 +22,7 @@
         <h3>创意 → 策案引用</h3>
         <div class="ref-list">
           <p v-for="item in ideaProposalLinks" :key="item.ideaId" class="ref-row">
-            <span class="tag">{{ seatLabels[item.seat] }}</span>
+            <span :class="['seat-tag', item.seat]">{{ seatLabels[item.seat] }}</span>
             <span class="sep">「{{ item.ideaTitle }}」</span>
             <span class="arrow">→</span>
             <span class="sep">「{{ item.proposalTitle }}」</span>
@@ -108,6 +108,16 @@ const critiquesWithEvidence = computed(() => {
 .ref-list { display: flex; flex-direction: column; gap: 6px; }
 .ref-row { display: flex; align-items: center; gap: 6px; font-size: 13px; flex-wrap: wrap; }
 .tag { background: var(--color-bg-dim); border: 1px solid var(--color-border); border-radius: 4px; padding: 1px 8px; font-size: 12px; white-space: nowrap; }
+.seat-tag {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 5px;
+  font-size: 12px;
+  font-weight: 600;
+}
+.seat-tag.mouyuan { background: #e2eef9; color: #1a5a8c; }
+.seat-tag.jingshi { background: #f0e6d3; color: #7a5a2e; }
+.seat-tag.chizheng { background: #f5e8e8; color: #8c3a3a; }
 .arrow { color: var(--color-text-muted); margin: 0 2px; }
 .sep { color: var(--color-text); }
 </style>
