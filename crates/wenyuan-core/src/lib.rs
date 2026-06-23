@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -945,6 +946,52 @@ pub struct SearchResult {
 pub trait SearchBackend: Send + Sync {
     fn name(&self) -> &'static str;
     async fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchResult>, SearchError>;
+}
+
+/// A wrapper that never prints the secret via Debug.
+#[derive(Clone, Serialize)]
+pub struct SecretString(String);
+
+impl SecretString {
+    pub fn new(value: String) -> Self {
+        Self(value)
+    }
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+    pub fn hint(&self) -> String {
+        mask_api_key(&self.0)
+    }
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl fmt::Debug for SecretString {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("SecretString(**redacted**)")
+    }
+}
+
+impl<'de> Deserialize<'de> for SecretString {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        Ok(Self(s))
+    }
+}
+
+/// Mask an API key for safe logging: `sk-...abcd`.
+pub fn mask_api_key(key: &str) -> String {
+    let chars: Vec<char> = key.trim().chars().collect();
+    if chars.len() <= 8 {
+        return "****".to_string();
+    }
+    let prefix: String = chars.iter().take(3).collect();
+    let suffix: String = chars.iter().rev().take(4).collect::<Vec<_>>().into_iter().rev().collect();
+    format!("{prefix}...{suffix}")
 }
 
 #[cfg(test)]
