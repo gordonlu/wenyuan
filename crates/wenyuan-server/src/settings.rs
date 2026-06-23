@@ -1,7 +1,6 @@
 use axum::{Json, Router, extract::State, routing::{get, post}};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use std::sync::Arc;
 use tracing::info;
 use wenyuan_core::{SecretString, mask_api_key};
 
