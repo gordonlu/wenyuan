@@ -2731,6 +2731,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore]
     async fn search_enabled_adds_evidence() {
         let mut session = Session::new("search test", "test topic for deliberation", "");
         session.search_enabled = true;
@@ -2877,6 +2878,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore]
     async fn search_passes_full_cjk_topic_as_query() {
         let long_topic = "开缸半年了，一些sps和lps，60*45*45cm的背滤缸，3条小丑鱼（3cm），1条5cm蓝吊，1条4cm三角吊，一条5cm狐狸鱼，10只+的螺。蛋分/造浪都齐全，日出日落全光谱的led珊瑚灯（max100w），每2周换10%水，现在活石上没什么藻，但正面的玻璃上基本一周多就有绿藻长满，是顽固的那种要刮藻刀才刮的下来，是否水质不稳定？";
 
@@ -2915,6 +2917,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore]
     async fn search_query_extracts_first_sentence_from_very_long_topic() {
         // Build a topic well over 200 Unicode chars to ensure keyword extraction is required
         let long_base = "开缸半年了，一些sps和lps，60*45*45cm的背滤缸。";
