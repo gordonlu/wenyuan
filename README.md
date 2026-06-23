@@ -5,6 +5,7 @@
 [![Rust](https://img.shields.io/badge/Rust-2024-dea584?logo=rust)](https://www.rust-lang.org)
 [![Vue](https://img.shields.io/badge/Vue-3-4FC08D?logo=vue.js)](https://vuejs.org)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5-3178C6?logo=typescript)](https://www.typescriptlang.org)
+[![Tauri](https://img.shields.io/badge/Tauri-2-FFC131?logo=tauri)](https://tauri.app)
 
 文渊阁是一个本地运行的 AI 合议工作台。它把同一个问题交给三个不同立场的席位分别思考、互相批议、修订方案，并通过投票形成最终结论。
 
