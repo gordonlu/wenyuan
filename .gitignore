@@ -16,3 +16,5 @@ Agents.md
 /.agents/
 /.opencode/
 review.md
+/desktop/node_modules/
+/desktop/src-tauri/gen/
