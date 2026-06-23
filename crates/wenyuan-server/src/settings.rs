@@ -272,8 +272,13 @@ async fn test_provider(
     }
 }
 
+async fn get_local_token(State(state): State<AppState>) -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "token": state.local_token }))
+}
+
 pub fn settings_routes() -> Router<AppState> {
     Router::new()
         .route("/api/settings/provider", get(get_provider_settings).post(update_provider_settings))
         .route("/api/settings/test-provider", post(test_provider))
+        .route("/api/settings/local-token", get(get_local_token))
 }

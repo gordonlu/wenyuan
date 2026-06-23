@@ -55,6 +55,7 @@ async fn main() -> anyhow::Result<()> {
                 .map(PathBuf::from)
                 .unwrap_or_else(|_| PathBuf::from(".")),
         )),
+        local_token: uuid::Uuid::new_v4().to_string(),
     };
 
     let app = app(state);

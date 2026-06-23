@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 wenyuan-server.workspace = true
+uuid.workspace = true
 wenyuan-store.workspace = true
 wenyuan-agent.workspace = true
 tokio = { workspace = true, features = ["full"] }

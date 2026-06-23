@@ -1,10 +1,26 @@
 import type { CodeSearchResponse, ConfigStatus, EvidenceItem, ParseDocumentResponse, ProviderSettings, SessionDetails, SessionRecord, SessionSummary, TestProviderResponse, ToolRun, UserPreferences } from './domain/session'
 
 const base = ''
+let localToken: string | null = null
+
+async function loadLocalToken() {
+  try {
+    const resp = await fetch(`${base}/api/settings/local-token`)
+    if (resp.ok) {
+      const data = await resp.json()
+      localToken = data.token
+    }
+  } catch { /* ignore */ }
+}
 
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
+  const isWrite = options?.method && options?.method !== 'GET'
+  const headers: Record<string, string> = { 'content-type': 'application/json' }
+  if (isWrite && localToken) {
+    headers['x-wenyuan-token'] = localToken
+  }
   const response = await fetch(`${base}${url}`, {
-    headers: { 'content-type': 'application/json', ...(options?.headers ?? {}) },
+    headers: { ...headers, ...(options?.headers as Record<string, string> ?? {}) },
     ...options,
   })
   const text = await response.text()
@@ -20,6 +36,8 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
     throw new Error(`server returned non-JSON (status ${response.status})`)
   }
 }
+
+loadLocalToken()
 
 export const api = {
   createSession(input: { title: string; topic: string; context: string; mode?: 'three_seat' | 'single_agent'; model_config?: Record<string, { model?: string; reasoning_effort?: string; max_tokens?: number }>; vote_policy?: { allow_self_vote: boolean; strategy: string; min_score_threshold?: number }; scribe_enabled?: boolean; search_enabled?: boolean; external_evidence?: EvidenceItem[]; external_tool_runs?: ToolRun[] }) {

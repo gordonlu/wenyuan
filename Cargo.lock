@@ -3101,6 +3101,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "uuid",
  "wenyuan-agent",
  "wenyuan-server",
  "wenyuan-store",

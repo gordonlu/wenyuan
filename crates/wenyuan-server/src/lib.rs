@@ -1,12 +1,11 @@
 use async_trait::async_trait;
 use axum::{
     Json, Router,
+    body::Body,
     extract::{DefaultBodyLimit, Path, State},
-    http::StatusCode,
-    response::{
-        IntoResponse,
-        sse::{Event, Sse},
-    },
+    http::{Method, Request, StatusCode},
+    middleware::{self, Next},
+    response::{IntoResponse, Response, sse::{Event, Sse}},
     routing::{get, post},
 };
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
@@ -62,6 +61,7 @@ pub struct AppState {
     pub preferences_path: Arc<PathBuf>,
     pub web_dist: Arc<PathBuf>,
     pub settings: Arc<settings::SettingsManager>,
+    pub local_token: String,
 }
 
 struct StoreProgressSink {
@@ -391,6 +391,25 @@ pub fn search_backend_from_env() -> Option<Arc<SearchPool>> {
     Some(Arc::new(SearchPool::new(backends)))
 }
 
+/// Middleware that checks X-Wenyuan-Token on write requests.
+async fn check_local_token(
+    State(state): State<AppState>,
+    req: Request<Body>,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    if matches!(*req.method(), Method::GET | Method::HEAD | Method::OPTIONS) {
+        return Ok(next.run(req).await);
+    }
+    let token = req
+        .headers()
+        .get("x-wenyuan-token")
+        .and_then(|v| v.to_str().ok());
+    match token {
+        Some(t) if t == state.local_token => Ok(next.run(req).await),
+        _ => Err(StatusCode::FORBIDDEN),
+    }
+}
+
 pub fn app(state: AppState) -> Router {
     Router::new()
         .route("/api/health", get(health))
@@ -417,6 +436,7 @@ pub fn app(state: AppState) -> Router {
 
         .route("/api/test-topics", get(test_topics))
         .merge(settings::settings_routes())
+        .layer(middleware::from_fn_with_state(state.clone(), check_local_token))
         .fallback_service(ServeDir::new(state.web_dist.as_path()).fallback(ServeFile::new(state.web_dist.join("index.html"))))
         .layer(DefaultBodyLimit::max(max_request_body_bytes()))
         .layer(TraceLayer::new_for_http())

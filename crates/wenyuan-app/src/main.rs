@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{Mutex, broadcast};
 use tracing::info;
+use uuid::Uuid;
 use rust_embed::RustEmbed;
 use wenyuan_agent::AgentRunner;
 use wenyuan_server::{
@@ -75,6 +76,7 @@ async fn main() -> anyhow::Result<()> {
         preferences_path: Arc::new(data_dir.join("wenyuan-preferences.json")),
         web_dist: Arc::new(web_dist),
         settings: Arc::new(SettingsManager::new(data_dir)),
+        local_token: Uuid::new_v4().to_string(),
     };
 
     let app = app(state);
