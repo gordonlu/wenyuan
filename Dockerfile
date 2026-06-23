@@ -9,10 +9,10 @@ RUN cargo build -p wenyuan-server --release && \
 
 FROM node:22-slim AS frontend
 WORKDIR /app
-COPY web/package.json web/pnpm-lock.yaml ./
-RUN corepack enable && pnpm install
+COPY web/package.json ./
+RUN npm install
 COPY web .
-RUN pnpm build
+RUN npm run build
 
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
