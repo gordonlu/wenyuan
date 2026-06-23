@@ -23,6 +23,7 @@ use wenyuan_provider::{LlmProvider, LlmRequest, LlmResponse, ProviderError};
 use wenyuan_tools::{make_tool_run, search_results_to_evidence, untrusted_evidence_notice};
 
 mod json;
+#[cfg(test)]
 pub(crate) use json::clean_json_string;
 mod output;
 mod search;

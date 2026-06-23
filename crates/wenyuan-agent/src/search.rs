@@ -1,4 +1,7 @@
-use wenyuan_core::{SearchBackend, SearchError, SearchResult};
+use wenyuan_core::SearchResult;
+
+#[cfg(test)]
+use wenyuan_core::{SearchBackend, SearchError};
 
 pub(crate) const SEARCH_TOOL_INSTRUCTION: &str = "\n\n你可以搜索互联网来获取信息。如果需要搜索，输出 JSON：{\"tool\":\"search\",\"query\":\"你的搜索词\"}。收到搜索结果后，如果还需要搜索可以继续输出工具调用，否则输出你的阶段输出。";
 
@@ -34,10 +37,12 @@ pub(crate) fn format_search_results(results: &[SearchResult], query: &str) -> St
     )
 }
 
+#[cfg(test)]
 pub struct MockSearchBackend {
     pub results: Vec<SearchResult>,
 }
 
+#[cfg(test)]
 impl MockSearchBackend {
     pub fn new() -> Self {
         Self {
@@ -65,6 +70,7 @@ impl MockSearchBackend {
     }
 }
 
+#[cfg(test)]
 #[async_trait::async_trait]
 impl SearchBackend for MockSearchBackend {
     fn name(&self) -> &'static str {

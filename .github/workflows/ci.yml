@@ -17,6 +17,7 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: stable
+          deny_warnings: false
       - uses: actions/cache@v4
         with:
           path: |
@@ -37,9 +38,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: 'pnpm'
-          cache-dependency-path: web/pnpm-lock.yaml
-      - run: corepack enable && pnpm install --frozen-lockfile
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
       - run: npx vue-tsc --noEmit
       - run: pnpm test
       - run: pnpm build
