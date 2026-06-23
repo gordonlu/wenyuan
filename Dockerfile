@@ -10,7 +10,7 @@ RUN cargo build -p wenyuan-server --release && \
 FROM node:22-slim AS frontend
 WORKDIR /app
 COPY web/package.json web/pnpm-lock.yaml ./
-RUN corepack enable && pnpm install --frozen-lockfile
+RUN corepack enable && pnpm install
 COPY web .
 RUN pnpm build
 
