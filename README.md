@@ -1,10 +1,11 @@
 # 文渊阁 Wenyuan
 
 [![CI](https://github.com/gordonlu/wenyuan/actions/workflows/ci.yml/badge.svg)](https://github.com/gordonlu/wenyuan/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Tauri](https://img.shields.io/badge/Tauri-2-FFC131?logo=tauri)](https://tauri.app)
 [![Rust](https://img.shields.io/badge/Rust-2024-dea584?logo=rust)](https://www.rust-lang.org)
 [![Vue](https://img.shields.io/badge/Vue-3-4FC08D?logo=vue.js)](https://vuejs.org)
-[![Tauri](https://img.shields.io/badge/Tauri-2-FFC131?logo=tauri)](https://tauri.app)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5-3178C6?logo=typescript)](https://www.typescriptlang.org)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 文渊阁是一个本地 AI 合议工作台——把同一个问题交给三个不同立场的 AI 分别思考、互相批议、修订方案，然后投票得出结论。你可以看到每个席位说了什么、批评了什么、改了哪里、最终选了什么方案和少数意见是什么。
 
