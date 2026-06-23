@@ -1,0 +1,19 @@
+[package]
+name = "wenyuan-desktop"
+version = "0.1.1"
+edition.workspace = true
+
+[lib]
+name = "wenyuan_desktop_lib"
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+wenyuan-runtime.workspace = true
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+url = "2"
+tracing.workspace = true
+tokio = { workspace = true, features = ["full"] }

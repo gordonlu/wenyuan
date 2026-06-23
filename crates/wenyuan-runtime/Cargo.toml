@@ -1,0 +1,20 @@
+[package]
+name = "wenyuan-runtime"
+version = "0.1.1"
+edition.workspace = true
+
+[dependencies]
+wenyuan-server.workspace = true
+wenyuan-store.workspace = true
+wenyuan-provider.workspace = true
+wenyuan-agent.workspace = true
+wenyuan-core.workspace = true
+axum.workspace = true
+tokio = { workspace = true, features = ["full"] }
+tracing.workspace = true
+anyhow.workspace = true
+uuid.workspace = true
+rust-embed = "8"
+mime_guess = "2"
+directories = "6"
+serde_json.workspace = true

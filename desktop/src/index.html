@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>文渊阁 Wenyuan</title>
+  <style>
+    body { margin: 0; background: #0f172a; color: #e2e8f0; display: flex; align-items: center; justify-content: center; height: 100vh; font-family: system-ui, sans-serif; }
+    .loading { text-align: center; }
+    h1 { font-size: 24px; font-weight: 300; letter-spacing: 4px; }
+    p { color: #6b7a85; margin-top: 12px; }
+    .spinner { width: 24px; height: 24px; border: 2px solid rgba(255,255,255,0.1); border-top-color: #8ddbd1; border-radius: 50%; animation: spin .8s linear infinite; margin: 0 auto; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+  <div class="loading">
+    <div class="spinner"></div>
+    <h1>文渊阁</h1>
+    <p>正在启动本地服务…</p>
+  </div>
+</body>
+</html>

@@ -7,6 +7,8 @@ members = [
     "crates/wenyuan-store",
     "crates/wenyuan-server",
     "crates/wenyuan-app",
+    "crates/wenyuan-runtime",
+    "desktop/src-tauri",
 ]
 resolver = "2"
 
@@ -46,4 +48,5 @@ wenyuan-core = { path = "crates/wenyuan-core" }
 wenyuan-provider = { path = "crates/wenyuan-provider" }
 wenyuan-server = { path = "crates/wenyuan-server" }
 wenyuan-store = { path = "crates/wenyuan-store" }
+wenyuan-runtime = { path = "crates/wenyuan-runtime" }
 wenyuan-tools = { path = "crates/wenyuan-tools" }

@@ -4,17 +4,9 @@ version = "0.1.1"
 edition.workspace = true
 
 [dependencies]
-wenyuan-server.workspace = true
-uuid.workspace = true
-wenyuan-store.workspace = true
-wenyuan-agent.workspace = true
-tokio = { workspace = true, features = ["full"] }
+wenyuan-runtime.workspace = true
+anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
-anyhow.workspace = true
-axum.workspace = true
-serde_json.workspace = true
-rust-embed = "8"
-mime_guess = "2"
+tokio.workspace = true
 open = "5"
-directories = "6"
