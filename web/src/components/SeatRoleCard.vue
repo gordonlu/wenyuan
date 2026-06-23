@@ -1,72 +1,76 @@
 <template>
-  <article
-    :class="['seat-role-card', profile.className, statusClass, { 'report-mode': reportMode, 'is-running': isRunning, 'is-active': isActive, 'is-inactive': inactive }]"
+  <div
+    :class="['seat-border', profile.className, statusClass, { 'report-mode': reportMode, 'is-running': isRunning, 'is-active': isActive, 'is-inactive': inactive }]"
     :style="cardStyle"
-    :aria-busy="isRunning"
-    role="region"
-    :aria-label="`${seatLabels[seat]} — ${status}`"
     @pointermove="handlePointerMove"
     @pointerleave="resetPointer"
   >
-    <div
-      class="ink-name"
-      :style="{ backgroundImage: 'url(' + profile.inkUrl + ')' }"
-      aria-hidden="true"
-    />
-    <div class="holo-layer holo-full" aria-hidden="true" />
-    <div class="holo-layer holo-gallery" aria-hidden="true" />
-    <div class="holo-layer holo-reverse" aria-hidden="true" />
-    <div class="role-head">
-      <div>
-        <span class="role-kicker">{{ profile.kicker }}</span>
-        <h3>{{ seatLabels[seat] }}</h3>
+    <article
+      :class="['seat-role-card', profile.className, statusClass, { 'report-mode': reportMode, 'is-running': isRunning, 'is-active': isActive, 'is-inactive': inactive }]"
+      :aria-busy="isRunning"
+      role="region"
+      :aria-label="`${seatLabels[seat]} — ${status}`"
+    >
+      <div
+        class="ink-name"
+        :style="{ backgroundImage: 'url(' + profile.inkUrl + ')' }"
+        aria-hidden="true"
+      />
+      <div class="holo-layer holo-full" aria-hidden="true" />
+      <div class="holo-layer holo-gallery" aria-hidden="true" />
+      <div class="holo-layer holo-reverse" aria-hidden="true" />
+      <div class="role-head">
+        <div>
+          <span class="role-kicker">{{ profile.kicker }}</span>
+          <h3>{{ seatLabels[seat] }}</h3>
+        </div>
+        <span v-if="!reportMode" :class="['badge', 'role-status', badgeClass]">{{ status }}</span>
       </div>
-      <span v-if="!reportMode" :class="['badge', 'role-status', badgeClass]">{{ status }}</span>
-    </div>
 
-    <p class="role-summary">{{ profile.summary }}</p>
+      <p class="role-summary">{{ profile.summary }}</p>
 
-    <div v-if="!reportMode && currentActivity" :class="['role-live', currentActivity.tone]" aria-live="polite">
-      <span class="role-live-dot" aria-hidden="true" />
-      <strong>{{ currentActivity.label }}</strong>
-      <span v-if="currentActivity.detail" class="role-live-detail">{{ currentActivity.detail }}</span>
-    </div>
+      <div v-if="!reportMode && currentActivity" :class="['role-live', currentActivity.tone]" aria-live="polite">
+        <span class="role-live-dot" aria-hidden="true" />
+        <strong>{{ currentActivity.label }}</strong>
+        <span v-if="currentActivity.detail" class="role-live-detail">{{ currentActivity.detail }}</span>
+      </div>
 
-    <dl v-if="!reportMode" class="role-metrics">
-      <div>
-        <dt>模型</dt>
-        <dd>{{ modelName(providerRef) }}</dd>
-      </div>
-      <div>
-        <dt>调用</dt>
-        <dd>{{ stats.calls }} 次</dd>
-      </div>
-      <div>
-        <dt>耗时</dt>
-        <dd>{{ (stats.durationMs / 1000).toFixed(1) }} 秒</dd>
-      </div>
-      <div>
-        <dt>工具</dt>
-        <dd>{{ toolStats.calls }} 次</dd>
-      </div>
-    </dl>
+      <dl v-if="!reportMode" class="role-metrics">
+        <div>
+          <dt>模型</dt>
+          <dd>{{ modelName(providerRef) }}</dd>
+        </div>
+        <div>
+          <dt>调用</dt>
+          <dd>{{ stats.calls }} 次</dd>
+        </div>
+        <div>
+          <dt>耗时</dt>
+          <dd>{{ (stats.durationMs / 1000).toFixed(1) }} 秒</dd>
+        </div>
+        <div>
+          <dt>工具</dt>
+          <dd>{{ toolStats.calls }} 次</dd>
+        </div>
+      </dl>
 
-    <dl v-else class="role-metrics role-metrics-report">
-      <div>
-        <dt>调用</dt>
-        <dd>{{ stats.calls }} 次</dd>
-      </div>
-      <div>
-        <dt>耗时</dt>
-        <dd>{{ (stats.durationMs / 1000).toFixed(1) }} 秒</dd>
-      </div>
-    </dl>
+      <dl v-else class="role-metrics role-metrics-report">
+        <div>
+          <dt>调用</dt>
+          <dd>{{ stats.calls }} 次</dd>
+        </div>
+        <div>
+          <dt>耗时</dt>
+          <dd>{{ (stats.durationMs / 1000).toFixed(1) }} 秒</dd>
+        </div>
+      </dl>
 
-    <div v-if="!reportMode" class="role-foot">
-      <span class="prompt-version">{{ stats.promptVersions || '暂无 Prompt 版本' }}</span>
-      <span v-if="stats.failed || toolStats.failed" class="runtime-failures">失败 {{ stats.failed + toolStats.failed }} 次</span>
-    </div>
-  </article>
+      <div v-if="!reportMode" class="role-foot">
+        <span class="prompt-version">{{ stats.promptVersions || '暂无 Prompt 版本' }}</span>
+        <span v-if="stats.failed || toolStats.failed" class="runtime-failures">失败 {{ stats.failed + toolStats.failed }} 次</span>
+      </div>
+    </article>
+  </div>
 </template>
 
 <script setup lang="ts">
@@ -116,8 +120,6 @@ const cardStyle = ref<Record<string, string>>({
   '--tilt-x': '0deg',
   '--tilt-y': '0deg',
 })
-
-
 
 const profiles: Record<SeatKind, { kicker: string; summary: string; className: string; inkUrl: string }> = {
   mouyuan: {
@@ -229,15 +231,24 @@ function toolActionLabel(name?: string) {
 </script>
 
 <style scoped>
+.seat-border {
+  --pointer-x: 76%;
+  --pointer-y: 24%;
+  --tilt-x: 0deg;
+  --tilt-y: 0deg;
+  position: relative;
+  border-radius: calc(var(--radius-md) + 6px);
+  transform: perspective(900px) rotateX(var(--tilt-x)) rotateY(var(--tilt-y));
+  transform-style: preserve-3d;
+  will-change: transform;
+  transition: transform 180ms ease-out, box-shadow 180ms ease-out;
+}
+
 .seat-role-card {
   --role-main: #0f8aa1;
   --role-deep: #063f55;
   --role-soft: #c9fbff;
   --role-glow: rgba(15, 138, 161, 0.34);
-  --pointer-x: 76%;
-  --pointer-y: 24%;
-  --tilt-x: 0deg;
-  --tilt-y: 0deg;
   position: relative;
   overflow: hidden;
   min-height: 256px;
@@ -252,12 +263,7 @@ function toolActionLabel(name?: string) {
     0 20px 42px rgba(16, 24, 40, 0.18),
     inset 0 0 0 1px rgba(0, 0, 0, 0.18),
     inset 0 1px 0 rgba(255, 255, 255, 0.42);
-  isolation: isolate;
   color: #ffffff;
-  transform: perspective(900px) rotateX(var(--tilt-x)) rotateY(var(--tilt-y));
-  transform-style: preserve-3d;
-  transition: transform 180ms ease-out, box-shadow 180ms ease-out;
-  will-change: transform;
 }
 
 .seat-role-card:hover {
@@ -374,21 +380,26 @@ function toolActionLabel(name?: string) {
     inset 0 1px 0 rgba(255, 255, 255, 0.42);
 }
 
-.seat-role-card.is-running::before {
+.seat-border.is-running::before {
   content: '';
   position: absolute;
-  inset: 0;
+  inset: -6px;
   z-index: 4;
-  padding: 2px;
-  border-radius: inherit;
-  background:
-    conic-gradient(from 0deg,
-      rgba(94, 234, 212, 0.92),
-      rgba(250, 204, 21, 0.96),
-      rgba(244, 114, 182, 0.92),
-      rgba(96, 165, 250, 0.94),
-      rgba(94, 234, 212, 0.92));
-  animation: seat-marquee 1.3s linear infinite;
+  padding: 6px;
+  border-radius: calc(var(--radius-md) + 6px);
+  will-change: transform;
+  background: conic-gradient(from var(--flow-angle, 0deg),
+      /* 全圈幻彩：彩虹色环，透明度波动产生流动感 */
+      hsl(calc(0 + var(--hue, 0)) 90% 64% / 0.50) 0deg,
+      hsl(calc(45 + var(--hue, 0)) 88% 66% / 0.62) 45deg,
+      hsl(calc(90 + var(--hue, 0)) 86% 68% / 0.76) 90deg,
+      hsl(calc(135 + var(--hue, 0)) 86% 68% / 0.86) 135deg,
+      hsl(calc(180 + var(--hue, 0)) 88% 66% / 0.92) 180deg,
+      hsl(calc(225 + var(--hue, 0)) 90% 66% / 0.86) 225deg,
+      hsl(calc(270 + var(--hue, 0)) 90% 66% / 0.74) 270deg,
+      hsl(calc(315 + var(--hue, 0)) 90% 64% / 0.60) 315deg,
+      hsl(calc(360 + var(--hue, 0)) 90% 64% / 0.50) 360deg);
+  animation: seat-colorflow 6s linear infinite, seat-hue-cycle 10s linear infinite;
   pointer-events: none;
   mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
   mask-composite: exclude;
@@ -399,9 +410,9 @@ function toolActionLabel(name?: string) {
 .seat-role-card.is-running::after {
   content: '';
   position: absolute;
-  inset: 2px;
+  inset: 0;
   z-index: 2;
-  border-radius: calc(var(--radius-md) - 2px);
+  border-radius: calc(var(--radius-md) - 4px);
   box-shadow: inset 0 0 22px rgba(255, 255, 255, 0.18);
   pointer-events: none;
 }
@@ -424,9 +435,26 @@ function toolActionLabel(name?: string) {
   animation: seat-pulse 1.4s ease-in-out infinite;
 }
 
-@keyframes seat-marquee {
-  0% { transform: rotate(0deg); }
-  100% { transform: rotate(360deg); }
+@property --flow-angle {
+  syntax: '<angle>';
+  initial-value: 0deg;
+  inherits: false;
+}
+
+@property --hue {
+  syntax: '<number>';
+  initial-value: 0;
+  inherits: false;
+}
+
+@keyframes seat-colorflow {
+  0% { --flow-angle: 0deg; }
+  100% { --flow-angle: 360deg; }
+}
+
+@keyframes seat-hue-cycle {
+  0% { --hue: 0; }
+  100% { --hue: 360; }
 }
 
 @keyframes seat-pulse {
@@ -435,12 +463,11 @@ function toolActionLabel(name?: string) {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .seat-role-card.is-running {
-    animation: none;
+  .seat-border.is-running {
     outline: 1px solid rgba(255, 255, 255, 0.3);
     outline-offset: 2px;
   }
-  .seat-role-card.is-running::before,
+  .seat-border.is-running::before,
   .seat-role-card.is-running::after,
   .seat-role-card.is-running .role-status::before {
     animation: none;

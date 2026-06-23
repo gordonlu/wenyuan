@@ -1,8 +1,8 @@
 <template>
   <section class="page prompt-library">
     <header class="page-head">
-      <p>Prompt Library</p>
-      <h1>提示词模板库</h1>
+      <p>角色速查</p>
+      <h1>议席角色与提示参考</h1>
     </header>
 
     <section class="panel library-controls" aria-label="模板筛选">

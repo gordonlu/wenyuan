@@ -893,6 +893,22 @@ impl Store {
         Ok(())
     }
 
+    pub async fn delete_session(&self, id: Uuid) -> Result<(), StoreError> {
+        let mut tx = self.pool.begin().await?;
+        for table in &["seat_runs", "rounds", "ideas", "critiques", "proposals", "votes", "session_events", "claims", "evidence", "assessments", "claim_evidence_links", "seats"] {
+            sqlx::query(&format!("delete from {table} where session_id = ?1"))
+                .bind(id.to_string())
+                .execute(&mut *tx)
+                .await?;
+        }
+        sqlx::query("delete from sessions where id = ?1")
+            .bind(id.to_string())
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
     pub async fn append_event(
         &self,
         session_id: Uuid,
@@ -2062,5 +2078,30 @@ mod tests {
         // Verify the session row matches the final phase
         let details = store.get_session(s2.id).await.unwrap();
         assert_eq!(details.session.phase, SessionPhase::Completed);
+    }
+
+    #[tokio::test]
+    async fn delete_session_removes_all_traces() {
+        let store = Store::connect("sqlite::memory:").await.unwrap();
+        let session = Session::new("议题", "删除测试", "");
+        let id = session.id;
+        store.create_session(&session).await.unwrap();
+
+        // Verify the session exists
+        assert!(store.get_session(id).await.is_ok());
+
+        // Add some related data to verify cascade cleanup
+        let events_before = store.events(id).await.unwrap();
+        let event_count_before = events_before.len();
+        assert!(event_count_before > 0, "session should have events");
+        store.append_event(id, "test_event", serde_json::json!({"key": "value"})).await.unwrap();
+        let events_after_append = store.events(id).await.unwrap();
+        assert_eq!(events_after_append.len(), event_count_before + 1);
+
+        store.delete_session(id).await.unwrap();
+
+        // Session should no longer exist
+        let err = store.get_session(id).await.unwrap_err();
+        assert!(matches!(err, StoreError::NotFound));
     }
 }

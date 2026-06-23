@@ -4,7 +4,6 @@ import SessionWorkspaceView from './views/SessionWorkspaceView.vue'
 import HistoryView from './views/HistoryView.vue'
 import ConfigView from './views/ConfigView.vue'
 import PromptLibraryView from './views/PromptLibraryView.vue'
-import SearchTestView from './views/SearchTestView.vue'
 
 export default createRouter({
   history: createWebHistory(),
@@ -14,6 +13,5 @@ export default createRouter({
     { path: '/history', component: HistoryView },
     { path: '/prompt-library', component: PromptLibraryView },
     { path: '/config', component: ConfigView },
-    { path: '/search-test', component: SearchTestView },
   ],
 })

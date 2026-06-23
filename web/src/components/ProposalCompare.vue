@@ -14,10 +14,10 @@
       <div v-for="p in proposals" :key="p.id" class="compare-cell">{{ p.title }}</div>
 
       <div class="compare-label">摘要</div>
-      <div v-for="p in proposals" :key="p.id" class="compare-cell">{{ p.summary }}</div>
+      <div v-for="p in proposals" :key="p.id" class="compare-cell formatted" v-html="renderMarkdown(p.summary)" />
 
       <div class="compare-label">落地路径</div>
-      <div v-for="p in proposals" :key="p.id" class="compare-cell muted">{{ p.implementation_path }}</div>
+      <div v-for="p in proposals" :key="p.id" class="compare-cell formatted" v-html="renderMarkdown(p.implementation_path)" />
 
       <div class="compare-label">采纳观点</div>
       <div v-for="p in proposals" :key="p.id" class="compare-cell">
@@ -48,6 +48,7 @@
 
 <script setup lang="ts">
 import { seatLabels, type SeatKind } from '../domain/session'
+import { renderMarkdown } from '../utils/markdown'
 
 defineProps<{
   proposals: Array<{
@@ -107,5 +108,16 @@ function seatLabel(key: string) {
   font-size: 13px;
   line-height: 1.5;
   color: var(--color-text);
+}
+.compare-cell.formatted :deep(p) {
+  margin: 0.3em 0;
+}
+.compare-cell.formatted :deep(strong) {
+  font-weight: 600;
+}
+.compare-cell.formatted :deep(ul),
+.compare-cell.formatted :deep(ol) {
+  padding-left: 1.3em;
+  margin: 0.2em 0;
 }
 </style>

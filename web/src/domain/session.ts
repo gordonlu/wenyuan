@@ -286,31 +286,7 @@ export interface CodeSearchResponse {
   tool_run: ToolRun
 }
 
-export interface SearchResultItem {
-  title: string
-  snippet: string
-  url: string
-  source: string
-}
 
-export interface SearchTestStep {
-  prompt: string
-  raw_response: string
-  extracted: string
-  note: string
-}
-
-export interface BackendResult {
-  name: string
-  results: SearchResultItem[]
-  error: string | null
-}
-
-export interface SearchTestResponse {
-  keyword_step: SearchTestStep
-  search_query: string
-  backends: BackendResult[]
-}
 
 export interface ToolRun {
   id: string

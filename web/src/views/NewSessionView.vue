@@ -13,14 +13,16 @@
     <form class="form-panel create-session-panel" @submit.prevent="submit">
       <div class="create-main">
         <label>
-          <span class="field-title">标题</span>
+          <span class="field-title">标题 <span class="required-mark">*</span></span>
           <span class="field-caption">一句话说明这次合议要判断什么。</span>
-          <input v-model="title" required :placeholder="titlePlaceholder" />
+          <input v-model="title" ref="titleRef" :placeholder="titlePlaceholder" />
+          <span v-if="errors.title" class="field-error">{{ errors.title }}</span>
         </label>
         <label>
-          <span class="field-title">议题</span>
+          <span class="field-title">议题 <span class="required-mark">*</span></span>
           <span class="field-caption">写清楚待决策问题、判断标准和必须权衡的取舍。</span>
-          <textarea v-model="topic" required rows="8" :placeholder="topicPlaceholder" />
+          <textarea v-model="topic" ref="topicRef" rows="8" :placeholder="topicPlaceholder" />
+          <span v-if="errors.topic" class="field-error">{{ errors.topic }}</span>
         </label>
         <label>
           <span class="field-title">背景</span>
@@ -59,14 +61,14 @@
             <option value="single_agent">单 Agent：初稿、自评、修订</option>
           </select>
         </label>
-        <details class="vote-policy-config" :open="scribeOpen">
-          <summary>报告深度</summary>
+            <details class="vote-policy-config" :open="scribeOpen">
+          <summary>报告详细度</summary>
           <div class="vote-policy-body">
             <label class="toggle-row">
               <input type="checkbox" v-model="scribeEnabled" />
-              <span>深度研究报告</span>
+              <span>完整报告（含证据、三席详情等）</span>
             </label>
-            <p class="scribe-note">默认关闭。开启后会额外整理共识、冲突和研究型长报告；普通报告会保持简短。</p>
+            <p class="scribe-note">关闭时只展示结论、策案对比与投票摘要；开启后在报告中展开所有过程细节。</p>
           </div>
         </details>
         <details class="vote-policy-config" :open="true">
@@ -126,11 +128,16 @@ import { api } from '../api'
 import ApiErrorState from '../components/ApiErrorState.vue'
 import CodeSearchPanel from '../components/CodeSearchPanel.vue'
 import DocumentSourcePanel from '../components/DocumentSourcePanel.vue'
+import { useConfirm } from '../composables/useConfirm'
 import type { EvidenceItem, ToolRun } from '../domain/session'
 
 const router = useRouter()
+const { confirm } = useConfirm()
 const title = ref('')
 const topic = ref('')
+const titleRef = ref<HTMLInputElement>()
+const topicRef = ref<HTMLTextAreaElement>()
+const errors = ref<{ title?: string; topic?: string }>({})
 const context = ref('')
 const documentContext = ref('')
 const documentEvidence = ref<EvidenceItem[]>([])
@@ -277,7 +284,19 @@ const activeSeats = computed(() =>
 )
 
 async function submit() {
-  if (!window.confirm('确认创建并开始合议？')) return
+  errors.value = {}
+  if (!title.value.trim() || !topic.value.trim()) {
+    if (!title.value.trim()) {
+      errors.value.title = '请填写标题'
+      titleRef.value?.focus()
+    }
+    if (!topic.value.trim()) {
+      errors.value.topic = '请填写议题'
+      if (!errors.value.title) topicRef.value?.focus()
+    }
+    return
+  }
+  if (!(await confirm('确认创建并开始合议？'))) return
   loading.value = true
   error.value = ''
   try {
@@ -343,6 +362,25 @@ async function submit() {
   color: var(--color-text-muted);
   font-size: 12px;
   font-weight: 500;
+}
+.required-mark {
+  color: #d32f2f;
+  font-weight: 700;
+}
+.field-error {
+  font-size: 13px;
+  color: #d32f2f;
+  background: #fff5f5;
+  border: 1px solid #fcc;
+  border-radius: var(--radius-sm);
+  padding: 5px 10px;
+  display: inline-block;
+  margin-top: 2px;
+}
+.create-main label:has(.field-error) input,
+.create-main label:has(.field-error) textarea {
+  border-color: #d32f2f;
+  box-shadow: 0 0 0 2px rgba(211, 47, 47, 0.1);
 }
 
 .create-main input,

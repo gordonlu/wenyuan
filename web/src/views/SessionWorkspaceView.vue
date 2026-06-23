@@ -81,7 +81,7 @@
             <RotateCw :size="18" />
             重新开议
           </button>
-          <button class="icon danger" title="取消" @click="cancel">
+          <button class="icon danger" title="删除" @click="removeSession">
             <Ban :size="18" />
           </button>
         </template>
@@ -89,8 +89,25 @@
     </header>
 
     <template v-if="viewMode === 'workbench'">
+    <nav class="side-nav">
+      <a href="#seats" title="三席状态"><span class="nav-dot" /><span>三席</span></a>
+      <a href="#topic" title="议题"><span class="nav-dot" /><span>议题</span></a>
+      <a href="#evidence" title="证据"><span class="nav-dot" /><span>证据</span></a>
+      <a href="#tools" title="工具轨迹"><span class="nav-dot" /><span>工具</span></a>
+      <a href="#ideas" title="创意池"><span class="nav-dot" /><span>创意</span></a>
+      <a href="#critiques" title="批议摘要"><span class="nav-dot" /><span>批议</span></a>
+      <a href="#revisions" title="差异对比"><span class="nav-dot" /><span>差异</span></a>
+      <a href="#proposals" title="策案对比"><span class="nav-dot" /><span>策案</span></a>
+      <a href="#votes" title="投票"><span class="nav-dot" /><span>投票</span></a>
+      <a href="#quality" title="讨论质量"><span class="nav-dot" /><span>质量</span></a>
+      <a href="#deep-report" title="深度报告"><span class="nav-dot" /><span>深度</span></a>
+      <a href="#claims" title="主张"><span class="nav-dot" /><span>主张</span></a>
+      <a href="#stats" title="运行统计"><span class="nav-dot" /><span>统计</span></a>
+      <a href="#timeline" title="时间线"><span class="nav-dot" /><span>时间</span></a>
+    </nav>
+    <div class="workspace-main">
     <PhaseProgressBar :phase="details.session.phase" />
-    <section class="role-card-row" aria-label="三席状态">
+    <section id="seats" class="role-card-row" aria-label="三席状态">
       <SeatRoleCard
         v-for="seat in seats"
         :key="seat"
@@ -140,7 +157,7 @@
 
     <DecisionSummary v-if="primaryDecision" :decision="primaryDecision" :vote-policy="details.session.vote_policy" :mode="details.session.mode" />
 
-    <section class="panel">
+    <section id="topic" class="panel">
       <div class="row-head">
         <h2>议题</h2>
         <button v-if="!editingContext" class="icon" title="补充背景" @click="editingContext = true">
@@ -158,7 +175,7 @@
       <p v-else-if="reportText(details.session.context)" class="muted" style="margin-top: 8px">{{ reportText(details.session.context) }}</p>
     </section>
 
-    <section v-if="externalEvidence.length" class="panel evidence-source-panel">
+    <section id="evidence" v-if="externalEvidence.length" class="panel evidence-source-panel">
       <div class="row-head">
         <h2>来源证据</h2>
         <span class="badge flat">{{ externalEvidence.length }} 条</span>
@@ -186,7 +203,7 @@
       </div>
     </section>
 
-    <section v-if="toolRuns.length" class="panel tool-run-panel">
+    <section id="tools" v-if="toolRuns.length" class="panel tool-run-panel">
       <div class="row-head">
         <h2>工具轨迹</h2>
         <button class="icon" title="展开详情" @click="showToolDetail = !showToolDetail">
@@ -213,14 +230,14 @@
       </div>
     </section>
 
-    <section class="panel">
+    <section id="ideas" class="panel">
       <h2>创意池（{{ details.artifacts.ideas.length }}）</h2>
       <div class="item-grid">
         <IdeaCard v-for="idea in details.artifacts.ideas" :key="idea.id" :idea="idea" />
       </div>
     </section>
 
-    <section class="panel">
+    <section id="critiques" class="panel">
       <h2>批议摘要</h2>
       <div class="item-grid">
         <article v-for="critique in details.artifacts.critiques" :key="`${critique.reviewer}-${critique.target_seat}`" class="item">
@@ -244,7 +261,7 @@
       :proposals="details.artifacts.proposals"
     />
 
-    <section class="panel">
+    <section id="revisions" class="panel">
       <h2>独议 / 复议差异</h2>
       <div class="item-grid">
         <article v-for="diff in revisionDiffs(details)" :key="diff.seat" class="item">
@@ -263,13 +280,13 @@
       </div>
     </section>
 
-    <ProposalCompare :proposals="details.artifacts.proposals" />
+    <ProposalCompare id="proposals" :proposals="details.artifacts.proposals" />
 
-    <VoteDisplay :votes="details.artifacts.votes" :proposals="details.artifacts.proposals" />
+    <VoteDisplay id="votes" :votes="details.artifacts.votes" :proposals="details.artifacts.proposals" />
 
-    <VoteChanges :votes="details.artifacts.votes" :proposals="details.artifacts.proposals" />
+    <VoteChanges id="vote-changes" :votes="details.artifacts.votes" :proposals="details.artifacts.proposals" />
 
-    <section class="panel">
+    <section id="quality" class="panel">
       <h2>讨论质量</h2>
       <div class="stat-grid">
         <article v-for="metric in qualityMetricRows(details.artifacts.quality, hasTokenUsage)" :key="metric.label" class="stat">
@@ -279,7 +296,7 @@
       </div>
     </section>
 
-    <section v-if="details.artifacts.scribe_report" class="panel">
+    <section id="deep-report" v-if="details.artifacts.scribe_report" class="panel">
       <h2>深度研究报告</h2>
       <div class="scribe-report">
         <h3>共识总结</h3>
@@ -303,7 +320,7 @@
       </div>
     </section>
 
-    <section v-if="supportedClaims.length" class="panel">
+    <section id="claims" v-if="supportedClaims.length" class="panel">
       <h2>有证据的主张</h2>
       <div class="item-grid">
         <article v-for="claim in supportedClaims" :key="claim.id" class="item">
@@ -336,7 +353,7 @@
       </div>
     </section>
 
-    <section class="panel">
+    <section id="stats" class="panel">
       <h2>运行统计</h2>
       <p v-if="details.artifacts.seat_runs.length && !hasTokenUsage" class="muted usage-note">
         当前 Provider 未返回 token usage；费用和额度请以供应商按调用次数或控制台账单为准。
@@ -354,7 +371,7 @@
       </div>
     </section>
 
-    <section class="panel">
+    <section id="timeline" class="panel">
       <div class="row-head timeline-head">
         <h2>事件时间线</h2>
         <button v-if="!showTrajectory" class="stat-action" title="查看阶段轨迹" @click="loadTrajectory">
@@ -381,6 +398,7 @@
         </div>
       </div>
     </section>
+    </div>
     </template>
 
     <template v-else>
@@ -411,7 +429,7 @@
         </div>
       </div>
 
-      <section class="panel report-topic">
+      <section id="report-topic" class="panel report-topic">
         <h2>议题</h2>
         <p>{{ reportText(details.session.topic) }}</p>
         <p v-if="reportText(details.session.context)" class="muted">{{ reportText(details.session.context) }}</p>
@@ -419,9 +437,9 @@
 
       <DecisionSummary v-if="primaryDecision" :decision="primaryDecision" :vote-policy="details.session.vote_policy" :mode="details.session.mode" />
 
-      <ProposalCompare :proposals="details.artifacts.proposals" />
+      <ProposalCompare id="report-proposals" :proposals="details.artifacts.proposals" />
 
-      <section v-if="externalEvidence.length" class="panel evidence-source-panel">
+      <section id="report-evidence" v-if="scribeMode === 'full' && externalEvidence.length" class="panel evidence-source-panel">
         <div class="row-head">
           <h2>来源证据</h2>
           <span class="badge flat">{{ externalEvidence.length }} 条</span>
@@ -449,7 +467,7 @@
         </div>
       </section>
 
-      <section v-if="toolRuns.length" class="panel tool-run-panel">
+      <section id="report-tools" v-if="scribeMode === 'full' && toolRuns.length" class="panel tool-run-panel">
         <div class="row-head">
           <h2>工具轨迹</h2>
           <span class="badge flat">{{ toolRuns.length }} 次</span>
@@ -467,7 +485,7 @@
         </div>
       </section>
 
-      <section class="role-card-row report-seat-row" aria-label="三席报告">
+      <section v-if="scribeMode === 'full'" class="role-card-row report-seat-row" aria-label="三席报告">
         <SeatRoleCard
           v-for="seat in seats"
           :key="seat"
@@ -482,11 +500,11 @@
         />
       </section>
 
-      <VoteDisplay :votes="details.artifacts.votes" :proposals="details.artifacts.proposals" />
+      <VoteDisplay id="report-votes" :votes="details.artifacts.votes" :proposals="details.artifacts.proposals" />
 
-      <VoteChanges :votes="details.artifacts.votes" :proposals="details.artifacts.proposals" />
+      <VoteChanges v-if="scribeMode === 'full'" id="report-vote-changes" :votes="details.artifacts.votes" :proposals="details.artifacts.proposals" />
 
-      <section class="panel">
+      <section id="report-quality" class="panel">
         <h2>讨论质量</h2>
         <div class="stat-grid">
           <article v-for="metric in qualityMetricRows(details.artifacts.quality, hasTokenUsage)" :key="metric.label" class="stat">
@@ -496,7 +514,7 @@
         </div>
       </section>
 
-      <section v-if="details.artifacts.claims?.length" class="panel">
+      <section id="report-claims" v-if="scribeMode === 'full' && details.artifacts.claims?.length" class="panel">
         <h2>证据与待核验判断</h2>
         <div class="item-grid">
           <article v-for="claim in details.artifacts.claims" :key="claim.id" class="item">
@@ -553,11 +571,13 @@ import SeatRoleCard from '../components/SeatRoleCard.vue'
 import VoteChanges from '../components/VoteChanges.vue'
 import VoteDisplay from '../components/VoteDisplay.vue'
 import { hasStoredViewMode, useViewMode } from '../composables/useViewMode'
+import { useConfirm } from '../composables/useConfirm'
 import { cleanReportText, decisionDigest, evidenceSafetyLabels, evidenceSourceKindLabels, evidenceSummary, evidenceTrustLabels, exportSessionMarkdown, ideaStatusLabels, evidenceKindLabels, modeLabels, phaseLabels, qualityMetricRows, revisionDiffs, seatLabels, seatRunStats, toolRunSummary, voteStrategyLabels, type SeatKind, type SessionDetails } from '../domain/session'
 
 const route = useRoute()
 const router = useRouter()
 const { viewMode, setViewMode } = useViewMode({ route, router })
+const { confirm } = useConfirm()
 const id = computed(() => String(route.params.id))
 const seats: SeatKind[] = ['mouyuan', 'jingshi', 'chizheng']
 const details = ref<SessionDetails | null>(null)
@@ -610,6 +630,7 @@ const recentFailedRuns = computed(() =>
     .reverse(),
 )
 const hasTokenUsage = computed(() => (details.value?.artifacts.seat_runs ?? []).some((run) => typeof run.total_tokens === 'number'))
+const scribeMode = computed(() => details.value?.session.scribe_enabled ? 'full' : 'light')
 const primaryDecision = computed(() => details.value?.session.result ?? details.value?.artifacts.decision ?? null)
 const currentEvidenceSummary = computed(() => details.value ? evidenceSummary(details.value) : null)
 const currentDigest = computed(() => {
@@ -956,13 +977,13 @@ async function resume() {
 }
 
 async function retry() {
-  if (!window.confirm('确认重新开议？')) return
+  if (!(await confirm('确认重新开议？'))) return
   details.value = await api.retrySession(id.value)
   timer = window.setTimeout(load, 500)
 }
 
 async function retryCurrentPhase() {
-  if (!window.confirm('确认重试当前阶段？')) return
+  if (!(await confirm('确认重试当前阶段？'))) return
   try {
     details.value = await api.retryPhase(id.value)
   } catch (err) {
@@ -970,13 +991,14 @@ async function retryCurrentPhase() {
   }
 }
 
-async function cancel() {
-  if (!window.confirm('确认取消本次合议？')) return
-  details.value = await api.cancelSession(id.value)
+async function removeSession() {
+  if (!(await confirm('确认删除本次议题？'))) return
+  await api.deleteSession(id.value)
+  router.push('/history')
 }
 
 async function manualRevision() {
-  if (!window.confirm('确认手动触发复议？')) return
+  if (!(await confirm('确认手动触发复议？'))) return
   try {
     details.value = await api.manualRevision(id.value)
   } catch (err) {
@@ -1350,6 +1372,72 @@ onBeforeUnmount(() => {
 .report-topic-tag {
   color: var(--color-text-muted);
   font-size: 13px;
+}
+
+.side-nav {
+  position: fixed;
+  right: 36px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 10px 8px;
+  z-index: 50;
+  background: rgba(248, 250, 248, 0.5);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(0, 0, 0, 0.06);
+  border-radius: 14px;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.06);
+  width: auto;
+  min-width: 28px;
+  transition: min-width 250ms ease;
+  overflow: hidden;
+}
+.side-nav:hover {
+  min-width: 56px;
+}
+.side-nav a {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 6px;
+  font-size: 11px;
+  color: var(--color-text-muted);
+  text-decoration: none;
+  border-radius: 6px;
+  line-height: 1.2;
+  white-space: nowrap;
+  transition: background 120ms, color 120ms;
+}
+.side-nav a:hover {
+  background: rgba(255, 255, 255, 0.85);
+  color: var(--color-text);
+}
+.nav-dot {
+  flex: 0 0 6px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--color-text-dim);
+  opacity: 0.4;
+  transition: opacity 150ms, background 150ms;
+}
+.side-nav a:hover .nav-dot {
+  opacity: 0.8;
+  background: var(--color-accent);
+}
+.workspace-main {
+  min-width: 0;
+}
+section[id] {
+  scroll-margin-top: 80px;
+}
+@media (max-width: 900px) {
+  .side-nav {
+    display: none;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {

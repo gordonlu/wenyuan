@@ -89,6 +89,10 @@ function proposalTitle(id: string) {
 }
 .vote-blocking {
   grid-column: 1 / -1;
-  justify-self: start;
+  max-width: 100%;
+}
+.vote-blocking .badge {
+  white-space: normal;
+  word-break: break-word;
 }
 </style>

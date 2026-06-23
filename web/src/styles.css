@@ -189,6 +189,35 @@ nav a.router-link-active {
   font-weight: 600;
 }
 
+.side-footer {
+  margin-top: auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 12px 0;
+  border-top: 1px solid rgba(212, 226, 236, 0.1);
+  font-size: 12px;
+  color: #8a9aa8;
+}
+
+.side-footer .gh-link {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: #8a9aa8;
+  text-decoration: none;
+  transition: color var(--transition-fast);
+}
+
+.side-footer .gh-link:hover {
+  color: #e2e8f0;
+}
+
+.side-footer .version {
+  color: #6b7a85;
+  font-variant-numeric: tabular-nums;
+}
+
 /* ── Main Content ── */
 .main {
   padding: 30px 34px 44px;

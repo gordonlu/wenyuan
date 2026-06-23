@@ -162,7 +162,7 @@ pub fn parse_document_bytes(
     mime_type: Option<&str>,
     bytes: &[u8],
 ) -> Result<ParsedDocument, ToolError> {
-    if bytes.len() > 20 * 1024 * 1024 {
+    if bytes.len() > 5 * 1024 * 1024 {
         return Err(ToolError::DocumentTooLarge(bytes.len()));
     }
 

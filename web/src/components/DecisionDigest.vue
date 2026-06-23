@@ -151,14 +151,14 @@ defineProps<{
 
 /* status variant overrides */
 .digest-ok {
-  border-left: 3px solid var(--color-success);
+  border-left: 6px solid var(--color-success);
 }
 
 .digest-warn {
-  border-left: 3px solid var(--color-warning-border);
+  border-left: 6px solid var(--color-warning-border);
 }
 
 .digest-danger {
-  border-left: 3px solid var(--color-danger);
+  border-left: 6px solid var(--color-danger);
 }
 </style>

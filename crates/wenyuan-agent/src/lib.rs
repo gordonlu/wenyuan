@@ -709,7 +709,7 @@ impl AgentRunner {
         let input = serde_json::json!({
             "ideas": ideas,
             "critiques": critiques,
-            "rule": "形成正式策案，说明采纳、拒绝、相较独议修改和置信度。",
+            "rule": "形成正式策案，说明采纳、拒绝理由和置信度。",
             "domain_rules": domain_rules,
         });
         let run = self
@@ -1498,7 +1498,7 @@ impl AgentRunner {
                                 .collect::<Vec<_>>();
                             let mut tool_run = make_tool_run(
                                 "web_search",
-                                format!("seat={seat:?};phase={phase:?};query={query}"),
+                                query.clone(),
                                 "completed",
                                 started.elapsed(),
                                 evidence_ids,
@@ -1515,7 +1515,7 @@ impl AgentRunner {
                         Err(err) => {
                             let mut tool_run = make_tool_run(
                                 "web_search",
-                                format!("seat={seat:?};phase={phase:?};query={query}"),
+                                query.clone(),
                                 "failed",
                                 started.elapsed(),
                                 vec![],
@@ -1791,11 +1791,9 @@ fn phase_schema(phase: SessionPhase) -> &'static str {
       "target_seat": "mouyuan",
       "strongest_point": "",
       "weakest_point": "",
-      "hidden_assumption": "",
       "challenge": "",
       "counterexample": "",
-      "suggested_improvement": "",
-      "evidence_question": ""
+      "suggested_improvement": ""
     }
   ]
 }"#
@@ -1806,9 +1804,7 @@ fn phase_schema(phase: SessionPhase) -> &'static str {
   "summary": "",
   "source_idea_ids": [],
   "adopted_points": [""],
-  "rejected_points": [""],
   "rejection_reasons": [""],
-  "changes_from_initial": [""],
   "user_value": "",
   "implementation_path": "",
   "risks": [""],
@@ -1923,10 +1919,8 @@ impl DiscussionQualityMetrics {
                     .filter(|critique| {
                         !critique.strongest_point.trim().is_empty()
                             && !critique.weakest_point.trim().is_empty()
-                            && !critique.hidden_assumption.trim().is_empty()
                             && !critique.counterexample.trim().is_empty()
                             && !critique.suggested_improvement.trim().is_empty()
-                            && !critique.evidence_question.trim().is_empty()
                     })
                     .count(),
                 artifacts.critiques.len(),
@@ -1935,7 +1929,7 @@ impl DiscussionQualityMetrics {
                 artifacts
                     .proposals
                     .iter()
-                    .filter(|proposal| !proposal.changes_from_initial.is_empty())
+                    .filter(|proposal| !proposal.rejection_reasons.is_empty())
                     .count(),
                 artifacts.proposals.len(),
             ),

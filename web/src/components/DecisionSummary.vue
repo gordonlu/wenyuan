@@ -13,7 +13,7 @@
 
     <div v-if="decision?.selected_proposal" class="result-block">
       <h3>{{ decision.selected_proposal.title }}</h3>
-      <p>{{ decision.selected_proposal.summary }}</p>
+      <div class="formatted-summary" v-html="renderedSummary" />
       <p v-if="decision.status === 'conditionally_adopted'" class="muted" style="font-size: 13px">三席已有倾向，但还需要先处理采纳条件。</p>
       <dl>
         <dt>有效票数</dt>
@@ -86,6 +86,7 @@
 import { computed } from 'vue'
 import { seatLabels, voteStrategyLabels } from '../domain/session'
 import type { Decision, VotePolicy } from '../domain/session'
+import { renderMarkdown } from '../utils/markdown'
 
 const props = defineProps<{
   decision?: Decision | null
@@ -97,17 +98,26 @@ const voteStrategyLabel = computed(() =>
   props.votePolicy ? (voteStrategyLabels[props.votePolicy.strategy] ?? props.votePolicy.strategy) : ''
 )
 
+const renderedSummary = computed(() =>
+  props.decision?.selected_proposal?.summary
+    ? renderMarkdown(props.decision.selected_proposal.summary)
+    : ''
+)
+
 interface ActionItem { text: string; kind: 'do' | 'caution' | 'question' }
 
 const actionItems = computed<ActionItem[]>(() => {
   const items: ActionItem[] = []
   const d = props.decision
   if (!d) return items
+  if (d.selected_proposal?.implementation_path?.trim()) {
+    items.push({ text: d.selected_proposal.implementation_path, kind: 'do' })
+  }
   for (const step of d.next_steps ?? []) {
     if (step.trim()) items.push({ text: step, kind: 'do' })
   }
   for (const condition of d.adoption_conditions ?? []) {
-    if (condition.trim()) items.push({ text: condition, kind: 'do' })
+    if (condition.trim()) items.push({ text: condition, kind: 'caution' })
   }
   return items
 })
@@ -142,6 +152,30 @@ const hasDetail = computed(() => {
 </script>
 
 <style scoped>
+.formatted-summary {
+  line-height: 1.7;
+  font-size: 14px;
+}
+.formatted-summary p {
+  margin: 0.5em 0;
+}
+.formatted-summary strong {
+  color: var(--color-text);
+  font-weight: 600;
+}
+.formatted-summary ul, .formatted-summary ol {
+  padding-left: 1.5em;
+  margin: 0.4em 0;
+}
+.formatted-summary li {
+  margin: 0.2em 0;
+}
+.formatted-summary h2,
+.formatted-summary h3,
+.formatted-summary h4 {
+  margin: 0.8em 0 0.3em;
+  color: var(--color-text);
+}
 .action-block {
   background: #f8faf5;
   border: 1px solid #d8e0ce;
@@ -162,7 +196,7 @@ const hasDetail = computed(() => {
   padding: 6px 10px;
   background: #fff;
   border-radius: var(--radius-sm);
-  border-left: 3px solid var(--color-accent);
+  border-left: 6px solid var(--color-accent);
   font-size: 13px;
   line-height: 1.5;
   color: var(--color-text);

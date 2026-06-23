@@ -3,7 +3,7 @@
     <div class="document-source-head">
       <div>
         <span class="field-title">外部资料</span>
-        <span class="field-caption">PDF、DOCX、表格、CSV、Markdown、文本</span>
+        <span class="field-caption">PDF、DOCX、表格、CSV、Markdown、文本（单文件 ≤5MB，总计 ≤20MB）</span>
       </div>
       <label class="document-upload-button">
         <UploadCloud :size="16" />
@@ -78,9 +78,11 @@ const emit = defineEmits<{
 
 type ParsedSource = ParseDocumentResponse & {
   id: string
+  file_size: number
 }
 
-const MAX_FILE_BYTES = 20 * 1024 * 1024
+const MAX_FILE_BYTES = 5 * 1024 * 1024
+const MAX_TOTAL_BYTES = 20 * 1024 * 1024
 const MAX_CONTEXT_CHARS = 24_000
 const acceptedTypes = [
   '.txt',
@@ -112,9 +114,14 @@ async function parseFiles(event: Event) {
   parsing.value = true
   localError.value = ''
   try {
+    const existingTotal = sources.value.reduce((s, src) => s + src.file_size, 0)
+    const batchTotal = files.reduce((s, f) => s + f.size, 0)
+    if (existingTotal + batchTotal > MAX_TOTAL_BYTES) {
+      throw new Error(`文件总大小超过 20MB 限制（已选 ${(existingTotal / 1024 / 1024).toFixed(1)}MB，本次 ${(batchTotal / 1024 / 1024).toFixed(1)}MB）`)
+    }
     for (const file of files) {
       if (file.size > MAX_FILE_BYTES) {
-        throw new Error(`${file.name} 超过 20MB`)
+        throw new Error(`${file.name} 超过 5MB，请压缩后重试`)
       }
       const content_base64 = await readFileAsBase64(file)
       const parsed = await api.parseDocument({
@@ -125,6 +132,7 @@ async function parseFiles(event: Event) {
       sources.value.push({
         ...parsed,
         id: makeSourceId(),
+        file_size: file.size,
       })
     }
     emitContext()

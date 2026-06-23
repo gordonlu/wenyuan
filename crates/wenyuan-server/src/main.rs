@@ -29,12 +29,12 @@ use tracing::{error, info};
 use uuid::Uuid;
 use wenyuan_agent::{AgentError, AgentRunner, CancellationFlag, ProgressSink};
 use wenyuan_core::{
-    ChatMessage, DeliberationMode, Evidence, SearchBackend, SearchResult, SeatKind, SeatModelConfig,
+    DeliberationMode, Evidence, SearchBackend, SeatKind, SeatModelConfig,
     Session, SessionPhase, VotePolicy, VoteStrategy,
 };
 use wenyuan_provider::{
     CustomSearchBackend, DoubaoBackend, GoogleCustomSearchBackend,
-    LlmProvider, LlmRequest, MockProvider, MockScenario, OpenAiCompatibleConfig, OpenAiCompatibleProvider,
+    LlmProvider, MockProvider, MockScenario, OpenAiCompatibleConfig, OpenAiCompatibleProvider,
     SearXNGSearchBackend, SearchPool, SeatRoutedProvider, TavilyBackend,
 };
 use wenyuan_store::{SessionDetails, Store};
@@ -58,7 +58,6 @@ struct AppState {
     event_tx: broadcast::Sender<Uuid>,
     config: ConfigStatus,
     search_backend: Option<Arc<dyn SearchBackend>>,
-    search_pool: Option<Arc<SearchPool>>,
     preferences_path: Arc<PathBuf>,
 }
 
@@ -291,7 +290,6 @@ async fn main() -> anyhow::Result<()> {
         event_tx: broadcast::channel(128).0,
         config,
         search_backend,
-        search_pool,
         preferences_path,
     };
 
@@ -327,7 +325,7 @@ fn max_file_size_mb_from_env() -> u64 {
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
         .filter(|mb| *mb > 0)
-        .unwrap_or(20)
+        .unwrap_or(5)
         .min(body_budget_mb.max(1))
 }
 
@@ -442,7 +440,7 @@ fn app(state: AppState) -> Router {
             get(get_preferences).put(update_preferences),
         )
         .route("/api/sessions", post(create_session).get(list_sessions))
-        .route("/api/sessions/{id}", get(get_session))
+        .route("/api/sessions/{id}", get(get_session).delete(delete_session))
         .route("/api/sessions/{id}/start", post(start_session))
         .route("/api/sessions/{id}/retry", post(retry_session))
         .route("/api/sessions/{id}/cancel", post(cancel_session))
@@ -456,7 +454,7 @@ fn app(state: AppState) -> Router {
         .route("/api/sessions/{id}/events", get(events_sse))
         .route("/api/tools/documents/parse", post(parse_document))
         .route("/api/tools/code/search", post(search_code_tool))
-        .route("/api/tools/search-test", post(web_search_test))
+
         .route("/api/test-topics", get(test_topics))
         .fallback_service(ServeDir::new("web/dist").fallback(ServeFile::new("web/dist/index.html")))
         .layer(DefaultBodyLimit::max(max_request_body_bytes()))
@@ -780,151 +778,6 @@ async fn search_code_tool(
     }))
 }
 
-#[derive(Deserialize)]
-struct WebSearchTestRequest {
-    topic: String,
-}
-
-#[derive(Serialize)]
-struct WebSearchTestStep {
-    prompt: String,
-    raw_response: String,
-    extracted: String,
-    note: String,
-}
-
-#[derive(Serialize)]
-struct BackendResult {
-    name: String,
-    results: Vec<SearchResult>,
-    error: Option<String>,
-}
-
-#[derive(Serialize)]
-struct WebSearchTestResponse {
-    keyword_step: WebSearchTestStep,
-    search_query: String,
-    backends: Vec<BackendResult>,
-}
-
-async fn web_search_test(
-    State(state): State<AppState>,
-    Json(input): Json<WebSearchTestRequest>,
-) -> Result<Json<WebSearchTestResponse>, ApiError> {
-    // Step 1: LLM extracts search keywords from topic
-    let prompt = format!(
-        "从以下议题中提取 2-3 个搜索关键词，输出 JSON：{{\"query\": \"关键词1 关键词2 关键词3\"}}\n\n议题：{}",
-        input.topic
-    );
-    let request = LlmRequest {
-        session_id: Uuid::nil(),
-        seat: SeatKind::Mouyuan,
-        phase: SessionPhase::Draft,
-        messages: vec![
-            ChatMessage {
-                role: "system".into(),
-                content: "你是一个搜索关键词提取助手。根据用户提供的议题，提取 2-3 个搜索关键词并输出 JSON。只输出 JSON，不要输出其他文字。".into(),
-            },
-            ChatMessage {
-                role: "user".into(),
-                content: prompt.clone(),
-            },
-        ],
-        repair_json: false,
-        max_tokens: 100,
-        prompt_version: "search-test-v1".into(),
-        reasoning_effort: None,
-        override_model: None,
-    };
-
-    let (extracted, raw_response, note) = match state.runner.provider().complete(request).await {
-        Ok(response) => {
-            let raw = response.content.trim().to_string();
-            if raw.is_empty() {
-                let fallback: String = input.topic.chars().take(60).collect();
-                (fallback, raw, "LLM 返回空内容，回退到议题前 60 字符".into())
-            } else if let Some(q) = try_extract_query_json(&raw) {
-                if q.chars().filter(|c| !c.is_whitespace()).count() >= 3 {
-                    (q, raw, "从 LLM JSON 中提取".into())
-                } else {
-                    let fallback: String = input.topic.chars().take(60).collect();
-                    (fallback, raw, "LLM 输出太短，回退到议题前 60 字符".into())
-                }
-            } else {
-                let cleaned = raw.trim().to_string();
-                if cleaned.chars().filter(|c| !c.is_whitespace()).count() >= 3 {
-                    (cleaned, raw, "LLM 未输出合法 JSON，直接使用原文".into())
-                } else {
-                    let fallback: String = input.topic.chars().take(60).collect();
-                    (fallback, raw, "LLM 输出无法解析，回退到议题前 60 字符".into())
-                }
-            }
-        }
-        Err(err) => {
-            let fallback: String = input.topic.chars().take(60).collect();
-            (fallback, format!("LLM 调用失败：{err}"), "LLM 调用失败，回退到议题前 60 字符".into())
-        }
-    };
-
-    // Step 2: search each backend individually
-    let pool = state
-        .search_pool
-        .ok_or_else(|| ApiError::internal("search backend not configured"))?;
-    let grouped = pool.search_grouped(&extracted, 5).await;
-    let mut backends: Vec<BackendResult> = grouped
-        .into_iter()
-        .map(|(name, (results, error))| BackendResult { name, results, error })
-        .collect();
-    backends.sort_by(|a, b| a.name.cmp(&b.name));
-
-    Ok(Json(WebSearchTestResponse {
-        keyword_step: WebSearchTestStep {
-            prompt,
-            raw_response,
-            extracted: extracted.clone(),
-            note,
-        },
-        search_query: extracted,
-        backends,
-    }))
-}
-
-/// Try to extract the "query" field from a JSON object string.
-/// Handles markdown fences and common prefixes.
-fn try_extract_query_json(s: &str) -> Option<String> {
-    // Strip markdown code fences
-    let s = s
-        .trim()
-        .trim_start_matches("```json")
-        .trim_start_matches("```")
-        .trim_end_matches("```")
-        .trim();
-    // Try direct JSON parse
-    if let Some(val) = serde_json::from_str::<serde_json::Value>(s).ok() {
-        if let Some(q) = val.get("query").and_then(|v| v.as_str()) {
-            let trimmed = q.trim();
-            if !trimmed.is_empty() {
-                return Some(trimmed.to_string());
-            }
-        }
-    }
-    // Try to find a JSON-like substring if the response has extra text
-    if let Some(start) = s.find('{') {
-        if let Some(end) = s[start..].rfind('}') {
-            let json_str = &s[start..=start + end];
-            if let Ok(val) = serde_json::from_str::<serde_json::Value>(json_str) {
-                if let Some(q) = val.get("query").and_then(|v| v.as_str()) {
-                    let trimmed = q.trim();
-                    if !trimmed.is_empty() {
-                        return Some(trimmed.to_string());
-                    }
-                }
-            }
-        }
-    }
-    None
-}
-
 fn resolve_code_search_root(input: &str) -> Result<PathBuf, ApiError> {
     let root = FsPath::new(input)
         .canonicalize()
@@ -1211,6 +1064,18 @@ async fn cancel_session(
     state.store.cancel_session(id).await?;
     let _ = state.event_tx.send(id);
     Ok(Json(state.store.get_session(id).await?))
+}
+
+async fn delete_session(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, ApiError> {
+    if let Some(cancel) = state.running.lock().await.remove(&id) {
+        cancel.cancel();
+    }
+    state.store.delete_session(id).await?;
+    let _ = state.event_tx.send(id);
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn pause_session(

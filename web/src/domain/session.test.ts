@@ -155,7 +155,7 @@ describe('session domain helpers', () => {
 
     const markdown = exportSessionMarkdown(details, 'standard')
     expect(markdown).toContain('# 增长策略')
-    expect(markdown).toContain('## 原始议题')
+    expect(markdown).toContain('## 2. 议题与背景')
     expect(markdown).toContain('### 谋远席：激活路径')
     expect(markdown).toContain('### 经世席 → 谋远席')
     expect(markdown).toContain('### 谋远席：分层引导')

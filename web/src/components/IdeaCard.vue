@@ -66,7 +66,7 @@ function statusLabel(key?: string) {
 
 <style scoped>
 .idea-card.unconventional {
-  border-left: 3px solid var(--color-warning-border);
+  border-left: 6px solid var(--color-warning-border);
 }
 .idea-tags {
   display: flex;

@@ -38,7 +38,7 @@ describe('SeatRoleCard', () => {
     expect(wrapper.find('.seat-role-card.is-running').exists()).toBe(false)
   })
 
-  it('shows retry button when seat has failures', () => {
+  it('shows failure count when seat has failures', () => {
     const wrapper = mount(SeatRoleCard, {
       props: {
         seat: 'mouyuan',
@@ -46,8 +46,8 @@ describe('SeatRoleCard', () => {
         runs: [{ id: 'r1', session_id: '', seat: 'mouyuan', phase: 'independent_deliberation', status: 'failed', prompt_version: 'v1', repair_attempted: false, duration_ms: 100, error: 'timeout', raw_output: null, prompt_tokens: null, completion_tokens: null, total_tokens: null, upstream_status: null }],
       },
     })
-    expect(wrapper.find('.stat-action').exists()).toBe(true)
-    expect(wrapper.text()).toContain('重试')
+    expect(wrapper.find('.runtime-failures').exists()).toBe(true)
+    expect(wrapper.text()).toContain('失败')
   })
 
   it('sets aria-busy when running', () => {

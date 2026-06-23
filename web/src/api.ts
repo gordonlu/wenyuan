@@ -1,4 +1,4 @@
-import type { CodeSearchResponse, ConfigStatus, EvidenceItem, ParseDocumentResponse, SearchTestResponse, SessionDetails, SessionRecord, SessionSummary, ToolRun, UserPreferences } from './domain/session'
+import type { CodeSearchResponse, ConfigStatus, EvidenceItem, ParseDocumentResponse, SessionDetails, SessionRecord, SessionSummary, ToolRun, UserPreferences } from './domain/session'
 
 const base = ''
 
@@ -41,6 +41,9 @@ export const api = {
   },
   cancelSession(id: string) {
     return request<SessionDetails>(`/api/sessions/${id}/cancel`, { method: 'POST' })
+  },
+  deleteSession(id: string) {
+    return request<void>(`/api/sessions/${id}`, { method: 'DELETE' })
   },
   pauseSession(id: string) {
     return request<SessionDetails>(`/api/sessions/${id}/pause`, { method: 'POST' })
@@ -89,12 +92,6 @@ export const api = {
   },
   searchCode(input: { query: string }) {
     return request<CodeSearchResponse>('/api/tools/code/search', {
-      method: 'POST',
-      body: JSON.stringify(input),
-    })
-  },
-  searchTest(input: { topic: string }) {
-    return request<SearchTestResponse>('/api/tools/search-test', {
       method: 'POST',
       body: JSON.stringify(input),
     })
