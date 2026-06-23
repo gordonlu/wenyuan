@@ -8,7 +8,6 @@ members = [
     "crates/wenyuan-server",
     "crates/wenyuan-app",
     "crates/wenyuan-runtime",
-    "desktop/src-tauri",
 ]
 resolver = "2"
 
