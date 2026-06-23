@@ -1,7 +1,7 @@
 # 文渊阁 Wenyuan
 
 [![CI](https://github.com/gordonlu/wenyuan/actions/workflows/ci.yml/badge.svg)](https://github.com/gordonlu/wenyuan/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 文渊阁是一个本地运行的 AI 合议工作台。它把同一个问题交给三个不同立场的席位分别思考、互相批议、修订方案，并通过投票形成最终结论。
 

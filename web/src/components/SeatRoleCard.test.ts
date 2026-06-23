@@ -59,6 +59,6 @@ describe('SeatRoleCard', () => {
         events: [createEvent('seat_started', 'mouyuan')],
       },
     })
-    expect(wrapper.attributes('aria-busy')).toBe('true')
+    expect(wrapper.classes()).toContain('is-running')
   })
 })
