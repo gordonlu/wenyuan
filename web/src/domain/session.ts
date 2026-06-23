@@ -318,6 +318,21 @@ export interface ExecutionInfo {
   recovery_state: 'idle' | 'running' | 'completed' | 'failed' | 'cancelled' | 'retry_required' | string
 }
 
+export interface ProviderSettings {
+  provider: string
+  base_url: string
+  model: string
+  api_key_configured: boolean
+  api_key_hint?: string
+}
+
+export interface TestProviderResponse {
+  ok: boolean
+  latency_ms?: number
+  message: string
+  error_kind?: string
+}
+
 export interface ConfigStatus {
   provider_configured: boolean
   provider_kind: string

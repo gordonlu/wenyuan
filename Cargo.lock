@@ -3102,7 +3102,6 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "wenyuan-agent",
- "wenyuan-core",
  "wenyuan-server",
  "wenyuan-store",
 ]

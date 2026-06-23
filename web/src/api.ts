@@ -1,4 +1,4 @@
-import type { CodeSearchResponse, ConfigStatus, EvidenceItem, ParseDocumentResponse, SessionDetails, SessionRecord, SessionSummary, ToolRun, UserPreferences } from './domain/session'
+import type { CodeSearchResponse, ConfigStatus, EvidenceItem, ParseDocumentResponse, ProviderSettings, SessionDetails, SessionRecord, SessionSummary, TestProviderResponse, ToolRun, UserPreferences } from './domain/session'
 
 const base = ''
 
@@ -93,6 +93,21 @@ export const api = {
   },
   searchCode(input: { query: string }) {
     return request<CodeSearchResponse>('/api/tools/code/search', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    })
+  },
+  getProviderSettings() {
+    return request<ProviderSettings>('/api/settings/provider')
+  },
+  updateProviderSettings(input: { provider: string; base_url: string; model: string; api_key?: string; clear_api_key?: boolean }) {
+    return request<ProviderSettings>('/api/settings/provider', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    })
+  },
+  testProvider(input: { provider: string; base_url: string; model: string; api_key?: string; use_saved_key?: boolean }) {
+    return request<TestProviderResponse>('/api/settings/test-provider', {
       method: 'POST',
       body: JSON.stringify(input),
     })

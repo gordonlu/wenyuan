@@ -5,6 +5,78 @@
       <h1>本地服务</h1>
     </header>
     <ApiErrorState :message="error" />
+
+    <section class="panel provider-panel">
+      <h2>模型配置</h2>
+
+      <div class="provider-form">
+        <label>
+          Provider 类型
+          <select v-model="providerType">
+            <option value="openai_compatible">OpenAI-compatible</option>
+            <option value="mock">Mock（无需 API Key）</option>
+          </select>
+        </label>
+
+        <template v-if="providerType === 'openai_compatible'">
+          <label>
+            Base URL
+            <input v-model="baseUrl" placeholder="https://api.deepseek.com" />
+          </label>
+          <label>
+            模型名称
+            <input v-model="modelName" placeholder="deepseek-chat" />
+          </label>
+
+          <div class="api-key-row">
+            <label v-if="!changingKey" class="key-status">
+              API Key：<strong>{{ apiKeyHint || '未配置' }}</strong>
+              <button class="subtle" @click="changingKey = true">更换</button>
+            </label>
+            <label v-else>
+              API Key
+              <input
+                v-model="apiKeyInput"
+                type="password"
+                autocomplete="new-password"
+                spellcheck="false"
+                placeholder="输入新的 API Key"
+              />
+            </label>
+          </div>
+        </template>
+
+        <div class="provider-actions">
+          <button
+            class="primary"
+            :disabled="saving"
+            @click="saveSettings"
+          >
+            {{ saving ? '保存中…' : '保存配置' }}
+          </button>
+          <button
+            v-if="providerType === 'openai_compatible' && baseUrl"
+            :disabled="testing"
+            @click="doTest"
+          >
+            {{ testing ? '测试中…' : '测试连接' }}
+          </button>
+          <button
+            v-if="apiKeyConfigured && providerType === 'openai_compatible'"
+            class="danger"
+            @click="clearKey"
+          >
+            删除 API Key
+          </button>
+        </div>
+
+        <p v-if="testResult" :class="['test-result', testResult.ok ? 'ok' : 'fail']">
+          {{ testResult.message }}
+          <span v-if="testResult.latency_ms">（{{ testResult.latency_ms }}ms）</span>
+        </p>
+      </div>
+    </section>
+
     <dl v-if="config" class="config-grid">
       <dt>Provider</dt>
       <dd>{{ config.provider_kind }}</dd>
@@ -23,12 +95,7 @@
       <dt>服务版本</dt>
       <dd>{{ config.version }}</dd>
       <dt>搜索 Provider</dt>
-      <dd>
-        {{ config.search_provider || '未配置' }}
-        <p v-if="config.search_provider?.includes('bing') || config.search_provider?.includes('duckduckgo')" class="search-warning">
-          ⚠ bing/duckduckgo 仅供本地实验。生产环境请配置 authorized search provider（custom / tavily / doubao / google / searxng）。
-        </p>
-      </dd>
+      <dd>{{ config.search_provider || '未配置' }}</dd>
     </dl>
 
     <form v-if="preferences" class="form-panel preferences-panel" @submit.prevent="savePreferences">
@@ -37,8 +104,8 @@
           <h2>用户偏好</h2>
           <p class="muted">只保存本地默认配置，不抽取历史决策，也不保存隐藏推理。</p>
         </div>
-        <button class="primary" :disabled="saving">
-          {{ saving ? '保存中' : '保存偏好' }}
+        <button class="primary" :disabled="savingPrefs">
+          {{ savingPrefs ? '保存中' : '保存偏好' }}
         </button>
       </div>
 
@@ -110,12 +177,37 @@
 import { onMounted, ref } from 'vue'
 import { api } from '../api'
 import ApiErrorState from '../components/ApiErrorState.vue'
-import type { ConfigStatus, UserPreferences } from '../domain/session'
+import type { ConfigStatus, UserPreferences, TestProviderResponse } from '../domain/session'
 
 const config = ref<ConfigStatus | null>(null)
 const preferences = ref<UserPreferences | null>(null)
 const error = ref('')
 const saving = ref(false)
+const testing = ref(false)
+const savingPrefs = ref(false)
+const testResult = ref<TestProviderResponse | null>(null)
+
+// Provider settings
+const providerType = ref('mock')
+const baseUrl = ref('')
+const modelName = ref('')
+const apiKeyConfigured = ref(false)
+const apiKeyHint = ref('')
+const apiKeyInput = ref('')
+const changingKey = ref(false)
+
+async function loadSettings() {
+  try {
+    const settings = await api.getProviderSettings()
+    providerType.value = settings.provider
+    baseUrl.value = settings.base_url
+    modelName.value = settings.model
+    apiKeyConfigured.value = settings.api_key_configured
+    apiKeyHint.value = settings.api_key_hint || ''
+  } catch {
+    // settings endpoint unavailable, stay on mock
+  }
+}
 
 onMounted(async () => {
   try {
@@ -128,23 +220,162 @@ onMounted(async () => {
   } catch (err) {
     error.value = err instanceof Error ? err.message : '加载失败'
   }
+  await loadSettings()
 })
 
-async function savePreferences() {
-  if (!preferences.value) return
+async function saveSettings() {
   saving.value = true
   error.value = ''
+  testResult.value = null
   try {
-    preferences.value = await api.updatePreferences(preferences.value)
+    const result = await api.updateProviderSettings({
+      provider: providerType.value,
+      base_url: baseUrl.value,
+      model: modelName.value,
+      api_key: apiKeyInput.value || undefined,
+    })
+    apiKeyHint.value = result.api_key_hint || ''
+    apiKeyConfigured.value = result.api_key_configured
+    apiKeyInput.value = ''
+    changingKey.value = false
   } catch (err) {
     error.value = err instanceof Error ? err.message : '保存失败'
   } finally {
     saving.value = false
   }
 }
+
+async function doTest() {
+  testing.value = true
+  testResult.value = null
+  try {
+    testResult.value = await api.testProvider({
+      provider: providerType.value,
+      base_url: baseUrl.value,
+      model: modelName.value,
+      api_key: apiKeyInput.value || undefined,
+      use_saved_key: !apiKeyInput.value && apiKeyConfigured.value,
+    })
+  } catch (err) {
+    testResult.value = { ok: false, message: err instanceof Error ? err.message : '测试失败' }
+  } finally {
+    testing.value = false
+  }
+}
+
+async function clearKey() {
+  try {
+    await api.updateProviderSettings({
+      provider: providerType.value,
+      base_url: baseUrl.value,
+      model: modelName.value,
+      clear_api_key: true,
+    })
+    apiKeyConfigured.value = false
+    apiKeyHint.value = ''
+    apiKeyInput.value = ''
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : '删除失败'
+  }
+}
+
+async function savePreferences() {
+  if (!preferences.value) return
+  savingPrefs.value = true
+  error.value = ''
+  try {
+    preferences.value = await api.updatePreferences(preferences.value)
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : '保存失败'
+  } finally {
+    savingPrefs.value = false
+  }
+}
 </script>
 
 <style scoped>
+.provider-panel {
+  margin-bottom: 18px;
+}
+
+.provider-form {
+  display: grid;
+  gap: 14px;
+  margin-top: 12px;
+}
+
+.provider-form label {
+  display: grid;
+  gap: 4px;
+  font-size: 13px;
+  color: #8a9aa8;
+}
+
+.provider-form input,
+.provider-form select {
+  padding: 8px 10px;
+  border: 1px solid rgba(212, 226, 236, 0.2);
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.15);
+  color: #e2e8f0;
+  font-size: 14px;
+}
+
+.provider-form input:focus,
+.provider-form select:focus {
+  outline: none;
+  border-color: #0f8aa1;
+}
+
+.api-key-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.key-status strong {
+  color: #e2e8f0;
+  font-family: monospace;
+  margin: 0 6px;
+}
+
+.provider-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 4px;
+}
+
+.danger {
+  background: rgba(182, 38, 98, 0.3);
+  border: 1px solid rgba(182, 38, 98, 0.5);
+  color: #ffd7e6;
+  padding: 8px 16px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.danger:hover {
+  background: rgba(182, 38, 98, 0.5);
+}
+
+.test-result {
+  margin: 0;
+  padding: 8px 12px;
+  border-radius: 6px;
+  font-size: 13px;
+}
+
+.test-result.ok {
+  background: rgba(15, 138, 161, 0.15);
+  color: #8ddbd1;
+}
+
+.test-result.fail {
+  background: rgba(182, 38, 98, 0.15);
+  color: #ff8ab5;
+}
+
 .preferences-panel {
   display: grid;
   gap: 18px;
@@ -176,11 +407,5 @@ async function savePreferences() {
 .toggle-row input {
   width: 18px;
   height: 18px;
-}
-.search-warning {
-  font-size: 12px;
-  color: var(--color-warning, #b8860b);
-  margin: 4px 0 0;
-  line-height: 1.4;
 }
 </style>
