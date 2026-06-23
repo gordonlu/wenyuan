@@ -383,7 +383,7 @@ function toolActionLabel(name?: string) {
 .seat-border.is-running::before {
   content: '';
   position: absolute;
-  inset: -6px;
+  inset: -5px;
   z-index: 4;
   padding: 6px;
   border-radius: calc(var(--radius-md) + 6px);

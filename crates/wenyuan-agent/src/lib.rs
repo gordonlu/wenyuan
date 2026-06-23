@@ -1714,7 +1714,7 @@ impl AgentRunner {
                 ChatMessage {
                     role: "user".into(),
                     content: format!(
-                        "{instruction}\n\n硬性输出规则：\n- 只输出一个 JSON object。\n- 不要输出 Markdown，不要使用 ```json 代码块。\n- 不要输出解释性文字。\n- 字段名必须与 schema 完全一致。\n- 缺少信息时使用空字符串、空数组或 0，不要省略 schema 字段。\n\n阶段：{phase:?}\n\n必须匹配的 JSON schema 示例：\n{schema}\n\n输入：{}{}",
+                        "{instruction}\n\n硬性输出规则：\n- 只输出一个 JSON object。\n- 不要输出 Markdown，不要使用 ```json 代码块。\n- 不要输出解释性文字。\n- 字段名必须与 schema 完全一致。\n- 字符串内容不要包含未转义的双引号（如需引号请用「」或单引号）。\n- 缺少信息时使用空字符串、空数组或 0，不要省略 schema 字段。\n\n阶段：{phase:?}\n\n必须匹配的 JSON schema 示例：\n{schema}\n\n输入：{}{}",
                         serde_json::to_string(phase_input).unwrap_or_else(|_| "{}".into()),
                         repair_context
                     ),
@@ -2231,20 +2231,6 @@ fn extract_evidence_pool(
                 link_type: "supports".into(),
             });
         }
-        // Idea risks → Claim only (challenge), no direct evidence
-        for risk in &idea.risks {
-            let claim_id = Uuid::new_v4();
-            claims.push(Claim {
-                id: claim_id,
-                proposed_by: idea.proposed_by,
-                content: risk.clone(),
-                context: format!("Risk of Idea: {}", idea.title),
-                is_supported: false,
-                evidence_ids: vec![],
-                assessment_ids: vec![],
-                status: wenyuan_core::EvidenceStatus::Proposed,
-            });
-        }
         // Idea value + mechanism → Fact evidence
         if !idea.value.trim().is_empty() {
             let evidence_id = Uuid::new_v4();
@@ -2634,6 +2620,45 @@ fn clean_json_string(raw: &str) -> String {
             }
         }
         cleaned = out;
+    }
+
+    // If still invalid, try to fix unescaped double quotes inside strings
+    if serde_json::from_str::<serde_json::Value>(&cleaned).is_err() && cleaned.contains('"') {
+        let mut in_string = false;
+        let mut fixed = String::with_capacity(cleaned.len());
+        let chars: Vec<char> = cleaned.chars().collect();
+        let mut i = 0;
+        while i < chars.len() {
+            if chars[i] == '"' {
+                // Check if escaped
+                if i > 0 && chars[i - 1] == '\\' {
+                    fixed.push('"');
+                    i += 1;
+                    continue;
+                }
+                if !in_string {
+                    in_string = true;
+                    fixed.push('"');
+                } else {
+                    // Inside a string, check if this quote closes it or is content
+                    let mut j = i + 1;
+                    while j < chars.len() && chars[j].is_whitespace() {
+                        j += 1;
+                    }
+                    if j < chars.len() && matches!(chars[j], ',' | '}' | ']' | ':') {
+                        in_string = false;
+                        fixed.push('"');
+                    } else {
+                        fixed.push('\\');
+                        fixed.push('"');
+                    }
+                }
+            } else {
+                fixed.push(chars[i]);
+            }
+            i += 1;
+        }
+        cleaned = fixed;
     }
 
     cleaned

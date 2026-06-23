@@ -282,6 +282,7 @@ nav a.router-link-active {
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
   padding: var(--space-lg);
+  margin-top: var(--space-lg);
   margin-bottom: var(--space-lg);
   box-shadow: var(--shadow-md);
   transition: border-color var(--transition-base), box-shadow var(--transition-base);

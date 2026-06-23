@@ -13,6 +13,7 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
     try { const payload = JSON.parse(text); error = payload.error ?? error } catch { /* ignore */ }
     throw new Error(error)
   }
+  if (!text) return undefined as T
   try {
     return JSON.parse(text) as T
   } catch {
