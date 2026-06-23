@@ -1,5 +1,8 @@
 # 文渊阁 Wenyuan
 
+[![CI](https://github.com/gordonlu/wenyuan/actions/workflows/ci.yml/badge.svg)](https://github.com/gordonlu/wenyuan/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 文渊阁是一个本地运行的 AI 合议工作台。它把同一个问题交给三个不同立场的席位分别思考、互相批议、修订方案，并通过投票形成最终结论。
 
 项目目标不是让一个模型给出更长的回答，而是把复杂决策拆成可观察、可比较、可追溯的过程：你可以看到每个席位提出了什么、批评了什么、如何修改，以及最终多数方案和少数意见分别是什么。
@@ -40,7 +43,7 @@
 - 席位模型与 Provider 路由：全局模型、每席模型、每席独立 OpenAI-compatible Provider。
 - 本地持久化与恢复：SQLite 会话、事件、席位运行记录、失败重试和 stale execution recovery。
 - 投票策略：普通多数、风险否决、全票通过、有条件通过、加权评分。
-- 书记官：默认关闭，只做共识整理、结构检查、冲突汇总和最终报告，不参与投票。
+- 完整报告：开启后合议会包含证据、三席详情等完整过程记录；关闭时只展示结论、策案对比与投票摘要。
 - 外部来源证据：联网搜索、文档解析、代码搜索统一进入 evidence/tool_runs，并标记为不可信来源。
 - 安全边界：搜索结果、上传文档和代码搜索内容只作为事实材料，不作为指令执行；保留来源 hash、trust_level 和 safety_flags。
 - 用户偏好：仅保存本地 JSON 默认配置，不扩展成长期记忆或向量记忆。
@@ -159,4 +162,4 @@ WENYUAN_LLM_API_KEY_CHIZHENG=key-c
 
 ## 用户偏好配置
 
-后端提供 `GET/PUT /api/preferences`，默认保存到 `wenyuan-preferences.json`，也可用 `WENYUAN_PREFERENCES_PATH` 指定路径。偏好只保存本地默认配置：默认合议模式、书记官/搜索开关、投票策略、每席默认模型、代码搜索根目录和文件大小上限；不保存隐藏推理，不抽取历史决策，也不做向量记忆。
+后端提供 `GET/PUT /api/preferences`，默认保存到 `wenyuan-preferences.json`，也可用 `WENYUAN_PREFERENCES_PATH` 指定路径。偏好只保存本地默认配置：默认合议模式、完整报告/搜索开关、投票策略、每席默认模型、代码搜索根目录和文件大小上限；不保存隐藏推理，不抽取历史决策，也不做向量记忆。
