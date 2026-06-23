@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use futures::future::join_all;
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::{
@@ -14,13 +14,25 @@ use tracing::{info, warn};
 use uuid::Uuid;
 use wenyuan_core::{
     Assessment, ChatMessage, Claim, ClaimEvidenceLink, Critique, Decision, DecisionStatus,
-    DeliberationMode, Evidence, EvidenceSourceKind, EvidenceTrustLevel, IdeaCard, IdeaStatus,
-    Proposal, SearchBackend, SearchError, SearchResult, SeatKind, SeatModelConfig, SeatStatus,
-    Session, SessionPhase, SourceSafetyFlags, ToolRun, TopicType, Vote, VoteOutcome, VotePolicy,
+    DeliberationMode, Evidence, IdeaCard, IdeaStatus,
+    Proposal, SearchBackend, SeatKind, SeatModelConfig, SeatStatus,
+    Session, SessionPhase, ToolRun, TopicType, Vote, VoteOutcome, VotePolicy,
     build_decision, generate_merged_proposal, phase_barrier_completed,
 };
 use wenyuan_provider::{LlmProvider, LlmRequest, LlmResponse, ProviderError};
 use wenyuan_tools::{make_tool_run, search_results_to_evidence, untrusted_evidence_notice};
+
+mod json;
+pub(crate) use json::clean_json_string;
+mod output;
+mod search;
+mod evidence;
+use json::{parse_model_json, truncate_for_repair};
+use output::{CritiqueOutput, IndependentOutput, PhaseRun, ProposalOutput, SeatCallResult, VoteOutput};
+use search::{format_search_results, try_extract_search_tool, SEARCH_TOOL_INSTRUCTION};
+#[cfg(test)]
+use search::MockSearchBackend;
+use evidence::{compute_idea_statuses, extract_evidence_pool};
 
 #[async_trait]
 pub trait ProgressSink: Send + Sync {
@@ -1656,12 +1668,26 @@ impl AgentRunner {
         cancel: &CancellationFlag,
     ) -> (Result<LlmResponse, ProviderError>, u128) {
         let started = Instant::now();
-        let response = tokio::select! {
-            result = self.provider.complete(request) => result,
-            _ = tokio::time::sleep(self.timeout) => Err(ProviderError::Timeout),
-            _ = cancel.cancelled() => Err(ProviderError::Cancelled),
-        };
-        (response, started.elapsed().as_millis())
+        let mut last_err = Err(ProviderError::Request("no attempt".into()));
+        let mut delay_ms = 500u64;
+        for attempt in 0..3 {
+            if attempt > 0 {
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                delay_ms = (delay_ms * 2).min(8_000);
+            }
+            last_err = tokio::select! {
+                result = self.provider.complete(request.clone()) => result,
+                _ = tokio::time::sleep(self.timeout) => Err(ProviderError::Timeout),
+                _ = cancel.cancelled() => Err(ProviderError::Cancelled),
+            };
+            match &last_err {
+                Ok(_) => return (last_err, started.elapsed().as_millis()),
+                Err(ProviderError::Cancelled) => return (last_err, started.elapsed().as_millis()),
+                Err(ProviderError::InvalidResponse(_)) => return (last_err, started.elapsed().as_millis()),
+                _ => continue,
+            }
+        }
+        (last_err, started.elapsed().as_millis())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1731,40 +1757,6 @@ impl AgentRunner {
             Ok(())
         }
     }
-}
-
-const SEARCH_TOOL_INSTRUCTION: &str = "\n\n你可以搜索互联网来获取信息。如果需要搜索，输出 JSON：{\"tool\":\"search\",\"query\":\"你的搜索词\"}。收到搜索结果后，如果还需要搜索可以继续输出工具调用，否则输出你的阶段输出。";
-
-fn try_extract_search_tool(content: &str) -> Option<String> {
-    let val: serde_json::Value = serde_json::from_str(content.trim()).ok()?;
-    if val.get("tool")?.as_str()? != "search" {
-        return None;
-    }
-    let query = val.get("query")?.as_str()?;
-    let trimmed = query.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_string())
-    }
-}
-
-fn format_search_results(results: &[SearchResult], query: &str) -> String {
-    if results.is_empty() {
-        return format!(
-            "搜索 [{}] 无结果。如果需要换词搜索请继续输出工具调用。",
-            query
-        );
-    }
-    let lines: Vec<String> = results
-        .iter()
-        .map(|r| format!("- {}\n  {}\n  {} ({})", r.title, r.snippet, r.url, r.source))
-        .collect();
-    format!(
-        "搜索 [{}] 的结果：\n{}\n\n如果还需要搜索请输出工具调用 JSON，否则输出你的阶段输出。",
-        query,
-        lines.join("\n")
-    )
 }
 
 fn phase_schema(phase: SessionPhase) -> &'static str {
@@ -2114,275 +2106,8 @@ fn scribe_prompt_config() -> SeatPrompt {
     }
 }
 
-struct PhaseRun<T> {
-    outputs: Vec<(SeatKind, T)>,
-    traces: Vec<SeatRunTrace>,
-    evidence: Vec<Evidence>,
-    tool_runs: Vec<ToolRun>,
-}
-
-struct SeatCallResult<T> {
-    seat: SeatKind,
-    parsed: Option<T>,
-    traces: Vec<SeatRunTrace>,
-    evidence: Vec<Evidence>,
-    tool_runs: Vec<ToolRun>,
-}
-
-fn compute_idea_statuses(
-    ideas: &mut [IdeaCard],
-    critiques: &[Critique],
-    proposals: &[Proposal],
-    final_decision: Option<&Decision>,
-) {
-    let critique_seats: std::collections::HashSet<SeatKind> =
-        critiques.iter().map(|c| c.target_seat).collect();
-    for idea in ideas.iter_mut() {
-        if critique_seats.contains(&idea.proposed_by) {
-            idea.status = IdeaStatus::Challenged;
-        }
-        let critique_ids: Vec<Uuid> = critiques
-            .iter()
-            .filter(|c| c.target_seat == idea.proposed_by)
-            .map(|_| Uuid::new_v4())
-            .collect();
-        idea.challenged_by = critique_ids;
-    }
-
-    for proposal in proposals {
-        for idea in ideas.iter_mut() {
-            if proposal.source_idea_ids.contains(&idea.id) {
-                idea.status = IdeaStatus::Shortlisted;
-                idea.referenced_by_proposals.push(proposal.id);
-            }
-            if proposal
-                .rejected_points
-                .iter()
-                .any(|r| r.contains(&idea.title))
-            {
-                idea.status = IdeaStatus::Rejected;
-            }
-        }
-    }
-
-    if let Some(decision) = final_decision
-        && let Some(selected) = &decision.selected_proposal
-    {
-        for idea in ideas.iter_mut() {
-            if selected.source_idea_ids.contains(&idea.id) {
-                idea.status = IdeaStatus::Adopted;
-            }
-        }
-    }
-}
-
-fn extract_evidence_pool(
-    ideas: &[IdeaCard],
-    critiques: &[Critique],
-    _proposals: &[Proposal],
-) -> (
-    Vec<Claim>,
-    Vec<Evidence>,
-    Vec<Assessment>,
-    Vec<ClaimEvidenceLink>,
-) {
-    let mut claims = Vec::new();
-    let mut evidence = Vec::new();
-    let assessments = Vec::new();
-    let mut links = Vec::new();
-
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs().to_string())
-        .unwrap_or_default();
-
-    for idea in ideas {
-        // Idea assumptions → Inference evidence
-        for assumption in &idea.assumptions {
-            let claim_id = Uuid::new_v4();
-            let content_hash = Some(short_hash(assumption));
-            claims.push(Claim {
-                id: claim_id,
-                proposed_by: idea.proposed_by,
-                content: assumption.clone(),
-                context: format!("Idea: {}", idea.title),
-                is_supported: false,
-                evidence_ids: vec![],
-                assessment_ids: vec![],
-                status: wenyuan_core::EvidenceStatus::Proposed,
-            });
-            let evidence_id = Uuid::new_v4();
-            evidence.push(Evidence {
-                id: evidence_id,
-                proposed_by: idea.proposed_by,
-                kind: wenyuan_core::EvidenceKind::Inference,
-                content: assumption.clone(),
-                source: format!("{} 独议", idea.proposed_by.label()),
-                source_fetched_at: Some(now.clone()),
-                source_hash: content_hash,
-                claim_ids: vec![claim_id],
-                source_kind: EvidenceSourceKind::Internal,
-                trust_level: EvidenceTrustLevel::Internal,
-                safety_flags: SourceSafetyFlags::default(),
-            });
-            links.push(ClaimEvidenceLink {
-                claim_id,
-                evidence_id,
-                link_type: "supports".into(),
-            });
-        }
-        // Idea value + mechanism → Fact evidence
-        if !idea.value.trim().is_empty() {
-            let evidence_id = Uuid::new_v4();
-            evidence.push(Evidence {
-                id: evidence_id,
-                proposed_by: idea.proposed_by,
-                kind: wenyuan_core::EvidenceKind::Fact,
-                content: idea.value.clone(),
-                source: format!("{} 独议 — 用户价值", idea.proposed_by.label()),
-                source_fetched_at: Some(now.clone()),
-                source_hash: Some(short_hash(&idea.value)),
-                claim_ids: vec![],
-                source_kind: EvidenceSourceKind::Internal,
-                trust_level: EvidenceTrustLevel::Internal,
-                safety_flags: SourceSafetyFlags::default(),
-            });
-        }
-        if !idea.mechanism.trim().is_empty() {
-            let evidence_id = Uuid::new_v4();
-            evidence.push(Evidence {
-                id: evidence_id,
-                proposed_by: idea.proposed_by,
-                kind: wenyuan_core::EvidenceKind::Fact,
-                content: idea.mechanism.clone(),
-                source: format!("{} 独议 — 实现机制", idea.proposed_by.label()),
-                source_fetched_at: Some(now.clone()),
-                source_hash: Some(short_hash(&idea.mechanism)),
-                claim_ids: vec![],
-                source_kind: EvidenceSourceKind::Internal,
-                trust_level: EvidenceTrustLevel::Internal,
-                safety_flags: SourceSafetyFlags::default(),
-            });
-        }
-    }
-
-    for critique in critiques {
-        if !critique.challenge.trim().is_empty() {
-            let claim_id = Uuid::new_v4();
-            claims.push(Claim {
-                id: claim_id,
-                proposed_by: critique.reviewer,
-                content: critique.challenge.clone(),
-                context: format!("Critique of {}", critique.target_seat.label()),
-                is_supported: false,
-                evidence_ids: vec![],
-                assessment_ids: vec![],
-                status: wenyuan_core::EvidenceStatus::Disputed,
-            });
-            // Link challenge to linked evidence via "challenges" type
-            if !critique.evidence_question.trim().is_empty() {
-                let evidence_id = Uuid::new_v4();
-                evidence.push(Evidence {
-                    id: evidence_id,
-                    proposed_by: critique.reviewer,
-                    kind: wenyuan_core::EvidenceKind::Preference,
-                    content: critique.evidence_question.clone(),
-                    source: format!("{} 批议 — 补证请求", critique.reviewer.label()),
-                    source_fetched_at: Some(now.clone()),
-                    source_hash: Some(short_hash(&critique.evidence_question)),
-                    claim_ids: vec![claim_id],
-                    source_kind: EvidenceSourceKind::Internal,
-                    trust_level: EvidenceTrustLevel::Internal,
-                    safety_flags: SourceSafetyFlags::default(),
-                });
-                links.push(ClaimEvidenceLink {
-                    claim_id,
-                    evidence_id,
-                    link_type: "challenges".into(),
-                });
-            }
-        }
-        if !critique.evidence_question.trim().is_empty() {
-            let evidence_id = Uuid::new_v4();
-            evidence.push(Evidence {
-                id: evidence_id,
-                proposed_by: critique.reviewer,
-                kind: wenyuan_core::EvidenceKind::Preference,
-                content: critique.evidence_question.clone(),
-                source: format!("{} 批议", critique.reviewer.label()),
-                source_fetched_at: Some(now.clone()),
-                source_hash: Some(short_hash(&critique.evidence_question)),
-                claim_ids: vec![],
-                source_kind: EvidenceSourceKind::Internal,
-                trust_level: EvidenceTrustLevel::Internal,
-                safety_flags: SourceSafetyFlags::default(),
-            });
-        }
-    }
-
-    // Compute is_supported: a claim is supported if it has evidence with claim_ids containing it
-    for claim in &mut claims {
-        claim.is_supported = evidence.iter().any(|ev| ev.claim_ids.contains(&claim.id));
-        if claim.is_supported && claim.status == wenyuan_core::EvidenceStatus::Proposed {
-            claim.status = wenyuan_core::EvidenceStatus::Verified;
-        }
-    }
-
-    (claims, evidence, assessments, links)
-}
-
-fn short_hash(value: &str) -> String {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    value.hash(&mut hasher);
-    format!("{:x}", hasher.finish())
-}
-
 fn unknown_provider_error() -> ProviderError {
     ProviderError::Request("unknown provider error".to_string())
-}
-
-pub struct MockSearchBackend {
-    pub results: Vec<SearchResult>,
-}
-
-impl MockSearchBackend {
-    pub fn new() -> Self {
-        Self {
-            results: vec![
-                SearchResult {
-                    title: "文渊阁项目介绍".into(),
-                    snippet: "文渊阁是一个本地运行的 AI 合议工作台，把同一个问题交给三个不同立场的席位分别思考、互相批议、修订方案，并通过投票形成最终结论。".into(),
-                    url: "https://github.com/gordonlu/wenyuan".into(),
-                    source: "mock".into(),
-                },
-                SearchResult {
-                    title: "AI 合议与多数决机制".into(),
-                    snippet: "三席合议机制包括独议、批议、复议、阁议四个阶段，支持多数决和少数留议。".into(),
-                    url: "https://example.com/deliberation".into(),
-                    source: "mock".into(),
-                },
-                SearchResult {
-                    title: "三席角色设计：谋远、经世、持正".into(),
-                    snippet: "谋远席负责长期战略和系统性思考，经世席关注落地路径和资源约束，持正席审查风险、伦理和边界条件。".into(),
-                    url: "https://example.com/three-seats".into(),
-                    source: "mock".into(),
-                },
-            ],
-        }
-    }
-}
-
-#[async_trait::async_trait]
-impl SearchBackend for MockSearchBackend {
-    fn name(&self) -> &'static str {
-        "mock"
-    }
-
-    async fn search(&self, _query: &str, limit: usize) -> Result<Vec<SearchResult>, SearchError> {
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        Ok(self.results.iter().take(limit).cloned().collect())
-    }
 }
 
 async fn emit_progress(
@@ -2541,189 +2266,6 @@ fn normalize_for_metric(value: &str) -> String {
         .collect()
 }
 
-fn truncate_for_repair(value: &str) -> String {
-    const MAX_CHARS: usize = 6000;
-    let mut output = String::new();
-    for ch in value.chars().take(MAX_CHARS) {
-        output.push(ch);
-    }
-    if value.chars().count() > MAX_CHARS {
-        output.push_str("\n...[truncated]");
-    }
-    output
-}
-
-fn parse_model_json<T>(content: &str) -> Result<T, serde_json::Error>
-where
-    T: for<'de> Deserialize<'de>,
-{
-    let cleaned = clean_json_string(content);
-    serde_json::from_str(&cleaned)
-}
-
-/// Attempt to fix common LLM JSON issues: markdown fences, extra text, trailing commas,
-/// single quotes, truncated content.
-fn clean_json_string(raw: &str) -> String {
-    let s = strip_markdown_json(raw).trim().to_string();
-
-    // Try direct parse first
-    if serde_json::from_str::<serde_json::Value>(&s).is_ok() {
-        return s;
-    }
-
-    // Find the outermost JSON object ({...})
-    let Some(start) = s.find('{') else {
-        return s;
-    };
-    let tail = &s[start..];
-
-    // Find matching closing brace via brace counter
-    let mut depth = 0u32;
-    let end = tail
-        .char_indices()
-        .find(|&(_, c)| {
-            match c {
-                '{' => depth += 1,
-                '}' => depth = depth.saturating_sub(1),
-                _ => {}
-            }
-            depth == 0
-        })
-        .map(|(i, _)| i + 1)
-        .unwrap_or(tail.len());
-    let mut cleaned = tail[..end].to_string();
-
-    // Remove trailing commas before } or ] (do iteratively until stable)
-    loop {
-        let before = cleaned.clone();
-        cleaned = cleaned
-            .replace(",\n}", "\n}")
-            .replace(",}", "}")
-            .replace(",\n]", "\n]")
-            .replace(",]", "]");
-        if cleaned == before {
-            break;
-        }
-    }
-
-    // If still invalid, try replacing single quotes with double quotes
-    if serde_json::from_str::<serde_json::Value>(&cleaned).is_err() && cleaned.contains('\'') {
-        let mut in_single = false;
-        let mut out = String::with_capacity(cleaned.len());
-        for ch in cleaned.chars() {
-            match ch {
-                '\'' => {
-                    in_single = !in_single;
-                    out.push('"');
-                }
-                _ => out.push(ch),
-            }
-        }
-        cleaned = out;
-    }
-
-    // If still invalid, try to fix unescaped double quotes inside strings
-    if serde_json::from_str::<serde_json::Value>(&cleaned).is_err() && cleaned.contains('"') {
-        let mut in_string = false;
-        let mut fixed = String::with_capacity(cleaned.len());
-        let chars: Vec<char> = cleaned.chars().collect();
-        let mut i = 0;
-        while i < chars.len() {
-            if chars[i] == '"' {
-                // Check if escaped
-                if i > 0 && chars[i - 1] == '\\' {
-                    fixed.push('"');
-                    i += 1;
-                    continue;
-                }
-                if !in_string {
-                    in_string = true;
-                    fixed.push('"');
-                } else {
-                    // Inside a string, check if this quote closes it or is content
-                    let mut j = i + 1;
-                    while j < chars.len() && chars[j].is_whitespace() {
-                        j += 1;
-                    }
-                    if j < chars.len() && matches!(chars[j], ',' | '}' | ']' | ':') {
-                        in_string = false;
-                        fixed.push('"');
-                    } else {
-                        fixed.push('\\');
-                        fixed.push('"');
-                    }
-                }
-            } else {
-                fixed.push(chars[i]);
-            }
-            i += 1;
-        }
-        cleaned = fixed;
-    }
-
-    cleaned
-}
-
-fn strip_markdown_json(content: &str) -> &str {
-    let trimmed = content.trim();
-    let Some(rest) = trimmed.strip_prefix("```") else {
-        return trimmed;
-    };
-    let rest = rest
-        .strip_prefix("json")
-        .or_else(|| rest.strip_prefix("JSON"))
-        .unwrap_or(rest)
-        .trim_start_matches(|ch: char| ch.is_whitespace());
-    rest.strip_suffix("```").map(str::trim).unwrap_or(rest)
-}
-
-fn deserialize_uuid_vec_lossy<'de, D>(deserializer: D) -> Result<Vec<Uuid>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let values = Vec::<String>::deserialize(deserializer)?;
-    Ok(values
-        .into_iter()
-        .filter_map(|value| Uuid::parse_str(value.trim()).ok())
-        .collect())
-}
-
-/// Deserialize a string field that may be a JSON string, an array of strings (take first),
-/// or null/missing (default to empty string).
-fn deserialize_string_loose<'de, D>(deserializer: D) -> Result<String, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let value = serde_json::Value::deserialize(deserializer)?;
-    Ok(match value {
-        serde_json::Value::String(s) => s,
-        serde_json::Value::Array(arr) => arr
-            .first()
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-            .unwrap_or_default(),
-        _ => String::new(),
-    })
-}
-
-fn deserialize_boolish<'de, D>(deserializer: D) -> Result<bool, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let value = serde_json::Value::deserialize(deserializer)?;
-    Ok(match value {
-        serde_json::Value::Bool(value) => value,
-        serde_json::Value::Number(value) => value.as_i64().unwrap_or_default() != 0,
-        serde_json::Value::String(value) => {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "true" | "yes" | "y" | "support" | "supported" | "approve" | "approved" | "1"
-            )
-        }
-        _ => false,
-    })
-}
-
 fn token_set(value: &str) -> HashSet<String> {
     let mut tokens = HashSet::new();
     for token in value.split(|ch: char| ch.is_whitespace() || ch.is_ascii_punctuation()) {
@@ -2742,129 +2284,6 @@ fn token_set(value: &str) -> HashSet<String> {
     tokens
 }
 
-#[derive(Debug, Deserialize)]
-struct IndependentOutput {
-    ideas: Vec<RawIdea>,
-}
-
-#[derive(Debug, Deserialize)]
-struct RawIdea {
-    #[serde(default, deserialize_with = "deserialize_string_loose")]
-    title: String,
-    #[serde(default, deserialize_with = "deserialize_string_loose")]
-    summary: String,
-    #[serde(default, deserialize_with = "deserialize_string_loose")]
-    value: String,
-    #[serde(default, deserialize_with = "deserialize_string_loose")]
-    mechanism: String,
-    #[serde(default)]
-    unconventional: bool,
-    #[serde(default)]
-    assumptions: Vec<String>,
-    #[serde(default)]
-    risks: Vec<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct CritiqueOutput {
-    reviews: Vec<RawCritique>,
-}
-
-#[derive(Debug, Deserialize)]
-struct RawCritique {
-    #[serde(alias = "seat")]
-    target_seat: SeatKind,
-    #[serde(default, deserialize_with = "deserialize_string_loose")]
-    strongest_point: String,
-    #[serde(default, deserialize_with = "deserialize_string_loose")]
-    weakest_point: String,
-    #[serde(default, deserialize_with = "deserialize_string_loose")]
-    hidden_assumption: String,
-    #[serde(default, deserialize_with = "deserialize_string_loose")]
-    challenge: String,
-    #[serde(default, deserialize_with = "deserialize_string_loose")]
-    counterexample: String,
-    #[serde(default, deserialize_with = "deserialize_string_loose")]
-    suggested_improvement: String,
-    #[serde(default, deserialize_with = "deserialize_string_loose")]
-    evidence_question: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct ProposalOutput {
-    #[serde(default, deserialize_with = "deserialize_string_loose")]
-    title: String,
-    #[serde(default, deserialize_with = "deserialize_string_loose")]
-    summary: String,
-    #[serde(default, deserialize_with = "deserialize_uuid_vec_lossy")]
-    source_idea_ids: Vec<Uuid>,
-    #[serde(default)]
-    adopted_points: Vec<String>,
-    #[serde(default)]
-    rejected_points: Vec<String>,
-    #[serde(default)]
-    rejection_reasons: Vec<String>,
-    #[serde(default)]
-    changes_from_initial: Vec<String>,
-    #[serde(
-        default,
-        alias = "value",
-        alias = "user_benefit",
-        deserialize_with = "deserialize_string_loose"
-    )]
-    user_value: String,
-    #[serde(
-        default,
-        alias = "implementation_plan",
-        alias = "action_plan",
-        deserialize_with = "deserialize_string_loose"
-    )]
-    implementation_path: String,
-    #[serde(default)]
-    risks: Vec<String>,
-    #[serde(default, alias = "metrics", alias = "success_criteria")]
-    success_metrics: Vec<String>,
-    #[serde(default)]
-    confidence: f32,
-}
-
-#[derive(Debug, Deserialize)]
-struct VoteOutput {
-    votes: Vec<RawVote>,
-}
-
-#[derive(Debug, Deserialize)]
-struct RawVote {
-    #[serde(
-        default,
-        alias = "proposal_id",
-        alias = "proposal",
-        alias = "choice",
-        deserialize_with = "deserialize_string_loose"
-    )]
-    proposal_ref: String,
-    #[serde(default)]
-    value_score: f32,
-    #[serde(default)]
-    novelty_score: f32,
-    #[serde(default)]
-    feasibility_score: f32,
-    #[serde(default)]
-    risk_score: f32,
-    #[serde(default)]
-    roi_score: f32,
-    #[serde(default, deserialize_with = "deserialize_boolish")]
-    final_choice: bool,
-    #[serde(default, deserialize_with = "deserialize_string_loose")]
-    reason: String,
-    #[serde(default)]
-    confidence: f32,
-    #[serde(default, deserialize_with = "deserialize_string_loose")]
-    key_evidence: String,
-    #[serde(default, deserialize_with = "deserialize_string_loose")]
-    blocking_issue: String,
-}
-
 pub fn has_duplicate_phase_start(events: &[String], phase: &str) -> bool {
     let mut seen = HashSet::new();
     events
@@ -2877,7 +2296,7 @@ pub fn has_duplicate_phase_start(events: &[String], phase: &str) -> bool {
 mod tests {
     use super::*;
     use tokio::sync::Mutex;
-    use wenyuan_core::DecisionStatus;
+    use wenyuan_core::{DecisionStatus, EvidenceSourceKind, EvidenceTrustLevel, SearchError, SearchResult, SourceSafetyFlags};
     use wenyuan_provider::{MockProvider, MockScenario};
 
     struct HttpStatusProvider;
@@ -3601,5 +3020,37 @@ mod tests {
     #[test]
     fn valid_search_query_rejects_whitespace_only() {
         assert!(!valid_search_query("   "));
+    }
+
+    #[test]
+    fn clean_json_escapes_unescaped_quotes_in_strings() {
+        let raw = r#"{"summary": "他说"好的"这个方案"}"#;
+        let result = clean_json_string(raw);
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["summary"], "他说\"好的\"这个方案");
+    }
+
+    #[test]
+    fn clean_json_handles_chinese_angle_quotes() {
+        let raw = r#"{"title": "他说「好的」"}"#;
+        let result = clean_json_string(raw);
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["title"], "他说「好的」");
+    }
+
+    #[test]
+    fn clean_json_strips_markdown_fences() {
+        let raw = "```json\n{\"key\": \"value\"}\n```";
+        let result = clean_json_string(raw);
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["key"], "value");
+    }
+
+    #[test]
+    fn clean_json_handles_trailing_commas() {
+        let raw = r#"{"a": 1, "b": 2,}"#;
+        let result = clean_json_string(raw);
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["a"], 1);
     }
 }

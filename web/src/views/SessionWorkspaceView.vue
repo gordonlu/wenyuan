@@ -401,138 +401,15 @@
     </div>
     </template>
 
-    <template v-else>
-      <div v-if="currentDigest" class="report-cover">
-        <h1 class="report-cover-title">{{ details.session.title }}</h1>
-        <div class="report-cover-meta">
-          <span>{{ phaseLabels[details.session.phase] }}</span>
-          <span>·</span>
-          <span>{{ modeLabels[details.session.mode] }}</span>
-          <span v-if="details.artifacts.topic_type" class="report-topic-tag">· {{ topicTypeLabel(details.artifacts.topic_type) }}</span>
-          <span>·</span>
-          <span>{{ currentDigest.evidence_total }} 项来源</span>
-          <span>·</span>
-          <span>{{ currentDigest.vote_count }} 票</span>
-        </div>
-        <div v-if="currentDigest.has_decision" class="report-cover-decision">
-          <span :class="['badge', currentDigest.status_class === 'ok' ? 'ok' : 'warn']">
-            {{ currentDigest.status_label }}
-          </span>
-          <span v-if="currentDigest.selected_proposal_title" class="report-cover-proposal">
-            {{ currentDigest.selected_proposal_title }}
-          </span>
-        </div>
-        <div v-if="currentDigest.has_risk_blocker || currentDigest.has_untrusted_external || currentDigest.has_injection_risk" class="report-cover-flags">
-          <span v-if="currentDigest.has_risk_blocker" class="report-flag report-flag-warn">存在风险阻塞</span>
-          <span v-if="currentDigest.has_untrusted_external" class="report-flag report-flag-warn">含不可信外部来源</span>
-          <span v-if="currentDigest.has_injection_risk" class="report-flag report-flag-danger">检测到疑似注入</span>
-        </div>
-      </div>
-
-      <section id="report-topic" class="panel report-topic">
-        <h2>议题</h2>
-        <p>{{ reportText(details.session.topic) }}</p>
-        <p v-if="reportText(details.session.context)" class="muted">{{ reportText(details.session.context) }}</p>
-      </section>
-
-      <DecisionSummary v-if="primaryDecision" :decision="primaryDecision" :vote-policy="details.session.vote_policy" :mode="details.session.mode" />
-
-      <ProposalCompare id="report-proposals" :proposals="details.artifacts.proposals" />
-
-      <section id="report-evidence" v-if="scribeMode === 'full' && externalEvidence.length" class="panel evidence-source-panel">
-        <div class="row-head">
-          <h2>来源证据</h2>
-          <span class="badge flat">{{ externalEvidence.length }} 条</span>
-        </div>
-        <div class="item-grid evidence-source-grid">
-          <article v-for="ev in externalEvidence.slice(0, 12)" :key="ev.id" class="item evidence-source-item">
-            <div class="item-head">
-              <span>{{ evidenceSourceKindLabels[ev.source_kind ?? 'internal'] ?? ev.source_kind }}</span>
-              <span :class="['badge', ev.trust_level === 'untrusted_external' ? 'warn' : 'ok']">
-                {{ evidenceTrustLabels[ev.trust_level ?? 'internal'] ?? ev.trust_level }}
-              </span>
-            </div>
-            <p>{{ reportText(ev.content) }}</p>
-            <p class="muted evidence-source-url">{{ compactSource(ev.source) }}</p>
-            <div v-if="evidenceSafetyLabels(ev.safety_flags).length" class="evidence-safety-row">
-              <span
-                v-for="label in evidenceSafetyLabels(ev.safety_flags)"
-                :key="label"
-                class="badge warn"
-              >
-                {{ label }}
-              </span>
-            </div>
-          </article>
-        </div>
-      </section>
-
-      <section id="report-tools" v-if="scribeMode === 'full' && toolRuns.length" class="panel tool-run-panel">
-        <div class="row-head">
-          <h2>工具轨迹</h2>
-          <span class="badge flat">{{ toolRuns.length }} 次</span>
-        </div>
-        <div class="item-grid tool-run-grid">
-          <article v-for="run in toolRuns" :key="run.id" class="item tool-run-item">
-            <div class="item-head">
-              <span>{{ toolNameLabel(run.tool_name) }}</span>
-              <span :class="['badge', run.status === 'completed' ? 'ok' : 'warn']">{{ run.status }}</span>
-            </div>
-            <p>{{ reportText(run.input_summary) }}</p>
-            <p class="muted">{{ (run.duration_ms / 1000).toFixed(1) }} 秒 · {{ run.evidence_ids?.length ?? 0 }} 条证据</p>
-            <p v-if="run.error" class="muted tool-run-error">{{ run.error }}</p>
-          </article>
-        </div>
-      </section>
-
-      <section v-if="scribeMode === 'full'" class="role-card-row report-seat-row" aria-label="三席报告">
-        <SeatRoleCard
-          v-for="seat in seats"
-          :key="seat"
-          :seat="seat"
-          :phase="details.session.phase"
-          :events="details.events"
-          :running="false"
-          :runs="details.artifacts.seat_runs"
-          :tool-runs="toolRuns"
-          :provider-ref="seatProviderRef(seat)"
-          report-mode
-        />
-      </section>
-
-      <VoteDisplay id="report-votes" :votes="details.artifacts.votes" :proposals="details.artifacts.proposals" />
-
-      <VoteChanges v-if="scribeMode === 'full'" id="report-vote-changes" :votes="details.artifacts.votes" :proposals="details.artifacts.proposals" />
-
-      <section id="report-quality" class="panel">
-        <h2>讨论质量</h2>
-        <div class="stat-grid">
-          <article v-for="metric in qualityMetricRows(details.artifacts.quality, hasTokenUsage)" :key="metric.label" class="stat">
-            <span>{{ metric.label }}</span>
-            <strong>{{ metric.value }}</strong>
-          </article>
-        </div>
-      </section>
-
-      <section id="report-claims" v-if="scribeMode === 'full' && details.artifacts.claims?.length" class="panel">
-        <h2>证据与待核验判断</h2>
-        <div class="item-grid">
-          <article v-for="claim in details.artifacts.claims" :key="claim.id" class="item">
-            <div class="item-head">
-              <span :class="['seat-tag', claim.proposed_by]">{{ seatLabels[claim.proposed_by] }}</span>
-              <span :class="['badge', claim.is_supported ? 'ok' : 'warn']">
-                {{ claim.is_supported ? '已有依据' : '仍需核验' }}
-              </span>
-            </div>
-            <p>{{ reportText(claim.content) }}</p>
-            <p class="muted">来源：{{ reportText(claim.context) }}</p>
-            <p v-if="detailEvidence(claim.evidence_ids)" class="muted">
-              证据：{{ detailEvidence(claim.evidence_ids)?.map((ev) => evidenceKindLabels[ev.kind] + ': ' + reportText(ev.content)).join(' | ') }}
-            </p>
-          </article>
-        </div>
-      </section>
-    </template>
+    <ReportView
+      v-if="viewMode === 'report' && details"
+      :details="details"
+      :scribe-mode="scribeMode"
+      :external-evidence="externalEvidence"
+      :tool-runs="toolRuns"
+      :supported-claims="supportedClaims"
+      :unsupported-claims="unsupportedClaims"
+    />
   </section>
 
   <ShareExportPanel
@@ -567,6 +444,7 @@ import ShareExportPanel from '../components/ShareExportPanel.vue'
 import IdeaCard from '../components/IdeaCard.vue'
 import PhaseProgressBar from '../components/PhaseProgressBar.vue'
 import ProposalCompare from '../components/ProposalCompare.vue'
+import ReportView from '../components/ReportView.vue'
 import SeatRoleCard from '../components/SeatRoleCard.vue'
 import VoteChanges from '../components/VoteChanges.vue'
 import VoteDisplay from '../components/VoteDisplay.vue'
