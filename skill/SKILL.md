@@ -1,14 +1,14 @@
 ---
-
 name: wenyuan-deliberation
-description: Use the Wenyuan three-seat deliberation method to analyze complex decisions with visible medium-depth phases, trade-off analysis, risks, assumptions, minority opinions, and next actions.
-version: 1.0.1
+description: Three-seat deliberation protocol for complex decisions: exposes assumptions, compares options, and identifies risks.
+version: 1.0.2
 metadata:
-openclaw:
+  openclaw:
+    requires: {}
     skillKey: wenyuan
     emoji: "🏛️"
     homepage: https://github.com/gordonlu/wenyuan
-------------
+---
 
 # Wenyuan Deliberation / 文渊阁合议
 
