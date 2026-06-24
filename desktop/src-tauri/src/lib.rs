@@ -12,24 +12,34 @@ fn app_data_dir() -> PathBuf {
 fn setup_logging(data_dir: &PathBuf) {
     let log_dir = data_dir.join("logs");
     std::fs::create_dir_all(&log_dir).ok();
-    let log_path = log_dir.join("desktop.log");
 
-    let log_file = std::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .append(true)
-        .open(&log_path)
-        .expect("failed to open log file");
+    // Remove logs older than 7 days
+    if let Ok(entries) = std::fs::read_dir(&log_dir) {
+        let cutoff = std::time::SystemTime::now()
+            - std::time::Duration::from_secs(7 * 24 * 3600);
+        for entry in entries.flatten() {
+            if let Ok(meta) = entry.metadata() {
+                if let Ok(modified) = meta.modified() {
+                    if modified < cutoff {
+                        std::fs::remove_file(entry.path()).ok();
+                    }
+                }
+            }
+        }
+    }
+
+    let file_appender = tracing_appender::rolling::daily(&log_dir, "desktop.log");
+    let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
 
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "wenyuan_runtime=info,wenyuan_desktop=info".into()),
         )
-        .with_writer(std::sync::Mutex::new(log_file))
+        .with_writer(non_blocking)
         .init();
 
-    tracing::info!("log file: {}", log_path.display());
+    tracing::info!("logs: {}", log_dir.join("desktop.log").display());
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
