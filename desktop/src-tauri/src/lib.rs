@@ -1,11 +1,6 @@
 use std::path::PathBuf;
 use std::sync::Mutex;
-use tauri::{
-    Manager,
-    image::Image,
-    menu::{Menu, MenuItem},
-    tray::TrayIconBuilder,
-};
+use tauri::Manager;
 use tokio::sync::oneshot;
 use url::Url;
 use wenyuan_runtime::{start_local_server, ServerConfig};
@@ -24,7 +19,6 @@ fn lock_path() -> PathBuf {
     app_data_dir().join("desktop.lock")
 }
 
-/// Try to acquire a single-instance lock. Returns true if we're the only instance.
 fn acquire_lock() -> bool {
     let path = lock_path();
     if let Ok(pid_str) = std::fs::read_to_string(&path) {
@@ -60,14 +54,6 @@ fn pid_exists(pid: u32) -> bool {
 
 fn release_lock() {
     let _ = std::fs::remove_file(lock_path());
-}
-
-fn load_icon() -> Option<Image<'static>> {
-    let img = image::load_from_memory(include_bytes!("../icons/icon.png")).ok()?;
-    let rgba = img.into_rgba8();
-    let (w, h) = rgba.dimensions();
-    let data: &'static [u8] = Box::leak(rgba.into_raw().into_boxed_slice());
-    Some(Image::new(data, w, h))
 }
 
 fn setup_logging(data_dir: &PathBuf) {
@@ -118,42 +104,6 @@ pub fn run() {
         .setup(|app| {
             tracing::info!("Wenyuan desktop starting...");
 
-            // Build tray menu
-            let open = MenuItem::with_id(app, "open", "Open Wenyuan / 打开文渊阁", true, None::<&str>)?;
-            let quit = MenuItem::with_id(app, "quit", "Quit / 退出", true, Some("CmdOrCtrl+Q"))?;
-            let menu = Menu::with_items(app, &[&open, &quit])?;
-
-            TrayIconBuilder::new()
-                .menu_on_left_click(false)
-                .icon(load_icon().unwrap_or_else(|| {
-                    Image::new(&[0u8; 4], 1, 1)
-                }))
-                .menu(&menu)
-                .on_menu_event(|app, event| {
-                    match event.id().as_ref() {
-                        "open" => {
-                            if let Some(window) = app.get_webview_window("main") {
-                                let _ = window.show();
-                                let _ = window.set_focus();
-                            }
-                        }
-                        "quit" => {
-                            shutdown_app(app);
-                        }
-                        _ => {}
-                    }
-                })
-                .on_tray_icon_event(|tray, event| {
-                    if matches!(event, tauri::tray::TrayIconEvent::Click { .. }) {
-                        let app = tray.app_handle();
-                        if let Some(window) = app.get_webview_window("main") {
-                            let _ = window.show();
-                            let _ = window.set_focus();
-                        }
-                    }
-                })
-                .build(app)?;
-
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 match start_local_server(ServerConfig::default()).await {
@@ -171,9 +121,9 @@ pub fn run() {
                         } else {
                             tracing::error!("main window not found");
                         }
-                        // Wait for shutdown signal
                         let _ = shutdown_rx.await;
                         tracing::info!("shutting down");
+                        release_lock();
                         std::process::exit(0);
                     }
                     Err(e) => {
@@ -184,21 +134,14 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                api.prevent_close();
-                let _ = window.hide();
+            if let tauri::WindowEvent::CloseRequested { .. } = event {
+                if let Some(state) = window.try_state::<DesktopState>() {
+                    if let Some(tx) = state.shutdown_tx.lock().unwrap().take() {
+                        let _ = tx.send(());
+                    }
+                }
             }
         })
         .run(tauri::generate_context!())
         .expect("error while running Wenyuan desktop");
-}
-
-fn shutdown_app(app: &tauri::AppHandle) {
-    if let Some(state) = app.try_state::<DesktopState>() {
-        if let Some(tx) = state.shutdown_tx.lock().unwrap().take() {
-            let _ = tx.send(());
-        }
-    }
-    release_lock();
-    std::process::exit(0);
 }
