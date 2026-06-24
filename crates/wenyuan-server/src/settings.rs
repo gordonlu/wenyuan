@@ -138,7 +138,7 @@ impl SettingsManager {
             base_url: config.base_url,
             model: config.model,
             api_key_configured: api_key.is_some(),
-            api_key_hint: api_key.as_ref().map(|k| k.hint()),
+            api_key_hint: if api_key.is_some() { Some("已配置".into()) } else { None },
         }
     }
 }

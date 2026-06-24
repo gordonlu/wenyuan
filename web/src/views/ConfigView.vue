@@ -23,17 +23,28 @@
             Base URL
             <input v-model="baseUrl" placeholder="https://api.deepseek.com" />
           </label>
+
           <label>
-            模型名称
+            全局默认模型
             <input v-model="modelName" placeholder="deepseek-chat" />
           </label>
 
+          <div class="seat-model-grid" v-if="availableModels.length">
+            <label v-for="s in seats" :key="s.key" class="seat-model-row">
+              <span>{{ s.label }}</span>
+              <select v-model="seatModelMap[s.key]">
+                <option value="">使用全局默认</option>
+                <option v-for="m in availableModels" :key="m.value" :value="m.value">{{ m.label }}</option>
+              </select>
+            </label>
+          </div>
+
           <div class="api-key-row">
             <label v-if="!changingKey" class="key-status">
-              API Key：<strong>{{ apiKeyHint || '未配置' }}</strong>
-              <button class="subtle" @click="changingKey = true">更换</button>
+              API Key：<strong>{{ apiKeyConfigured ? '已配置' : '未配置' }}</strong>
+              <button class="subtle" @click="changingKey = true">{{ apiKeyConfigured ? '更换' : '配置' }}</button>
             </label>
-            <label v-else>
+            <label v-else class="key-input-wrap">
               API Key
               <input
                 v-model="apiKeyInput"
@@ -47,25 +58,13 @@
         </template>
 
         <div class="provider-actions">
-          <button
-            class="primary"
-            :disabled="saving"
-            @click="saveSettings"
-          >
+          <button class="primary" :disabled="saving" @click="saveSettings">
             {{ saving ? '保存中…' : '保存配置' }}
           </button>
-          <button
-            v-if="providerType === 'openai_compatible' && baseUrl"
-            :disabled="testing"
-            @click="doTest"
-          >
+          <button v-if="providerType === 'openai_compatible' && baseUrl" :disabled="testing" @click="doTest">
             {{ testing ? '测试中…' : '测试连接' }}
           </button>
-          <button
-            v-if="apiKeyConfigured && providerType === 'openai_compatible'"
-            class="danger"
-            @click="clearKey"
-          >
+          <button v-if="apiKeyConfigured && providerType === 'openai_compatible'" class="danger" @click="clearKey">
             删除 API Key
           </button>
         </div>
@@ -154,27 +153,12 @@
           <span>默认允许自投</span>
         </label>
       </div>
-
-      <div class="seat-model-preferences">
-        <label>
-          谋远席默认模型
-          <input v-model="preferences.models.mouyuan" placeholder="留空使用服务默认模型" />
-        </label>
-        <label>
-          经世席默认模型
-          <input v-model="preferences.models.jingshi" placeholder="留空使用服务默认模型" />
-        </label>
-        <label>
-          持正席默认模型
-          <input v-model="preferences.models.chizheng" placeholder="留空使用服务默认模型" />
-        </label>
-      </div>
     </form>
   </section>
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { api } from '../api'
 import ApiErrorState from '../components/ApiErrorState.vue'
 import type { ConfigStatus, UserPreferences, TestProviderResponse } from '../domain/session'
@@ -187,14 +171,22 @@ const testing = ref(false)
 const savingPrefs = ref(false)
 const testResult = ref<TestProviderResponse | null>(null)
 
-// Provider settings
 const providerType = ref('mock')
 const baseUrl = ref('')
 const modelName = ref('')
 const apiKeyConfigured = ref(false)
-const apiKeyHint = ref('')
 const apiKeyInput = ref('')
 const changingKey = ref(false)
+
+const seatModelMap = ref<Record<string, string>>({})
+
+const seats = [
+  { key: 'MOUYUAN', label: '谋远席' },
+  { key: 'JINGSHI', label: '经世席' },
+  { key: 'CHIZHENG', label: '持正席' },
+]
+
+const availableModels = computed(() => config.value?.available_models ?? [])
 
 async function loadSettings() {
   try {
@@ -203,9 +195,8 @@ async function loadSettings() {
     baseUrl.value = settings.base_url
     modelName.value = settings.model
     apiKeyConfigured.value = settings.api_key_configured
-    apiKeyHint.value = settings.api_key_hint || ''
   } catch {
-    // settings endpoint unavailable, stay on mock
+    // settings endpoint unavailable
   }
 }
 
@@ -217,6 +208,9 @@ onMounted(async () => {
     ])
     config.value = configPayload
     preferences.value = preferencesPayload
+    for (const s of seats) {
+      seatModelMap.value[s.key] = configPayload.seat_models?.[s.key] || ''
+    }
   } catch (err) {
     error.value = err instanceof Error ? err.message : '加载失败'
   }
@@ -234,7 +228,6 @@ async function saveSettings() {
       model: modelName.value,
       api_key: apiKeyInput.value || undefined,
     })
-    apiKeyHint.value = result.api_key_hint || ''
     apiKeyConfigured.value = result.api_key_configured
     apiKeyInput.value = ''
     changingKey.value = false
@@ -272,7 +265,6 @@ async function clearKey() {
       clear_api_key: true,
     })
     apiKeyConfigured.value = false
-    apiKeyHint.value = ''
     apiKeyInput.value = ''
   } catch (err) {
     error.value = err instanceof Error ? err.message : '删除失败'
@@ -308,16 +300,16 @@ async function savePreferences() {
   display: grid;
   gap: 4px;
   font-size: 13px;
-  color: #8a9aa8;
+  color: #c8d0d8;
 }
 
 .provider-form input,
 .provider-form select {
   padding: 8px 10px;
-  border: 1px solid rgba(212, 226, 236, 0.2);
+  border: 1px solid rgba(212, 226, 236, 0.25);
   border-radius: 6px;
-  background: rgba(0, 0, 0, 0.15);
-  color: #e2e8f0;
+  background: rgba(255, 255, 255, 0.07);
+  color: #f1f5f9;
   font-size: 14px;
 }
 
@@ -325,6 +317,37 @@ async function savePreferences() {
 .provider-form select:focus {
   outline: none;
   border-color: #0f8aa1;
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.provider-form input::placeholder {
+  color: #6b7a85;
+}
+
+.seat-model-grid {
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px;
+  background: rgba(0, 0, 0, 0.12);
+  border-radius: 6px;
+}
+
+.seat-model-row {
+  display: grid;
+  grid-template-columns: 60px 1fr;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  color: #c8d0d8;
+}
+
+.seat-model-row select {
+  padding: 6px 8px;
+  border: 1px solid rgba(212, 226, 236, 0.2);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.06);
+  color: #f1f5f9;
+  font-size: 13px;
 }
 
 .api-key-row {
@@ -337,6 +360,10 @@ async function savePreferences() {
   color: #e2e8f0;
   font-family: monospace;
   margin: 0 6px;
+}
+
+.key-input-wrap {
+  flex: 1;
 }
 
 .provider-actions {
@@ -386,8 +413,7 @@ async function savePreferences() {
   margin: 0 0 4px;
 }
 
-.preferences-grid,
-.seat-model-preferences {
+.preferences-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
   gap: 14px;
