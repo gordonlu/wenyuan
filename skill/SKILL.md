@@ -1,6 +1,6 @@
 ---
 name: wenyuan-deliberation
-description: Three-seat deliberation protocol for complex decisions: exposes assumptions, compares options, and identifies risks.
+description: "Three-seat deliberation protocol for complex decisions: exposes assumptions, compares options, and identifies risks."
 version: 1.0.2
 metadata:
   openclaw:
