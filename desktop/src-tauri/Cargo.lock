@@ -5883,11 +5883,13 @@ dependencies = [
 name = "wenyuan-desktop"
 version = "0.1.1"
 dependencies = [
+ "directories",
  "tauri",
  "tauri-build",
  "tauri-plugin-opener",
  "tokio",
  "tracing",
+ "tracing-subscriber",
  "url",
  "wenyuan-runtime",
 ]
