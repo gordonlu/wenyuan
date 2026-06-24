@@ -92,7 +92,7 @@ Output:
 * key risk
 * next step
 
-Target length: 500-900 Chinese characters.
+Target length: 500-900 characters.
 
 ---
 
@@ -107,7 +107,7 @@ Use visible four-phase deliberation:
 3. 复议
 4. 阁议
 
-Target length: 1000-1800 Chinese characters.
+Target length: 1000-1800 characters.
 
 Medium Mode should feel like a real deliberation, not a shallow three-angle summary.
 
