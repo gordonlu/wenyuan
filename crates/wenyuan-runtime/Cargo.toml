@@ -13,6 +13,7 @@ axum.workspace = true
 tokio = { workspace = true, features = ["full"] }
 tracing.workspace = true
 anyhow.workspace = true
+dotenvy.workspace = true
 uuid.workspace = true
 rust-embed = "8"
 mime_guess = "2"

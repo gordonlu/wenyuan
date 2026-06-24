@@ -108,6 +108,7 @@ pub struct ConfigStatus {
     pub provider_kind: String,
     pub model: String,
     pub seat_models: HashMap<String, String>,
+    pub base_url: String,
     pub database_url: String,
     pub version: String,
     pub search_provider: String,
@@ -484,6 +485,7 @@ pub fn provider_from_env(database_url: &str) -> (Arc<dyn LlmProvider>, ConfigSta
             provider_kind,
             model,
             seat_models,
+            base_url,
             database_url: database_url.to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),
             search_provider: env::var("WENYUAN_SEARCH_PROVIDER")

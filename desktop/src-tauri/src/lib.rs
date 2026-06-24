@@ -119,13 +119,14 @@ pub fn run() {
             tracing::info!("Wenyuan desktop starting...");
 
             // Build tray menu
-            let open = MenuItem::with_id(app, "open", "打开文渊阁", true, None::<&str>)?;
-            let quit = MenuItem::with_id(app, "quit", "退出", true, Some("CmdOrCtrl+Q"))?;
+            let open = MenuItem::with_id(app, "open", "Open Wenyuan / 打开文渊阁", true, None::<&str>)?;
+            let quit = MenuItem::with_id(app, "quit", "Quit / 退出", true, Some("CmdOrCtrl+Q"))?;
             let menu = Menu::with_items(app, &[&open, &quit])?;
 
             TrayIconBuilder::new()
+                .menu_on_left_click(false)
                 .icon(load_icon().unwrap_or_else(|| {
-                    Image::new(&[0u8; 4], 1, 1) // fallback 1x1 transparent pixel
+                    Image::new(&[0u8; 4], 1, 1)
                 }))
                 .menu(&menu)
                 .on_menu_event(|app, event| {
@@ -183,12 +184,9 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            if let tauri::WindowEvent::CloseRequested { .. } = event {
-                let app = window.app_handle();
-                // Hide instead of close
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
                 let _ = window.hide();
-                // Prevent actual close
-                // If user wants to quit, they use tray menu
             }
         })
         .run(tauri::generate_context!())

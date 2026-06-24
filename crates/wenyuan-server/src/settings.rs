@@ -1,5 +1,6 @@
 use axum::{Json, Router, extract::State, routing::{get, post}};
 use serde::{Deserialize, Serialize};
+use std::env;
 use std::path::PathBuf;
 use tracing::info;
 use wenyuan_core::{SecretString, mask_api_key};
@@ -7,10 +8,23 @@ use wenyuan_core::{SecretString, mask_api_key};
 use crate::{ApiError, AppState};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SeatProviderConfig {
+    pub base_url: String,
+    pub api_key: String,
+    pub api_key_configured: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderConfig {
     pub provider: String,
     pub base_url: String,
     pub model: String,
+    #[serde(default)]
+    pub search_provider: String,
+    #[serde(default)]
+    pub search_api_url: String,
+    #[serde(default)]
+    pub seat_providers: std::collections::HashMap<String, SeatProviderConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -20,6 +34,12 @@ pub struct ProviderSettings {
     pub model: String,
     pub api_key_configured: bool,
     pub api_key_hint: Option<String>,
+    pub api_key_source: String,
+    pub search_provider: String,
+    pub search_api_url: String,
+    pub search_api_key_configured: bool,
+    #[serde(default)]
+    pub seat_providers: std::collections::HashMap<String, SeatProviderConfig>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -31,6 +51,12 @@ pub struct UpdateProviderSettingsRequest {
     pub api_key: Option<String>,
     #[serde(default)]
     pub clear_api_key: bool,
+    #[serde(default)]
+    pub search_provider: String,
+    #[serde(default)]
+    pub search_api_url: String,
+    #[serde(default)]
+    pub seat_providers: std::collections::HashMap<String, SeatProviderConfig>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -82,6 +108,9 @@ impl SettingsManager {
                 provider: "openai_compatible".into(),
                 base_url: String::new(),
                 model: String::new(),
+                search_provider: String::new(),
+                search_api_url: String::new(),
+                seat_providers: std::collections::HashMap::new(),
             })
     }
 
@@ -132,13 +161,49 @@ impl SettingsManager {
 
     pub fn get_settings(&self) -> ProviderSettings {
         let config = self.load_config();
-        let api_key = self.load_api_key();
+        let (api_key, source) = {
+            let saved = self.load_api_key();
+            if saved.is_some() {
+                (saved, "user".to_string())
+            } else {
+                let env_key = env::var("WENYUAN_LLM_API_KEY").unwrap_or_default();
+                if env_key.is_empty() {
+                    (None, "none".to_string())
+                } else {
+                    (Some(SecretString::new(env_key)), "env".to_string())
+                }
+            }
+        };
+        let env_search = env::var("WENYUAN_SEARCH_PROVIDER").unwrap_or_default();
+        let seats = ["MOUYUAN", "JINGSHI", "CHIZHENG"];
+        let seat_providers: std::collections::HashMap<String, SeatProviderConfig> = seats
+            .iter()
+            .map(|&s| {
+                let sp = config.seat_providers.get(s).cloned().unwrap_or(SeatProviderConfig {
+                    base_url: String::new(),
+                    api_key: String::new(),
+                    api_key_configured: false,
+                });
+                let env_base = env::var(format!("WENYUAN_LLM_BASE_URL_{s}")).unwrap_or_default();
+                let env_key = env::var(format!("WENYUAN_LLM_API_KEY_{s}")).unwrap_or_default();
+                (s.to_string(), SeatProviderConfig {
+                    base_url: if sp.base_url.is_empty() { env_base } else { sp.base_url },
+                    api_key: String::new(),
+                    api_key_configured: sp.api_key_configured || !env_key.is_empty(),
+                })
+            })
+            .collect();
         ProviderSettings {
             provider: config.provider,
             base_url: config.base_url,
             model: config.model,
             api_key_configured: api_key.is_some(),
             api_key_hint: if api_key.is_some() { Some("已配置".into()) } else { None },
+            api_key_source: source,
+            search_provider: config.search_provider,
+            search_api_url: config.search_api_url,
+            search_api_key_configured: !env_search.is_empty(),
+            seat_providers,
         }
     }
 }
@@ -163,10 +228,26 @@ async fn update_provider_settings(
         state.settings.save_api_key(trimmed).map_err(|e| ApiError::internal(e.to_string()))?;
     }
 
+    let mut seat_providers = state.settings.load_config().seat_providers;
+    for (seat, sp) in &req.seat_providers {
+        let entry = seat_providers.entry(seat.clone()).or_insert(SeatProviderConfig {
+            base_url: String::new(),
+            api_key: String::new(),
+            api_key_configured: false,
+        });
+        entry.base_url = sp.base_url.clone();
+        if !sp.api_key.is_empty() {
+            entry.api_key = sp.api_key.clone();
+            entry.api_key_configured = true;
+        }
+    }
     let config = ProviderConfig {
         provider: req.provider,
         base_url: req.base_url,
         model: req.model,
+        search_provider: req.search_provider,
+        search_api_url: req.search_api_url,
+        seat_providers,
     };
     state.settings.save_config(&config).map_err(|e| ApiError::internal(e.to_string()))?;
 

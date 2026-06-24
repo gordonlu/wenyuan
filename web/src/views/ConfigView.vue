@@ -29,33 +29,76 @@
             <input v-model="modelName" placeholder="deepseek-chat" />
           </label>
 
-          <div class="seat-model-grid" v-if="availableModels.length">
-            <label v-for="s in seats" :key="s.key" class="seat-model-row">
-              <span>{{ s.label }}</span>
-              <select v-model="seatModelMap[s.key]">
-                <option value="">使用全局默认</option>
-                <option v-for="m in availableModels" :key="m.value" :value="m.value">{{ m.label }}</option>
-              </select>
-            </label>
-          </div>
-
           <div class="api-key-row">
             <label v-if="!changingKey" class="key-status">
               API Key：<strong>{{ apiKeyConfigured ? '已配置' : '未配置' }}</strong>
+              <span v-if="apiKeySource" class="key-source">{{ apiKeySource === 'env' ? '（环境变量）' : '（页面配置）' }}</span>
               <button class="subtle" @click="changingKey = true">{{ apiKeyConfigured ? '更换' : '配置' }}</button>
             </label>
             <label v-else class="key-input-wrap">
               API Key
-              <input
-                v-model="apiKeyInput"
-                type="password"
-                autocomplete="new-password"
-                spellcheck="false"
-                placeholder="输入新的 API Key"
-              />
+              <input v-model="apiKeyInput" type="password" autocomplete="new-password" spellcheck="false" placeholder="输入新的 API Key" />
             </label>
           </div>
+
+          <div class="model-list-area">
+            <div class="model-list-header">
+              <span>可用模型</span>
+              <button
+                v-if="baseUrl"
+                :disabled="fetchingModels"
+                class="subtle"
+                @click="fetchModels"
+              >{{ fetchingModels ? '获取中…' : '获取列表' }}</button>
+            </div>
+            <div v-if="availableModels.length" class="model-chips">
+              <span v-for="m in availableModels" :key="m.value" class="model-chip">{{ m.label }}</span>
+            </div>
+            <p v-else class="model-list-empty">未获取模型列表，可手动填写</p>
+          </div>
+
+          <div class="seat-provider-grid">
+            <div class="seat-provider-header">各议席配置</div>
+            <div v-for="s in seats" :key="s.key" class="seat-provider-card">
+              <div class="seat-provider-title">{{ s.label }}</div>
+              <label>模型
+                <select v-model="seatModelMap[s.key]">
+                  <option value="">使用全局默认</option>
+                  <option v-for="m in availableModels" :key="m.value" :value="m.value">{{ m.label || m.value }}</option>
+                </select>
+              </label>
+              <label>Base URL
+                <input v-model="seatBaseUrlMap[s.key]" placeholder="使用全局默认" />
+              </label>
+              <label>
+                API Key
+                <input v-model="seatApiKeyMap[s.key]" type="password" autocomplete="new-password" placeholder="使用全局默认" />
+                <span v-if="seatApiKeyConfiguredMap[s.key]" class="key-source">（已配置）</span>
+              </label>
+            </div>
+          </div>
         </template>
+
+        <div class="search-section">
+          <div class="search-header">联网搜索</div>
+          <label>
+            搜索 Provider
+            <select v-model="searchProvider">
+              <option value="">禁用</option>
+              <option value="doubao">Doubao</option>
+              <option value="tavily">Tavily</option>
+              <option value="google">Google</option>
+              <option value="searxng">SearXNG</option>
+              <option value="custom">Custom</option>
+            </select>
+            <span v-if="searchProvider && searchProvider === envSearchProvider" class="search-source-badge">环境变量</span>
+            <span v-else-if="searchProvider && searchProvider !== envSearchProvider" class="search-source-badge page-badge">页面配置</span>
+          </label>
+          <label>
+            API Key / URL
+            <input v-model="searchApiUrl" :placeholder="searchProvider === 'searxng' ? 'https://searxng.example.com' : 'API Key'" />
+          </label>
+        </div>
 
         <div class="provider-actions">
           <button class="primary" :disabled="saving" @click="saveSettings">
@@ -137,10 +180,6 @@
           代码搜索根目录
           <input v-model="preferences.tools.code_search_root" placeholder="." />
         </label>
-        <label>
-          文件大小上限（MB）
-          <input v-model.number="preferences.tools.max_file_size_mb" type="number" min="1" max="100" />
-        </label>
       </div>
 
       <div class="preferences-toggles">
@@ -161,13 +200,17 @@
 import { computed, onMounted, ref } from 'vue'
 import { api } from '../api'
 import ApiErrorState from '../components/ApiErrorState.vue'
+import { useConfirm } from '../composables/useConfirm'
 import type { ConfigStatus, UserPreferences, TestProviderResponse } from '../domain/session'
+
+const { confirm } = useConfirm()
 
 const config = ref<ConfigStatus | null>(null)
 const preferences = ref<UserPreferences | null>(null)
 const error = ref('')
 const saving = ref(false)
 const testing = ref(false)
+const fetchingModels = ref(false)
 const savingPrefs = ref(false)
 const testResult = ref<TestProviderResponse | null>(null)
 
@@ -175,10 +218,17 @@ const providerType = ref('mock')
 const baseUrl = ref('')
 const modelName = ref('')
 const apiKeyConfigured = ref(false)
+const apiKeySource = ref('')
 const apiKeyInput = ref('')
 const changingKey = ref(false)
+const searchProvider = ref('')
+const searchApiUrl = ref('')
+const envSearchProvider = ref('')
 
 const seatModelMap = ref<Record<string, string>>({})
+const seatBaseUrlMap = ref<Record<string, string>>({})
+const seatApiKeyMap = ref<Record<string, string>>({})
+const seatApiKeyConfiguredMap = ref<Record<string, boolean>>({})
 
 const seats = [
   { key: 'MOUYUAN', label: '谋远席' },
@@ -186,15 +236,36 @@ const seats = [
   { key: 'CHIZHENG', label: '持正席' },
 ]
 
-const availableModels = computed(() => config.value?.available_models ?? [])
+const availableModels = computed(() => {
+  if (config.value?.available_models?.length) return config.value.available_models
+  // Fallback: build from configured models
+  const seen = new Set<string>()
+  const models: Array<{ value: string; label: string }> = []
+  const add = (name: string) => {
+    if (name && !seen.has(name)) { seen.add(name); models.push({ value: name, label: name }) }
+  }
+  add(config.value?.model ?? '')
+  for (const m of Object.values(config.value?.seat_models ?? {})) add(m)
+  return models
+})
 
 async function loadSettings() {
   try {
     const settings = await api.getProviderSettings()
-    providerType.value = settings.provider
-    baseUrl.value = settings.base_url
-    modelName.value = settings.model
+    providerType.value = settings.provider || (config.value?.provider_configured ? 'openai_compatible' : 'mock')
+    baseUrl.value = settings.base_url || config.value?.base_url || ''
+    modelName.value = settings.model || config.value?.model || ''
     apiKeyConfigured.value = settings.api_key_configured
+    apiKeySource.value = settings.api_key_source || ''
+    envSearchProvider.value = config.value?.search_provider || ''
+    searchProvider.value = settings.search_provider || envSearchProvider.value || ''
+    searchApiUrl.value = settings.search_api_url || ''
+    for (const s of seats) {
+      const sp = settings.seat_providers?.[s.key]
+      seatBaseUrlMap.value[s.key] = sp?.base_url || ''
+      seatApiKeyMap.value[s.key] = ''
+      seatApiKeyConfiguredMap.value[s.key] = sp?.api_key_configured || false
+    }
   } catch {
     // settings endpoint unavailable
   }
@@ -217,6 +288,28 @@ onMounted(async () => {
   await loadSettings()
 })
 
+async function fetchModels() {
+  if (!baseUrl.value) return
+  fetchingModels.value = true
+  const key = apiKeyInput.value || undefined
+  try {
+    const resp = await fetch(`${baseUrl.value.replace(/\/+$/, '')}/models`, {
+      headers: { Authorization: key ? `Bearer ${key}` : '' },
+    })
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+    const data = await resp.json()
+    const models: Array<{ id: string }> = data.data ?? data
+    // Update the config.available_models reactively
+    if (config.value) {
+      config.value.available_models = models.map((m: { id: string }) => ({ value: m.id, label: m.id }))
+    }
+  } catch (err) {
+    error.value = `获取模型列表失败：${err instanceof Error ? err.message : '未知错误'}`
+  } finally {
+    fetchingModels.value = false
+  }
+}
+
 async function saveSettings() {
   saving.value = true
   error.value = ''
@@ -227,6 +320,12 @@ async function saveSettings() {
       base_url: baseUrl.value,
       model: modelName.value,
       api_key: apiKeyInput.value || undefined,
+      search_provider: searchProvider.value || undefined,
+      search_api_url: searchApiUrl.value || undefined,
+      seat_providers: Object.fromEntries(seats.map(s => [s.key, {
+        base_url: seatBaseUrlMap.value[s.key] || '',
+        api_key: seatApiKeyMap.value[s.key] || '',
+      }])),
     })
     apiKeyConfigured.value = result.api_key_configured
     apiKeyInput.value = ''
@@ -257,6 +356,7 @@ async function doTest() {
 }
 
 async function clearKey() {
+  if (!(await confirm('确认删除 API Key？'))) return
   try {
     await api.updateProviderSettings({
       provider: providerType.value,
@@ -300,36 +400,81 @@ async function savePreferences() {
   display: grid;
   gap: 4px;
   font-size: 13px;
-  color: #c8d0d8;
+  color: #475569;
 }
 
-.provider-form input,
-.provider-form select {
-  padding: 8px 10px;
-  border: 1px solid rgba(212, 226, 236, 0.25);
+.model-list-area {
+  display: grid;
+  gap: 6px;
+}
+
+.model-list-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 13px;
+  color: #334155;
+}
+
+.model-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.model-chip {
+  padding: 3px 8px;
+  background: rgba(15, 138, 161, 0.12);
+  border: 1px solid rgba(15, 138, 161, 0.2);
+  border-radius: 4px;
+  color: #0f766e;
+  font-size: 12px;
+  font-family: monospace;
+}
+
+.seat-provider-grid {
+  display: grid;
+  gap: 10px;
+  padding: 4px 0;
+}
+
+.seat-provider-header {
+  font-size: 13px;
+  font-weight: 600;
+  color: #334155;
+}
+
+.seat-provider-card {
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px;
+  background: rgba(0, 0, 0, 0.04);
   border-radius: 6px;
-  background: rgba(255, 255, 255, 0.07);
-  color: #f1f5f9;
-  font-size: 14px;
+  border: 1px solid rgba(0, 0, 0, 0.06);
 }
 
-.provider-form input:focus,
-.provider-form select:focus {
-  outline: none;
-  border-color: #0f8aa1;
-  background: rgba(255, 255, 255, 0.1);
+.seat-provider-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #1e293b;
 }
 
-.provider-form input::placeholder {
-  color: #6b7a85;
+.seat-provider-card label {
+  display: grid;
+  gap: 2px;
+  font-size: 12px;
+  color: #475569;
 }
 
 .seat-model-grid {
   display: grid;
   gap: 8px;
-  padding: 10px 12px;
-  background: rgba(0, 0, 0, 0.12);
-  border-radius: 6px;
+  padding: 4px 0;
+}
+
+.model-list-empty {
+  font-size: 13px;
+  color: #64748b;
 }
 
 .seat-model-row {
@@ -341,15 +486,6 @@ async function savePreferences() {
   color: #c8d0d8;
 }
 
-.seat-model-row select {
-  padding: 6px 8px;
-  border: 1px solid rgba(212, 226, 236, 0.2);
-  border-radius: 6px;
-  background: rgba(255, 255, 255, 0.06);
-  color: #f1f5f9;
-  font-size: 13px;
-}
-
 .api-key-row {
   display: flex;
   align-items: center;
@@ -357,9 +493,43 @@ async function savePreferences() {
 }
 
 .key-status strong {
-  color: #e2e8f0;
+  color: #1e293b;
   font-family: monospace;
   margin: 0 6px;
+}
+
+.key-source {
+  font-size: 11px;
+  color: #64748b;
+  margin-right: 6px;
+}
+
+.search-section {
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px;
+  background: rgba(15, 138, 161, 0.06);
+  border-radius: 6px;
+}
+
+.search-header {
+  font-size: 13px;
+  font-weight: 600;
+  color: #334155;
+}
+
+.search-source-badge {
+  display: inline-block;
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 3px;
+  margin-left: 6px;
+  background: rgba(15, 138, 161, 0.15);
+  color: #0f766e;
+}
+.search-source-badge.page-badge {
+  background: rgba(182, 38, 98, 0.12);
+  color: #be185d;
 }
 
 .key-input-wrap {
@@ -373,9 +543,9 @@ async function savePreferences() {
 }
 
 .danger {
-  background: rgba(182, 38, 98, 0.3);
-  border: 1px solid rgba(182, 38, 98, 0.5);
-  color: #ffd7e6;
+  background: rgba(190, 24, 93, 0.15);
+  border: 1px solid rgba(190, 24, 93, 0.4);
+  color: #be185d;
   padding: 8px 16px;
   border-radius: 6px;
   cursor: pointer;
@@ -383,7 +553,7 @@ async function savePreferences() {
 }
 
 .danger:hover {
-  background: rgba(182, 38, 98, 0.5);
+  background: rgba(190, 24, 93, 0.25);
 }
 
 .test-result {

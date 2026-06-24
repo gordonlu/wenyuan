@@ -318,12 +318,23 @@ export interface ExecutionInfo {
   recovery_state: 'idle' | 'running' | 'completed' | 'failed' | 'cancelled' | 'retry_required' | string
 }
 
+export interface SeatProviderConfig {
+  base_url: string
+  api_key: string
+  api_key_configured: boolean
+}
+
 export interface ProviderSettings {
   provider: string
   base_url: string
   model: string
   api_key_configured: boolean
   api_key_hint?: string
+  api_key_source: string
+  search_provider: string
+  search_api_url: string
+  search_api_key_configured: boolean
+  seat_providers: Record<string, SeatProviderConfig>
 }
 
 export interface TestProviderResponse {
@@ -338,6 +349,7 @@ export interface ConfigStatus {
   provider_kind: string
   model: string
   seat_models: Record<string, string>
+  base_url: string
   database_url: string
   version: string
   search_provider: string

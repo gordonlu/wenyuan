@@ -118,7 +118,7 @@ export const api = {
   getProviderSettings() {
     return request<ProviderSettings>('/api/settings/provider')
   },
-  updateProviderSettings(input: { provider: string; base_url: string; model: string; api_key?: string; clear_api_key?: boolean }) {
+  updateProviderSettings(input: { provider: string; base_url: string; model: string; api_key?: string; clear_api_key?: boolean; search_provider?: string; search_api_url?: string; seat_providers?: Record<string, { base_url: string; api_key: string }> }) {
     return request<ProviderSettings>('/api/settings/provider', {
       method: 'POST',
       body: JSON.stringify(input),

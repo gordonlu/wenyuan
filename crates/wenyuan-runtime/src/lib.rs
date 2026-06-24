@@ -65,11 +65,17 @@ pub async fn start_local_server(config: ServerConfig) -> anyhow::Result<LocalSer
     tokio::fs::create_dir_all(&config.web_dist).await?;
     info!("data directory: {}", config.data_dir.display());
 
-    // Extract embedded web assets if not already present
-    if !config.web_dist.join("index.html").exists() {
-        extract_web_dist(&config.web_dist);
-        info!("web assets extracted");
+    // Load .env from data directory
+    let env_path = config.data_dir.join(".env");
+    if env_path.exists() {
+        dotenvy::from_path(&env_path).ok();
+        info!("loaded env from {}", env_path.display());
     }
+
+    // Extract embedded web assets (always overwrite)
+    tokio::fs::create_dir_all(&config.web_dist).await?;
+    extract_web_dist(&config.web_dist);
+    info!("web assets extracted");
 
     let db_path = config.data_dir.join("wenyuan.db");
     let db_url = format!("sqlite://{}", db_path.display());

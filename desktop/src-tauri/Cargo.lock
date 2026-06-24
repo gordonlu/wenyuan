@@ -6376,6 +6376,7 @@ dependencies = [
  "anyhow",
  "axum",
  "directories",
+ "dotenvy",
  "mime_guess",
  "rust-embed",
  "serde_json",
