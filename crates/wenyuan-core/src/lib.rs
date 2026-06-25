@@ -994,6 +994,179 @@ pub fn mask_api_key(key: &str) -> String {
     format!("{prefix}...{suffix}")
 }
 
+// --- Follow-up / 续议 types ---
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DecisionObjectKind {
+    Assumption,
+    Risk,
+    Opportunity,
+    ActionItem,
+    OpenQuestion,
+    MinorityConcern,
+}
+
+impl DecisionObjectKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Assumption => "假设",
+            Self::Risk => "风险",
+            Self::Opportunity => "机会",
+            Self::ActionItem => "行动项",
+            Self::OpenQuestion => "开放问题",
+            Self::MinorityConcern => "少数意见",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DecisionObjectStatus {
+    Open,
+    Expanded,
+    Resolved,
+    Dismissed,
+    Superseded,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DecisionObjectPriority {
+    Critical,
+    High,
+    Medium,
+    Low,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FollowUpKind {
+    VerifyAssumption,
+    MitigateRisk,
+    ExpandOpportunity,
+    BuildActionPlan,
+    DiscussMinorityConcern,
+    ResolveOpenQuestion,
+    ReDeliberateWithNewFact,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FollowUpMode {
+    SingleSeat,
+    MiniDeliberation,
+    ReDeliberation,
+}
+
+impl FollowUpMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::SingleSeat => "单席展开",
+            Self::MiniDeliberation => "小合议",
+            Self::ReDeliberation => "新事实复议",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FollowUpImpact {
+    NoChange,
+    ClarifiesOriginalDecision,
+    AddsCondition,
+    AddsActionItem,
+    RaisesNewRisk,
+    SuggestsReDeliberation,
+    ChangesDecision,
+}
+
+impl FollowUpImpact {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::NoChange => "不改变原结论",
+            Self::ClarifiesOriginalDecision => "补充说明",
+            Self::AddsCondition => "增加条件",
+            Self::AddsActionItem => "增加行动项",
+            Self::RaisesNewRisk => "新风险",
+            Self::SuggestsReDeliberation => "建议重新复议",
+            Self::ChangesDecision => "改变结论",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RiskPolicy {
+    Normal,
+    Cautious,
+    ProfessionalRequired,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FollowUpEventKind {
+    SuggestionsGenerated,
+    SuggestionAccepted,
+    FollowUpStarted,
+    FollowUpCompleted,
+    FollowUpFailed,
+    DecisionObjectResolved,
+    ReDeliberationTriggered,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DecisionObject {
+    pub id: Uuid,
+    pub session_id: Uuid,
+    pub kind: DecisionObjectKind,
+    pub seat: Option<SeatKind>,
+    pub title: String,
+    pub summary: String,
+    pub source_phase: Option<SessionPhase>,
+    pub source_ref: Option<String>,
+    pub status: DecisionObjectStatus,
+    pub priority: DecisionObjectPriority,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FollowUpSuggestion {
+    pub id: Uuid,
+    pub session_id: Uuid,
+    pub object_id: Uuid,
+    pub kind: FollowUpKind,
+    pub title: String,
+    pub message: String,
+    pub action_label: String,
+    pub suggested_mode: FollowUpMode,
+    pub status: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FollowUpTurn {
+    pub id: Uuid,
+    pub session_id: Uuid,
+    pub suggestion_id: Option<Uuid>,
+    pub mode: FollowUpMode,
+    pub user_input: Option<String>,
+    pub result_json: serde_json::Value,
+    pub impact: FollowUpImpact,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FollowUpEvent {
+    pub id: Uuid,
+    pub session_id: Uuid,
+    pub turn_id: Option<Uuid>,
+    pub event_kind: FollowUpEventKind,
+    pub payload_json: Option<serde_json::Value>,
+    pub created_at: DateTime<Utc>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1420,5 +1593,215 @@ mod tests {
         assert!(chizheng.reassessment_condition.contains("缺少安全审计"));
         assert!(chizheng.has_risk_warning);
         assert!(decision.has_risk_blocker);
+    }
+
+    // --- Follow-up type tests ---
+
+    #[test]
+    fn decision_object_kind_roundtrip() {
+        let cases = [
+            (DecisionObjectKind::Assumption, "assumption", "假设"),
+            (DecisionObjectKind::Risk, "risk", "风险"),
+            (DecisionObjectKind::Opportunity, "opportunity", "机会"),
+            (DecisionObjectKind::ActionItem, "action_item", "行动项"),
+            (DecisionObjectKind::OpenQuestion, "open_question", "开放问题"),
+            (DecisionObjectKind::MinorityConcern, "minority_concern", "少数意见"),
+        ];
+        for (kind, expected_ser, expected_label) in &cases {
+            let json = serde_json::to_string(kind).unwrap();
+            assert_eq!(json, format!("\"{expected_ser}\""), "serialize {expected_label}");
+            let deser: DecisionObjectKind = serde_json::from_str(&json).unwrap();
+            assert_eq!(deser, *kind, "deserialize {expected_label}");
+            assert_eq!(kind.label(), *expected_label);
+        }
+    }
+
+    #[test]
+    fn decision_object_status_roundtrip() {
+        let cases = [
+            DecisionObjectStatus::Open,
+            DecisionObjectStatus::Expanded,
+            DecisionObjectStatus::Resolved,
+            DecisionObjectStatus::Dismissed,
+            DecisionObjectStatus::Superseded,
+        ];
+        for status in &cases {
+            let json = serde_json::to_string(status).unwrap();
+            let deser: DecisionObjectStatus = serde_json::from_str(&json).unwrap();
+            assert_eq!(deser, *status);
+        }
+    }
+
+    #[test]
+    fn decision_object_priority_roundtrip() {
+        let cases = [
+            DecisionObjectPriority::Critical,
+            DecisionObjectPriority::High,
+            DecisionObjectPriority::Medium,
+            DecisionObjectPriority::Low,
+        ];
+        for priority in &cases {
+            let json = serde_json::to_string(priority).unwrap();
+            let deser: DecisionObjectPriority = serde_json::from_str(&json).unwrap();
+            assert_eq!(deser, *priority);
+        }
+    }
+
+    #[test]
+    fn follow_up_kind_roundtrip() {
+        let cases = [
+            (FollowUpKind::VerifyAssumption, "verify_assumption", "VerifyAssumption"),
+            (FollowUpKind::MitigateRisk, "mitigate_risk", "MitigateRisk"),
+            (FollowUpKind::ExpandOpportunity, "expand_opportunity", "ExpandOpportunity"),
+            (FollowUpKind::BuildActionPlan, "build_action_plan", "BuildActionPlan"),
+            (FollowUpKind::DiscussMinorityConcern, "discuss_minority_concern", "DiscussMinorityConcern"),
+            (FollowUpKind::ResolveOpenQuestion, "resolve_open_question", "ResolveOpenQuestion"),
+            (FollowUpKind::ReDeliberateWithNewFact, "re_deliberate_with_new_fact", "ReDeliberateWithNewFact"),
+        ];
+        for (kind, expected_ser, _) in &cases {
+            let json = serde_json::to_string(kind).unwrap();
+            assert_eq!(json, format!("\"{expected_ser}\""));
+            let deser: FollowUpKind = serde_json::from_str(&json).unwrap();
+            assert_eq!(deser, *kind);
+        }
+    }
+
+    #[test]
+    fn follow_up_mode_roundtrip_and_labels() {
+        let cases = [
+            (FollowUpMode::SingleSeat, "single_seat", "单席展开"),
+            (FollowUpMode::MiniDeliberation, "mini_deliberation", "小合议"),
+            (FollowUpMode::ReDeliberation, "re_deliberation", "新事实复议"),
+        ];
+        for (mode, expected_ser, expected_label) in &cases {
+            let json = serde_json::to_string(mode).unwrap();
+            assert_eq!(json, format!("\"{expected_ser}\""));
+            let deser: FollowUpMode = serde_json::from_str(&json).unwrap();
+            assert_eq!(deser, *mode);
+            assert_eq!(mode.label(), *expected_label);
+        }
+    }
+
+    #[test]
+    fn follow_up_impact_roundtrip_and_labels() {
+        let cases = [
+            (FollowUpImpact::NoChange, "no_change", "不改变原结论"),
+            (FollowUpImpact::ClarifiesOriginalDecision, "clarifies_original_decision", "补充说明"),
+            (FollowUpImpact::AddsCondition, "adds_condition", "增加条件"),
+            (FollowUpImpact::AddsActionItem, "adds_action_item", "增加行动项"),
+            (FollowUpImpact::RaisesNewRisk, "raises_new_risk", "新风险"),
+            (FollowUpImpact::SuggestsReDeliberation, "suggests_re_deliberation", "建议重新复议"),
+            (FollowUpImpact::ChangesDecision, "changes_decision", "改变结论"),
+        ];
+        for (impact, expected_ser, expected_label) in &cases {
+            let json = serde_json::to_string(impact).unwrap();
+            assert_eq!(json, format!("\"{expected_ser}\""));
+            let deser: FollowUpImpact = serde_json::from_str(&json).unwrap();
+            assert_eq!(deser, *impact);
+            assert_eq!(impact.label(), *expected_label);
+        }
+    }
+
+    #[test]
+    fn risk_policy_roundtrip() {
+        let cases = [
+            RiskPolicy::Normal,
+            RiskPolicy::Cautious,
+            RiskPolicy::ProfessionalRequired,
+        ];
+        for policy in &cases {
+            let json = serde_json::to_string(policy).unwrap();
+            let deser: RiskPolicy = serde_json::from_str(&json).unwrap();
+            assert_eq!(deser, *policy);
+        }
+    }
+
+    #[test]
+    fn follow_up_event_kind_roundtrip() {
+        let cases = [
+            FollowUpEventKind::SuggestionsGenerated,
+            FollowUpEventKind::SuggestionAccepted,
+            FollowUpEventKind::FollowUpStarted,
+            FollowUpEventKind::FollowUpCompleted,
+            FollowUpEventKind::FollowUpFailed,
+            FollowUpEventKind::DecisionObjectResolved,
+            FollowUpEventKind::ReDeliberationTriggered,
+        ];
+        for kind in &cases {
+            let json = serde_json::to_string(kind).unwrap();
+            let deser: FollowUpEventKind = serde_json::from_str(&json).unwrap();
+            assert_eq!(deser, *kind);
+        }
+    }
+
+    #[test]
+    fn decision_object_serde_roundtrip() {
+        let obj = DecisionObject {
+            id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            kind: DecisionObjectKind::Risk,
+            seat: Some(SeatKind::Chizheng),
+            title: "一次性调整多个变量".into(),
+            summary: "同时调整多个变量可能导致无法判断真实原因".into(),
+            source_phase: Some(SessionPhase::Voting),
+            source_ref: Some("proposal-chizheng-risks[2]".into()),
+            status: DecisionObjectStatus::Open,
+            priority: DecisionObjectPriority::High,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let json = serde_json::to_string(&obj).unwrap();
+        let deser: DecisionObject = serde_json::from_str(&json).unwrap();
+        assert_eq!(deser.id, obj.id);
+        assert_eq!(deser.session_id, obj.session_id);
+        assert_eq!(deser.kind, obj.kind);
+        assert_eq!(deser.seat, obj.seat);
+        assert_eq!(deser.title, obj.title);
+        assert_eq!(deser.priority, obj.priority);
+        assert_eq!(deser.status, obj.status);
+    }
+
+    #[test]
+    fn follow_up_suggestion_serde_roundtrip() {
+        let sug = FollowUpSuggestion {
+            id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            object_id: Uuid::new_v4(),
+            kind: FollowUpKind::MitigateRisk,
+            title: "查看风险缓解方案".into(),
+            message: "持正席识别到一个关键风险：一次性调整多个变量".into(),
+            action_label: "查看风险缓解方案".into(),
+            suggested_mode: FollowUpMode::SingleSeat,
+            status: "open".into(),
+            created_at: Utc::now(),
+        };
+        let json = serde_json::to_string(&sug).unwrap();
+        let deser: FollowUpSuggestion = serde_json::from_str(&json).unwrap();
+        assert_eq!(deser.id, sug.id);
+        assert_eq!(deser.kind, sug.kind);
+        assert_eq!(deser.suggested_mode, sug.suggested_mode);
+    }
+
+    #[test]
+    fn follow_up_turn_serde_roundtrip() {
+        let turn = FollowUpTurn {
+            id: Uuid::new_v4(),
+            session_id: Uuid::new_v4(),
+            suggestion_id: Some(Uuid::new_v4()),
+            mode: FollowUpMode::SingleSeat,
+            user_input: Some("请展开分析".into()),
+            result_json: serde_json::json!({
+                "summary": "风险可控",
+                "analysis": "详细分析..."
+            }),
+            impact: FollowUpImpact::AddsCondition,
+            created_at: Utc::now(),
+        };
+        let json = serde_json::to_string(&turn).unwrap();
+        let deser: FollowUpTurn = serde_json::from_str(&json).unwrap();
+        assert_eq!(deser.id, turn.id);
+        assert_eq!(deser.mode, turn.mode);
+        assert_eq!(deser.impact, turn.impact);
+        assert_eq!(deser.result_json, turn.result_json);
     }
 }

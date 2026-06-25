@@ -28,6 +28,8 @@ pub(crate) use json::clean_json_string;
 mod output;
 mod search;
 mod evidence;
+mod followup;
+pub use followup::{generate_decision_objects, generate_followup_suggestions};
 use json::{parse_model_json, truncate_for_repair};
 use output::{CritiqueOutput, IndependentOutput, PhaseRun, ProposalOutput, SeatCallResult, VoteOutput};
 use search::{format_search_results, try_extract_search_tool, SEARCH_TOOL_INSTRUCTION};

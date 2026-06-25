@@ -7,7 +7,12 @@ use thiserror::Error;
 use uuid::Uuid;
 use wenyuan_agent::{DiscussionArtifacts, DiscussionQualityMetrics, SeatRunStatus, SeatRunTrace, system_prompt};
 use wenyuan_core::{
-    ChatMessage, DeliberationMode, Evidence, SeatKind, Session, SessionPhase, ToolRun,
+    ChatMessage, DecisionObject, DecisionObjectStatus, DeliberationMode, Evidence,
+    FollowUpEventKind, FollowUpSuggestion, FollowUpTurn, SeatKind, Session, SessionPhase, ToolRun,
+};
+#[cfg(test)]
+use wenyuan_core::{
+    DecisionObjectKind, DecisionObjectPriority, FollowUpImpact, FollowUpKind, FollowUpMode,
 };
 
 mod migration;
@@ -397,6 +402,10 @@ impl Store {
         .execute(&mut *tx)
         .await?;
         for table in [
+            "followup_events",
+            "followup_turns",
+            "followup_suggestions",
+            "decision_objects",
             "ideas",
             "critiques",
             "proposals",
@@ -499,7 +508,7 @@ impl Store {
 
     pub async fn delete_session(&self, id: Uuid) -> Result<(), StoreError> {
         let mut tx = self.pool.begin().await?;
-        for table in &["seat_runs", "rounds", "ideas", "critiques", "proposals", "votes", "session_events", "claims", "evidence", "assessments", "claim_evidence_links", "seats"] {
+        for table in &["followup_events", "followup_turns", "followup_suggestions", "decision_objects", "seat_runs", "rounds", "ideas", "critiques", "proposals", "votes", "session_events", "claims", "evidence", "assessments", "claim_evidence_links", "seats"] {
             sqlx::query(&format!("delete from {table} where session_id = ?1"))
                 .bind(id.to_string())
                 .execute(&mut *tx)
@@ -700,6 +709,188 @@ impl Store {
         .await?;
         self.append_event(id, "manual_revision_triggered", serde_json::json!({}))
             .await?;
+        Ok(())
+    }
+
+    // --- Follow-up / 续议 CRUD ---
+
+    pub async fn upsert_decision_objects(
+        &self,
+        objects: &[DecisionObject],
+    ) -> Result<(), StoreError> {
+        let mut tx = self.pool.begin().await?;
+        for obj in objects {
+            sqlx::query(
+                "insert or replace into decision_objects
+                 (id, session_id, kind, seat, title, summary, source_phase, source_ref, status, priority, created_at, updated_at)
+                 values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            )
+            .bind(obj.id.to_string())
+            .bind(obj.session_id.to_string())
+            .bind(serde_json::to_string(&obj.kind)?)
+            .bind(obj.seat.map(seat_to_string))
+            .bind(&obj.title)
+            .bind(&obj.summary)
+            .bind(obj.source_phase.map(phase_to_string))
+            .bind(&obj.source_ref)
+            .bind(serde_json::to_string(&obj.status)?)
+            .bind(serde_json::to_string(&obj.priority)?)
+            .bind(obj.created_at.to_rfc3339())
+            .bind(obj.updated_at.to_rfc3339())
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub async fn decision_objects(
+        &self,
+        session_id: Uuid,
+    ) -> Result<Vec<DecisionObject>, StoreError> {
+        let rows = sqlx::query(
+            "select id, session_id, kind, seat, title, summary, source_phase, source_ref, status, priority, created_at, updated_at
+             from decision_objects where session_id = ?1
+             order by rowid asc",
+        )
+        .bind(session_id.to_string())
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(decision_object_from_row).collect()
+    }
+
+    pub async fn update_decision_object_status(
+        &self,
+        id: Uuid,
+        status: DecisionObjectStatus,
+    ) -> Result<(), StoreError> {
+        sqlx::query(
+            "update decision_objects set status = ?2, updated_at = ?3 where id = ?1",
+        )
+        .bind(id.to_string())
+        .bind(serde_json::to_string(&status)?)
+        .bind(Utc::now().to_rfc3339())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn replace_open_followup_suggestions(
+        &self,
+        session_id: Uuid,
+        suggestions: &[FollowUpSuggestion],
+    ) -> Result<(), StoreError> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            "delete from followup_suggestions where session_id = ?1 and status = 'open'",
+        )
+        .bind(session_id.to_string())
+        .execute(&mut *tx)
+        .await?;
+        for sug in suggestions {
+            sqlx::query(
+                "insert into followup_suggestions
+                 (id, session_id, object_id, kind, title, message, action_label, suggested_mode, status, created_at)
+                 values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            )
+            .bind(sug.id.to_string())
+            .bind(sug.session_id.to_string())
+            .bind(sug.object_id.to_string())
+            .bind(serde_json::to_string(&sug.kind)?)
+            .bind(&sug.title)
+            .bind(&sug.message)
+            .bind(&sug.action_label)
+            .bind(serde_json::to_string(&sug.suggested_mode)?)
+            .bind(&sug.status)
+            .bind(sug.created_at.to_rfc3339())
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub async fn followup_suggestions(
+        &self,
+        session_id: Uuid,
+    ) -> Result<Vec<FollowUpSuggestion>, StoreError> {
+        let rows = sqlx::query(
+            "select id, session_id, object_id, kind, title, message, action_label, suggested_mode, status, created_at
+             from followup_suggestions where session_id = ?1
+             order by rowid asc",
+        )
+        .bind(session_id.to_string())
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(followup_suggestion_from_row).collect()
+    }
+
+    pub async fn followup_suggestion(
+        &self,
+        id: Uuid,
+    ) -> Result<FollowUpSuggestion, StoreError> {
+        let row = sqlx::query(
+            "select id, session_id, object_id, kind, title, message, action_label, suggested_mode, status, created_at
+             from followup_suggestions where id = ?1",
+        )
+        .bind(id.to_string())
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(StoreError::NotFound)?;
+        followup_suggestion_from_row(row)
+    }
+
+    pub async fn insert_followup_turn(&self, turn: &FollowUpTurn) -> Result<(), StoreError> {
+        sqlx::query(
+            "insert into followup_turns
+             (id, session_id, suggestion_id, mode, user_input, result_json, impact, created_at)
+             values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        )
+        .bind(turn.id.to_string())
+        .bind(turn.session_id.to_string())
+        .bind(turn.suggestion_id.map(|id| id.to_string()))
+        .bind(serde_json::to_string(&turn.mode)?)
+        .bind(&turn.user_input)
+        .bind(serde_json::to_string(&turn.result_json)?)
+        .bind(serde_json::to_string(&turn.impact)?)
+        .bind(turn.created_at.to_rfc3339())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn followup_turns(
+        &self,
+        session_id: Uuid,
+    ) -> Result<Vec<FollowUpTurn>, StoreError> {
+        let rows = sqlx::query(
+            "select id, session_id, suggestion_id, mode, user_input, result_json, impact, created_at
+             from followup_turns where session_id = ?1
+             order by rowid desc",
+        )
+        .bind(session_id.to_string())
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(followup_turn_from_row).collect()
+    }
+
+    pub async fn append_followup_event(
+        &self,
+        session_id: Uuid,
+        kind: FollowUpEventKind,
+        payload: Option<serde_json::Value>,
+    ) -> Result<(), StoreError> {
+        sqlx::query(
+            "insert into followup_events (id, session_id, event_kind, payload_json, created_at)
+             values (?1, ?2, ?3, ?4, ?5)",
+        )
+        .bind(Uuid::new_v4().to_string())
+        .bind(session_id.to_string())
+        .bind(serde_json::to_string(&kind)?)
+        .bind(payload.map(|v| v.to_string()))
+        .bind(Utc::now().to_rfc3339())
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
@@ -1018,6 +1209,69 @@ async fn update_seat_conversations(
         .await?;
     }
     Ok(())
+}
+
+fn decision_object_from_row(row: sqlx::sqlite::SqliteRow) -> Result<DecisionObject, StoreError> {
+    Ok(DecisionObject {
+        id: Uuid::parse_str(&row.try_get::<String, _>("id")?)
+            .map_err(|err| sqlx::Error::Decode(Box::new(err)))?,
+        session_id: Uuid::parse_str(&row.try_get::<String, _>("session_id")?)
+            .map_err(|err| sqlx::Error::Decode(Box::new(err)))?,
+        kind: serde_json::from_str(&row.try_get::<String, _>("kind")?)?,
+        seat: row
+            .try_get::<Option<String>, _>("seat")?
+            .as_deref()
+            .map(parse_seat),
+        title: row.try_get("title")?,
+        summary: row.try_get("summary")?,
+        source_phase: row
+            .try_get::<Option<String>, _>("source_phase")?
+            .as_deref()
+            .map(parse_phase),
+        source_ref: row.try_get("source_ref")?,
+        status: serde_json::from_str(&row.try_get::<String, _>("status")?)?,
+        priority: serde_json::from_str(&row.try_get::<String, _>("priority")?)?,
+        created_at: parse_time(row.try_get("created_at")?)?,
+        updated_at: parse_time(row.try_get("updated_at")?)?,
+    })
+}
+
+fn followup_suggestion_from_row(
+    row: sqlx::sqlite::SqliteRow,
+) -> Result<FollowUpSuggestion, StoreError> {
+    Ok(FollowUpSuggestion {
+        id: Uuid::parse_str(&row.try_get::<String, _>("id")?)
+            .map_err(|err| sqlx::Error::Decode(Box::new(err)))?,
+        session_id: Uuid::parse_str(&row.try_get::<String, _>("session_id")?)
+            .map_err(|err| sqlx::Error::Decode(Box::new(err)))?,
+        object_id: Uuid::parse_str(&row.try_get::<String, _>("object_id")?)
+            .map_err(|err| sqlx::Error::Decode(Box::new(err)))?,
+        kind: serde_json::from_str(&row.try_get::<String, _>("kind")?)?,
+        title: row.try_get("title")?,
+        message: row.try_get("message")?,
+        action_label: row.try_get("action_label")?,
+        suggested_mode: serde_json::from_str(&row.try_get::<String, _>("suggested_mode")?)?,
+        status: row.try_get("status")?,
+        created_at: parse_time(row.try_get("created_at")?)?,
+    })
+}
+
+fn followup_turn_from_row(row: sqlx::sqlite::SqliteRow) -> Result<FollowUpTurn, StoreError> {
+    let suggestion_id: Option<String> = row.try_get("suggestion_id")?;
+    Ok(FollowUpTurn {
+        id: Uuid::parse_str(&row.try_get::<String, _>("id")?)
+            .map_err(|err| sqlx::Error::Decode(Box::new(err)))?,
+        session_id: Uuid::parse_str(&row.try_get::<String, _>("session_id")?)
+            .map_err(|err| sqlx::Error::Decode(Box::new(err)))?,
+        suggestion_id: suggestion_id
+            .as_deref()
+            .and_then(|s| Uuid::parse_str(s).ok()),
+        mode: serde_json::from_str(&row.try_get::<String, _>("mode")?)?,
+        user_input: row.try_get("user_input")?,
+        result_json: serde_json::from_str(&row.try_get::<String, _>("result_json")?)?,
+        impact: serde_json::from_str(&row.try_get::<String, _>("impact")?)?,
+        created_at: parse_time(row.try_get("created_at")?)?,
+    })
 }
 
 #[cfg(test)]
@@ -1531,5 +1785,204 @@ mod tests {
         // Session should no longer exist
         let err = store.get_session(id).await.unwrap_err();
         assert!(matches!(err, StoreError::NotFound));
+    }
+
+    // --- Follow-up store tests ---
+
+    #[tokio::test]
+    async fn followup_tables_are_created_by_migration() {
+        let store = Store::connect("sqlite::memory:").await.unwrap();
+        let tables: Vec<String> = sqlx::query_scalar(
+            "select name from sqlite_master where type='table' and name like 'followup_%' or name = 'decision_objects'
+             order by name",
+        )
+        .fetch_all(&store.pool)
+        .await
+        .unwrap();
+        assert!(tables.contains(&"decision_objects".to_string()));
+        assert!(tables.contains(&"followup_suggestions".to_string()));
+        assert!(tables.contains(&"followup_turns".to_string()));
+        assert!(tables.contains(&"followup_events".to_string()));
+    }
+
+    #[tokio::test]
+    async fn decision_objects_crud() {
+        let store = Store::connect("sqlite::memory:").await.unwrap();
+        let session = Session::new("议题", "测试决策对象", "");
+        let id = session.id;
+        store.create_session(&session).await.unwrap();
+
+        let obj = DecisionObject {
+            id: Uuid::new_v4(),
+            session_id: id,
+            kind: DecisionObjectKind::Risk,
+            seat: Some(SeatKind::Chizheng),
+            title: "测试风险".into(),
+            summary: "这是一个测试风险".into(),
+            source_phase: Some(SessionPhase::Voting),
+            source_ref: Some("test".into()),
+            status: DecisionObjectStatus::Open,
+            priority: DecisionObjectPriority::High,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        store.upsert_decision_objects(&[obj.clone()]).await.unwrap();
+
+        let loaded = store.decision_objects(id).await.unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].kind, DecisionObjectKind::Risk);
+        assert_eq!(loaded[0].priority, DecisionObjectPriority::High);
+        assert_eq!(loaded[0].seat, Some(SeatKind::Chizheng));
+
+        store
+            .update_decision_object_status(obj.id, DecisionObjectStatus::Resolved)
+            .await
+            .unwrap();
+        let loaded2 = store.decision_objects(id).await.unwrap();
+        assert_eq!(loaded2[0].status, DecisionObjectStatus::Resolved);
+    }
+
+    #[tokio::test]
+    async fn followup_suggestions_crud() {
+        let store = Store::connect("sqlite::memory:").await.unwrap();
+        let session = Session::new("议题", "测试续议建议", "");
+        let id = session.id;
+        store.create_session(&session).await.unwrap();
+
+        let obj = DecisionObject {
+            id: Uuid::new_v4(),
+            session_id: id,
+            kind: DecisionObjectKind::Risk,
+            seat: Some(SeatKind::Chizheng),
+            title: "风险".into(),
+            summary: "test".into(),
+            source_phase: None,
+            source_ref: None,
+            status: DecisionObjectStatus::Open,
+            priority: DecisionObjectPriority::High,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        store.upsert_decision_objects(&[obj.clone()]).await.unwrap();
+
+        let sug = FollowUpSuggestion {
+            id: Uuid::new_v4(),
+            session_id: id,
+            object_id: obj.id,
+            kind: FollowUpKind::MitigateRisk,
+            title: "缓解风险".into(),
+            message: "持正席建议缓解".into(),
+            action_label: "查看方案".into(),
+            suggested_mode: FollowUpMode::SingleSeat,
+            status: "open".into(),
+            created_at: Utc::now(),
+        };
+        store
+            .replace_open_followup_suggestions(id, &[sug.clone()])
+            .await
+            .unwrap();
+
+        let loaded = store.followup_suggestions(id).await.unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].kind, FollowUpKind::MitigateRisk);
+        assert_eq!(loaded[0].suggested_mode, FollowUpMode::SingleSeat);
+
+        let loaded_one = store.followup_suggestion(sug.id).await.unwrap();
+        assert_eq!(loaded_one.id, sug.id);
+
+        // Replace with empty - open ones should be removed
+        store
+            .replace_open_followup_suggestions(id, &[])
+            .await
+            .unwrap();
+        let loaded2 = store.followup_suggestions(id).await.unwrap();
+        assert_eq!(loaded2.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn followup_turns_crud() {
+        let store = Store::connect("sqlite::memory:").await.unwrap();
+        let session = Session::new("议题", "测试续议回合", "");
+        let id = session.id;
+        store.create_session(&session).await.unwrap();
+
+        let turn = FollowUpTurn {
+            id: Uuid::new_v4(),
+            session_id: id,
+            suggestion_id: None,
+            mode: FollowUpMode::SingleSeat,
+            user_input: Some("展开分析".into()),
+            result_json: serde_json::json!({"summary": "分析完成"}),
+            impact: FollowUpImpact::AddsCondition,
+            created_at: Utc::now(),
+        };
+        store.insert_followup_turn(&turn).await.unwrap();
+
+        let loaded = store.followup_turns(id).await.unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].mode, FollowUpMode::SingleSeat);
+        assert_eq!(loaded[0].impact, FollowUpImpact::AddsCondition);
+        assert_eq!(loaded[0].result_json["summary"], "分析完成");
+    }
+
+    #[tokio::test]
+    async fn delete_session_removes_followup_data() {
+        let store = Store::connect("sqlite::memory:").await.unwrap();
+        let session = Session::new("议题", "删除续议数据", "");
+        let id = session.id;
+        store.create_session(&session).await.unwrap();
+
+        let obj = DecisionObject {
+            id: Uuid::new_v4(),
+            session_id: id,
+            kind: DecisionObjectKind::Risk,
+            seat: None,
+            title: "待删除风险".into(),
+            summary: "test".into(),
+            source_phase: None,
+            source_ref: None,
+            status: DecisionObjectStatus::Open,
+            priority: DecisionObjectPriority::Medium,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        store.upsert_decision_objects(&[obj.clone()]).await.unwrap();
+        assert_eq!(store.decision_objects(id).await.unwrap().len(), 1);
+
+        store.delete_session(id).await.unwrap();
+        assert_eq!(store.decision_objects(id).await.unwrap().len(), 0);
+        assert_eq!(store.followup_suggestions(id).await.unwrap().len(), 0);
+        assert_eq!(store.followup_turns(id).await.unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn append_followup_event_persists() {
+        let store = Store::connect("sqlite::memory:").await.unwrap();
+        let session = Session::new("议题", "续议审计事件", "");
+        let id = session.id;
+        store.create_session(&session).await.unwrap();
+
+        store
+            .append_followup_event(id, FollowUpEventKind::SuggestionsGenerated, None)
+            .await
+            .unwrap();
+        store
+            .append_followup_event(
+                id,
+                FollowUpEventKind::FollowUpCompleted,
+                Some(serde_json::json!({"turn_id": "abc"})),
+            )
+            .await
+            .unwrap();
+
+        // followup_events table should have 2 rows
+        let count: i64 = sqlx::query_scalar(
+            "select count(*) from followup_events where session_id = ?1",
+        )
+        .bind(id.to_string())
+        .fetch_one(&store.pool)
+        .await
+        .unwrap();
+        assert_eq!(count, 2);
     }
 }

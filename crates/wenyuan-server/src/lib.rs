@@ -9,6 +9,7 @@ use axum::{
     routing::{get, post},
 };
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -25,9 +26,10 @@ use tower_http::{
 };
 use tracing::{error, info};
 use uuid::Uuid;
-use wenyuan_agent::{AgentError, AgentRunner, CancellationFlag, ProgressSink};
+use wenyuan_agent::{AgentError, AgentRunner, CancellationFlag, ProgressSink, generate_decision_objects, generate_followup_suggestions};
 use wenyuan_core::{
-    DeliberationMode, Evidence, SearchBackend, SeatKind, SeatModelConfig,
+    DecisionObject, DecisionObjectStatus, DeliberationMode, Evidence, FollowUpEventKind,
+    FollowUpMode, FollowUpSuggestion, FollowUpTurn, SearchBackend, SeatKind, SeatModelConfig,
     Session, SessionPhase, VotePolicy, VoteStrategy,
 };
 use wenyuan_provider::{
@@ -461,6 +463,13 @@ pub fn app(state: AppState) -> Router {
         .route("/api/sessions/{id}/manual-revision", post(manual_revision))
         .route("/api/sessions/{id}/trajectory", get(phase_trajectory))
         .route("/api/sessions/{id}/events", get(events_sse))
+        .route("/api/sessions/{id}/decision-objects", get(get_decision_objects))
+        .route("/api/sessions/{id}/followups", get(get_followups))
+        .route("/api/sessions/{id}/followups/generate", post(regenerate_followups))
+        .route("/api/sessions/{id}/followup-turns", get(get_followup_turns))
+        .route("/api/sessions/{id}/re-deliberate", post(re_deliberate))
+        .route("/api/followups/{id}/start", post(start_followup))
+        .route("/api/decision-objects/{id}/status", post(update_object_status))
         .route("/api/tools/documents/parse", post(parse_document))
         .route("/api/tools/code/search", post(search_code_tool))
 
@@ -1128,6 +1137,24 @@ pub async fn start_session(
                         running_map.lock().await.remove(&id);
                         return;
                     }
+                    // Generate follow-up decision objects and suggestions
+                    if let Some(ref final_session) = artifacts.session {
+                        if final_session.phase == SessionPhase::Completed {
+                            let objects = generate_decision_objects(final_session, &artifacts);
+                            if let Err(err) = store.upsert_decision_objects(&objects).await {
+                                error!("failed to persist decision objects: {err}");
+                            }
+                            let suggestions = generate_followup_suggestions(&objects);
+                            if let Err(err) = store.replace_open_followup_suggestions(id, &suggestions).await {
+                                error!("failed to persist follow-up suggestions: {err}");
+                            }
+                            let _ = store.append_followup_event(
+                                id,
+                                FollowUpEventKind::SuggestionsGenerated,
+                                None,
+                            ).await;
+                        }
+                    }
                     if let Err(err) = store.complete_execution(id, execution_token).await {
                         error!("failed to complete session execution: {err}");
                     }
@@ -1305,6 +1332,23 @@ pub async fn retry_phase(
                         running_map.lock().await.remove(&id);
                         return;
                     }
+                    if let Some(ref final_session) = result_artifacts.session {
+                        if final_session.phase == SessionPhase::Completed {
+                            let objects = generate_decision_objects(final_session, &result_artifacts);
+                            if let Err(err) = store.upsert_decision_objects(&objects).await {
+                                error!("failed to persist decision objects: {err}");
+                            }
+                            let suggestions = generate_followup_suggestions(&objects);
+                            if let Err(err) = store.replace_open_followup_suggestions(id, &suggestions).await {
+                                error!("failed to persist follow-up suggestions: {err}");
+                            }
+                            let _ = store.append_followup_event(
+                                id,
+                                FollowUpEventKind::SuggestionsGenerated,
+                                None,
+                            ).await;
+                        }
+                    }
                     if let Err(err) = store.complete_execution(id, execution_token).await {
                         error!("failed to complete session execution: {err}");
                     }
@@ -1338,6 +1382,183 @@ pub async fn phase_trajectory(
     Path(id): Path<Uuid>,
 ) -> Result<Json<Vec<wenyuan_store::SessionEvent>>, ApiError> {
     Ok(Json(state.store.phase_trajectory(id).await?))
+}
+
+// --- Follow-up / 续议 API ---
+
+#[derive(Serialize)]
+pub struct DecisionObjectsResponse {
+    pub objects: Vec<DecisionObject>,
+}
+
+pub async fn get_decision_objects(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<DecisionObjectsResponse>, ApiError> {
+    let objects = state.store.decision_objects(id).await?;
+    Ok(Json(DecisionObjectsResponse { objects }))
+}
+
+#[derive(Serialize)]
+pub struct FollowupsResponse {
+    pub suggestions: Vec<FollowUpSuggestion>,
+}
+
+pub async fn get_followups(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<FollowupsResponse>, ApiError> {
+    let suggestions = state.store.followup_suggestions(id).await?;
+    Ok(Json(FollowupsResponse { suggestions }))
+}
+
+/// Regenerate follow-up suggestions from decision objects.
+pub async fn regenerate_followups(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<FollowupsResponse>, ApiError> {
+    let details = state.store.get_session(id).await?;
+    if details.session.phase != SessionPhase::Completed {
+        return Err(ApiError::bad_request("session is not completed"));
+    }
+    let objects = state.store.decision_objects(id).await?;
+    let suggestions = generate_followup_suggestions(&objects);
+    state.store.replace_open_followup_suggestions(id, &suggestions).await?;
+    state.store.append_followup_event(id, FollowUpEventKind::SuggestionsGenerated, None).await?;
+    Ok(Json(FollowupsResponse { suggestions }))
+}
+
+#[derive(Deserialize)]
+pub struct StartFollowupRequest {
+    pub mode: FollowUpMode,
+    pub user_input: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct StartFollowupResponse {
+    pub turn_id: Uuid,
+    pub result: serde_json::Value,
+    pub impact: String,
+}
+
+/// Start a follow-up (single seat or mini deliberation).
+pub async fn start_followup(
+    State(state): State<AppState>,
+    Path(suggestion_id): Path<Uuid>,
+    Json(body): Json<StartFollowupRequest>,
+) -> Result<Json<StartFollowupResponse>, ApiError> {
+    let suggestion = state.store.followup_suggestion(suggestion_id).await?;
+    let session_id = suggestion.session_id;
+
+    let turn_id = Uuid::new_v4();
+    // Stub: actual execution will be implemented in Task 6/7
+    let result = serde_json::json!({
+        "summary": "续议功能实现中",
+        "note": "this is a stub response — single seat / mini deliberation not yet implemented"
+    });
+    let impact = wenyuan_core::FollowUpImpact::NoChange;
+
+    state.store.append_followup_event(
+        session_id,
+        FollowUpEventKind::FollowUpStarted,
+        Some(serde_json::json!({"suggestion_id": suggestion_id, "mode": body.mode})),
+    ).await?;
+
+    let turn = FollowUpTurn {
+        id: turn_id,
+        session_id,
+        suggestion_id: Some(suggestion_id),
+        mode: body.mode,
+        user_input: body.user_input,
+        result_json: result.clone(),
+        impact,
+        created_at: Utc::now(),
+    };
+    state.store.insert_followup_turn(&turn).await?;
+
+    state.store.append_followup_event(
+        session_id,
+        FollowUpEventKind::FollowUpCompleted,
+        Some(serde_json::json!({"turn_id": turn_id, "impact": impact})),
+    ).await?;
+
+    let _ = state.event_tx.send(session_id);
+    Ok(Json(StartFollowupResponse {
+        turn_id,
+        result,
+        impact: "no_change".into(),
+    }))
+}
+
+#[derive(Deserialize)]
+pub struct ReDeliberateRequest {
+    pub new_fact: String,
+    pub affected_object_ids: Vec<Uuid>,
+}
+
+#[derive(Serialize)]
+pub struct ReDeliberateResponse {
+    pub turn_id: Uuid,
+    pub result: serde_json::Value,
+}
+
+/// New fact re-deliberation (stub for now).
+pub async fn re_deliberate(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(body): Json<ReDeliberateRequest>,
+) -> Result<Json<ReDeliberateResponse>, ApiError> {
+    let turn_id = Uuid::new_v4();
+    let result = serde_json::json!({
+        "summary": "新事实复议功能实现中",
+        "note": "this is a stub response — redeliberation not yet implemented"
+    });
+
+    let turn = FollowUpTurn {
+        id: turn_id,
+        session_id: id,
+        suggestion_id: None,
+        mode: FollowUpMode::ReDeliberation,
+        user_input: Some(body.new_fact),
+        result_json: result.clone(),
+        impact: wenyuan_core::FollowUpImpact::NoChange,
+        created_at: Utc::now(),
+    };
+    state.store.insert_followup_turn(&turn).await?;
+    state.store.append_followup_event(
+        id,
+        FollowUpEventKind::FollowUpCompleted,
+        Some(serde_json::json!({"turn_id": turn_id})),
+    ).await?;
+    let _ = state.event_tx.send(id);
+    Ok(Json(ReDeliberateResponse { turn_id, result }))
+}
+
+#[derive(Serialize)]
+pub struct FollowUpTurnsResponse {
+    pub turns: Vec<FollowUpTurn>,
+}
+
+pub async fn get_followup_turns(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<FollowUpTurnsResponse>, ApiError> {
+    let turns = state.store.followup_turns(id).await?;
+    Ok(Json(FollowUpTurnsResponse { turns }))
+}
+
+#[derive(Deserialize)]
+pub struct UpdateObjectStatusRequest {
+    pub status: DecisionObjectStatus,
+}
+
+pub async fn update_object_status(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(body): Json<UpdateObjectStatusRequest>,
+) -> Result<Json<()>, ApiError> {
+    state.store.update_decision_object_status(id, body.status).await?;
+    Ok(Json(()))
 }
 
 pub async fn events_sse(

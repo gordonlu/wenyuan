@@ -2,7 +2,7 @@ use chrono::Utc;
 use sqlx::Row;
 use crate::{Store, StoreError};
 
-const MIGRATIONS: &str = r#"
+const MIGRATIONS_V1: &str = r#"
 create table if not exists sessions (
     id text primary key,
     title text not null,
@@ -132,7 +132,7 @@ impl Store {
             .unwrap_or(0);
 
         if applied == 0 {
-            for statement in MIGRATIONS
+            for statement in MIGRATIONS_V1
                 .split(";")
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
@@ -144,6 +144,87 @@ impl Store {
                 .bind(&now)
                 .execute(&self.pool)
                 .await?;
+        }
+
+        if applied <= 1 {
+            let v2 = r#"
+create table if not exists decision_objects (
+    id text primary key,
+    session_id text not null,
+    kind text not null,
+    seat text,
+    title text not null,
+    summary text not null,
+    source_phase text,
+    source_ref text,
+    status text not null default 'open',
+    priority text not null default 'medium',
+    created_at text not null,
+    updated_at text not null,
+    foreign key (session_id) references sessions(id)
+);
+create table if not exists followup_suggestions (
+    id text primary key,
+    session_id text not null,
+    object_id text not null,
+    kind text not null,
+    title text not null,
+    message text not null,
+    action_label text not null,
+    suggested_mode text not null,
+    status text not null default 'open',
+    created_at text not null,
+    foreign key (session_id) references sessions(id),
+    foreign key (object_id) references decision_objects(id)
+);
+create table if not exists followup_turns (
+    id text primary key,
+    session_id text not null,
+    suggestion_id text,
+    mode text not null,
+    user_input text,
+    result_json text not null,
+    impact text not null,
+    created_at text not null,
+    foreign key (session_id) references sessions(id)
+);
+create table if not exists followup_events (
+    id text primary key,
+    session_id text not null,
+    turn_id text,
+    event_kind text not null,
+    payload_json text,
+    created_at text not null,
+    foreign key (session_id) references sessions(id)
+);
+create index if not exists idx_decision_objects_session on decision_objects(session_id);
+create index if not exists idx_followup_suggestions_session on followup_suggestions(session_id);
+create index if not exists idx_followup_suggestions_object on followup_suggestions(object_id);
+create index if not exists idx_followup_turns_session on followup_turns(session_id);
+create index if not exists idx_followup_events_session on followup_events(session_id);
+"#;
+            // Check if v2 already applied
+            let v2_applied: i32 = sqlx::query_scalar(
+                "select count(*) from _schema_version where version = 2",
+            )
+            .fetch_one(&self.pool)
+            .await
+            .unwrap_or(0);
+
+            if v2_applied == 0 {
+                for statement in v2
+                    .split(";")
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
+                    sqlx::query(statement).execute(&self.pool).await?;
+                }
+                let now = Utc::now().to_rfc3339();
+                sqlx::query("insert into _schema_version (version, name, applied_at) values (2, '002_followups', ?1)")
+                    .bind(&now)
+                    .execute(&self.pool)
+                    .await?;
+            }
         }
         Ok(())
     }
