@@ -330,6 +330,9 @@ async function saveSettings() {
     apiKeyConfigured.value = result.api_key_configured
     apiKeyInput.value = ''
     changingKey.value = false
+    if (result.restart_required) {
+      error.value = '配置已保存，重启后生效。当前进行中的合议不会受影响。'
+    }
   } catch (err) {
     error.value = err instanceof Error ? err.message : '保存失败'
   } finally {
@@ -358,7 +361,7 @@ async function doTest() {
 async function clearKey() {
   if (!(await confirm('确认删除 API Key？'))) return
   try {
-    await api.updateProviderSettings({
+    const result = await api.updateProviderSettings({
       provider: providerType.value,
       base_url: baseUrl.value,
       model: modelName.value,
@@ -366,6 +369,9 @@ async function clearKey() {
     })
     apiKeyConfigured.value = false
     apiKeyInput.value = ''
+    if (result.restart_required) {
+      error.value = '配置已保存，重启后生效。当前进行中的合议不会受影响。'
+    }
   } catch (err) {
     error.value = err instanceof Error ? err.message : '删除失败'
   }

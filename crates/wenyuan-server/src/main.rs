@@ -4,7 +4,8 @@ use tracing::info;
 use wenyuan_agent::AgentRunner;
 use wenyuan_core::SearchBackend;
 use wenyuan_server::{
-    AppState, app, preferences_path_from_env, provider_from_env, provider_timeout_from_env,
+    AppState, app, preferences_path_from_env,
+    provider_from_settings_or_env, provider_timeout_from_env,
     search_backend_from_env, settings::SettingsManager,
 };
 use wenyuan_store::Store;
@@ -34,12 +35,12 @@ async fn main() -> anyhow::Result<()> {
     if recovered > 0 {
         info!("marked {recovered} stale session execution(s) as retry_required");
     }
-    let (provider, config) = provider_from_env(&database_url);
     let data_dir = env::var("WENYUAN_DATA_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("."));
     let settings_manager = SettingsManager::new(data_dir.clone());
     let settings_config = settings_manager.load_config();
+    let (provider, config) = provider_from_settings_or_env(&settings_manager, &database_url);
     let search_pool = search_backend_from_env(Some(&settings_config));
     let search_backend: Option<Arc<dyn SearchBackend>> =
         search_pool.clone().map(|p| p as Arc<dyn SearchBackend>);

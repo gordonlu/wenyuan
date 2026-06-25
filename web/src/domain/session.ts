@@ -335,6 +335,8 @@ export interface ProviderSettings {
   search_api_url: string
   search_api_key_configured: boolean
   seat_providers: Record<string, SeatProviderConfig>
+  /** Present only in save response; true if a restart is needed for changes to take effect */
+  restart_required?: boolean
 }
 
 export interface TestProviderResponse {

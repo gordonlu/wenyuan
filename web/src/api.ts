@@ -2,6 +2,7 @@ import type { CodeSearchResponse, ConfigStatus, EvidenceItem, ParseDocumentRespo
 
 const base = ''
 let localToken: string | null = null
+let tokenPromise: Promise<void> | null = null
 
 async function loadLocalToken() {
   try {
@@ -13,8 +14,13 @@ async function loadLocalToken() {
   } catch { /* ignore */ }
 }
 
+tokenPromise = loadLocalToken()
+
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
   const isWrite = options?.method && options?.method !== 'GET'
+  if (isWrite) {
+    await tokenPromise
+  }
   const headers: Record<string, string> = { 'content-type': 'application/json' }
   if (isWrite && localToken) {
     headers['x-wenyuan-token'] = localToken

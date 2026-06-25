@@ -10,6 +10,7 @@ use crate::{ApiError, AppState};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SeatProviderConfig {
     pub base_url: String,
+    #[serde(skip_serializing)]
     pub api_key: String,
     pub api_key_configured: bool,
 }
@@ -40,6 +41,8 @@ pub struct ProviderSettings {
     pub search_api_key_configured: bool,
     #[serde(default)]
     pub seat_providers: std::collections::HashMap<String, SeatProviderConfig>,
+    #[serde(default)]
+    pub restart_required: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -130,31 +133,57 @@ impl SettingsManager {
 
     pub fn save_api_key(&self, key: &str) -> Result<(), std::io::Error> {
         self.ensure_dir()?;
+        let mut data = self.load_secrets();
+        data["api_key"] = serde_json::json!(key);
+        self.write_secrets(&data)
+    }
+
+    pub fn delete_api_key(&self) -> Result<(), std::io::Error> {
+        let mut data = self.load_secrets();
+        data.as_object_mut().map(|obj| obj.remove("api_key"));
+        self.write_secrets(&data)
+    }
+
+    pub fn load_seat_keys(&self) -> std::collections::HashMap<String, String> {
+        let data = self.load_secrets();
+        data.get("seat_keys")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default()
+    }
+
+    pub fn save_seat_keys(&self, keys: &std::collections::HashMap<String, String>) -> Result<(), std::io::Error> {
+        let mut data = self.load_secrets();
+        data["seat_keys"] = serde_json::to_value(keys).unwrap_or_default();
+        self.write_secrets(&data)
+    }
+
+    fn load_secrets(&self) -> serde_json::Value {
+        self.ensure_dir().ok();
+        std::fs::read_to_string(&self.secrets_path)
+            .ok()
+            .and_then(|raw| serde_json::from_str(&raw).ok())
+            .unwrap_or_else(|| serde_json::json!({}))
+    }
+
+    fn write_secrets(&self, data: &serde_json::Value) -> Result<(), std::io::Error> {
+        self.ensure_dir()?;
+        let raw = serde_json::to_string_pretty(data)?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
+            use std::io::Write;
             let file = std::fs::OpenOptions::new()
                 .create(true)
                 .write(true)
                 .truncate(true)
                 .mode(0o600)
                 .open(&self.secrets_path)?;
-            let raw = serde_json::json!({ "api_key": key }).to_string();
-            use std::io::Write;
             let mut file = file;
             file.write_all(raw.as_bytes())?;
-            return Ok(());
         }
         #[cfg(not(unix))]
         {
-            let raw = serde_json::json!({ "api_key": key }).to_string();
-            std::fs::write(&self.secrets_path, raw)
-        }
-    }
-
-    pub fn delete_api_key(&self) -> Result<(), std::io::Error> {
-        if self.secrets_path.exists() {
-            std::fs::remove_file(&self.secrets_path)?;
+            std::fs::write(&self.secrets_path, raw)?;
         }
         Ok(())
     }
@@ -204,6 +233,7 @@ impl SettingsManager {
             search_api_url: config.search_api_url,
             search_api_key_configured: !env_search.is_empty(),
             seat_providers,
+            restart_required: false,
         }
     }
 }
@@ -229,6 +259,7 @@ async fn update_provider_settings(
     }
 
     let mut seat_providers = state.settings.load_config().seat_providers;
+    let mut seat_keys = state.settings.load_seat_keys();
     for (seat, sp) in &req.seat_providers {
         let entry = seat_providers.entry(seat.clone()).or_insert(SeatProviderConfig {
             base_url: String::new(),
@@ -237,10 +268,12 @@ async fn update_provider_settings(
         });
         entry.base_url = sp.base_url.clone();
         if !sp.api_key.is_empty() {
-            entry.api_key = sp.api_key.clone();
+            seat_keys.insert(seat.clone(), sp.api_key.clone());
             entry.api_key_configured = true;
         }
     }
+    state.settings.save_seat_keys(&seat_keys).map_err(|e| ApiError::internal(e.to_string()))?;
+
     let config = ProviderConfig {
         provider: req.provider,
         base_url: req.base_url,
@@ -251,7 +284,9 @@ async fn update_provider_settings(
     };
     state.settings.save_config(&config).map_err(|e| ApiError::internal(e.to_string()))?;
 
-    Ok(Json(state.settings.get_settings()))
+    let mut settings = state.settings.get_settings();
+    settings.restart_required = true;
+    Ok(Json(settings))
 }
 
 async fn test_provider(

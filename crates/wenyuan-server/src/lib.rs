@@ -496,33 +496,141 @@ pub fn provider_from_env(database_url: &str) -> (Arc<dyn LlmProvider>, ConfigSta
                     .collect(),
             )
         };
+    build_config_status(provider, seat_models, base_url, model, database_url)
+}
+
+/// Create a provider from saved settings (settings.json + secrets.json).
+/// Falls back to env vars if no settings are configured.
+pub fn provider_from_settings_or_env(
+    settings_mgr: &settings::SettingsManager,
+    database_url: &str,
+) -> (Arc<dyn LlmProvider>, ConfigStatus) {
+    let config = settings_mgr.load_config();
+    let global_key = settings_mgr.load_api_key();
+    let seat_keys = settings_mgr.load_seat_keys();
+
+    let has_global = !config.base_url.is_empty()
+        && !config.model.is_empty()
+        && global_key.is_some();
+    let has_seat = config.seat_providers.iter().any(|(seat, sp)| {
+        !sp.base_url.is_empty() && seat_keys.get(seat).map_or(false, |k| !k.is_empty())
+    });
+
+    if !has_global && !has_seat {
+        return provider_from_env(database_url);
+    }
+
+    let model = if config.model.is_empty() {
+        "mock-model".into()
+    } else {
+        config.model.clone()
+    };
+    let default_base_url = config.base_url.clone();
+    let default_api_key = global_key.map(|k| k.expose().to_string()).unwrap_or_default();
+
+    // Collect seat overrides: for each seat, use saved per-seat values or default
+    let mut seat_base_urls: HashMap<String, String> = HashMap::new();
+    let mut seat_api_keys: HashMap<String, String> = HashMap::new();
+    let mut seat_models_map: HashMap<String, String> = HashMap::new();
+    for seat in SeatKind::ALL {
+        let suffix = seat_env_key(seat);
+        let sp = config.seat_providers.get(suffix);
+        let seat_url = sp.and_then(|s| {
+            if s.base_url.is_empty() { None } else { Some(s.base_url.clone()) }
+        });
+        let seat_key = seat_keys.get(suffix).filter(|k| !k.is_empty()).cloned();
+        seat_base_urls.insert(suffix.to_string(), seat_url.clone().unwrap_or_else(|| default_base_url.clone()));
+        seat_api_keys.insert(suffix.to_string(), seat_key.unwrap_or_else(|| default_api_key.clone()));
+        seat_models_map.insert(suffix.to_string(), model.clone());
+    }
+
+    let (provider, _) = routed_provider_from_config(
+        &default_base_url,
+        &default_api_key,
+        &model,
+        &seat_base_urls,
+        &seat_api_keys,
+    );
+
+    build_config_status(provider, seat_models_map, config.base_url, model, database_url)
+}
+
+/// Core provider factory that reads from explicit config, not env vars.
+fn routed_provider_from_config(
+    default_base_url: &str,
+    default_api_key: &str,
+    default_model: &str,
+    seat_base_urls: &HashMap<String, String>,
+    seat_api_keys: &HashMap<String, String>,
+) -> (Arc<dyn LlmProvider>, HashMap<String, String>) {
+    let has_default = !default_base_url.is_empty() && !default_api_key.is_empty();
+    let default_provider: Arc<dyn LlmProvider> = if has_default {
+        Arc::new(OpenAiCompatibleProvider::new(OpenAiCompatibleConfig {
+            base_url: default_base_url.to_string(),
+            api_key: default_api_key.to_string(),
+            model: default_model.to_string(),
+            reasoning_effort: None,
+            max_tokens: None,
+        }))
+    } else {
+        Arc::new(MockProvider::new(mock_scenario_from_env()))
+    };
+    let mut routed = SeatRoutedProvider::new(default_provider);
+
+    for seat in SeatKind::ALL {
+        let suffix = seat_env_key(seat);
+        let base_url = seat_base_urls.get(suffix).cloned().unwrap_or_default();
+        let api_key = seat_api_keys.get(suffix).cloned().unwrap_or_default();
+        let model = default_model.to_string();
+
+        if !base_url.is_empty()
+            && !api_key.is_empty()
+            && (!has_default
+                || base_url != default_base_url
+                || api_key != default_api_key
+                || model != *default_model)
+        {
+            routed = routed.with_seat_provider(
+                seat,
+                Arc::new(OpenAiCompatibleProvider::new(OpenAiCompatibleConfig {
+                    base_url,
+                    api_key,
+                    model,
+                    reasoning_effort: None,
+                    max_tokens: None,
+                })),
+            );
+        }
+    }
+
+    (Arc::new(routed), HashMap::new())
+}
+
+fn build_config_status(
+    provider: Arc<dyn LlmProvider>,
+    seat_models: HashMap<String, String>,
+    base_url: String,
+    model: String,
+    database_url: &str,
+) -> (Arc<dyn LlmProvider>, ConfigStatus) {
     let available_models = parse_available_models();
     let seat_available_models = HashMap::from([
         ("MOUYUAN".to_string(), parse_available_models_for("MOUYUAN")),
         ("JINGSHI".to_string(), parse_available_models_for("JINGSHI")),
-        (
-            "CHIZHENG".to_string(),
-            parse_available_models_for("CHIZHENG"),
-        ),
+        ("CHIZHENG".to_string(), parse_available_models_for("CHIZHENG")),
     ]);
-    (
-        provider,
-        ConfigStatus {
-            provider_configured: provider_kind == "mock"
-                || global_provider_configured
-                || seat_provider_configured,
-            provider_kind,
-            model,
-            seat_models,
-            base_url,
-            database_url: database_url.to_string(),
-            version: env!("CARGO_PKG_VERSION").to_string(),
-            search_provider: env::var("WENYUAN_SEARCH_PROVIDER")
-                .unwrap_or_default(),
-            available_models,
-            seat_available_models,
-        },
-    )
+    (provider, ConfigStatus {
+        provider_configured: true,
+        provider_kind: "openai-compatible".to_string(),
+        model,
+        seat_models,
+        base_url,
+        database_url: database_url.to_string(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        search_provider: env::var("WENYUAN_SEARCH_PROVIDER").unwrap_or_default(),
+        available_models,
+        seat_available_models,
+    })
 }
 
 pub fn seat_provider_configured(seat: SeatKind) -> bool {

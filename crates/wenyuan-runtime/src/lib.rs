@@ -9,7 +9,7 @@ use rust_embed::RustEmbed;
 use wenyuan_agent::AgentRunner;
 use wenyuan_core::SearchBackend;
 use wenyuan_server::{
-    AppState, app, provider_from_env, provider_timeout_from_env,
+    AppState, app, provider_from_settings_or_env, provider_timeout_from_env,
     search_backend_from_env, settings::SettingsManager,
 };
 
@@ -87,10 +87,10 @@ pub async fn start_local_server(config: ServerConfig) -> anyhow::Result<LocalSer
         info!("marked {recovered} stale session execution(s) as retry_required");
     }
 
-    let (provider, config_status) = provider_from_env(&db_url);
-    let local_token = Uuid::new_v4().to_string();
     let settings_manager = SettingsManager::new(config.data_dir.clone());
     let settings_config = settings_manager.load_config();
+    let (provider, config_status) = provider_from_settings_or_env(&settings_manager, &db_url);
+    let local_token = Uuid::new_v4().to_string();
     let search_pool = search_backend_from_env(Some(&settings_config));
     let search_backend: Option<Arc<dyn SearchBackend>> =
         search_pool.map(|p| p as Arc<dyn SearchBackend>);
