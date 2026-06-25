@@ -22,14 +22,14 @@ use wenyuan_core::{
 use wenyuan_provider::{LlmProvider, LlmRequest, LlmResponse, ProviderError};
 use wenyuan_tools::{make_tool_run, search_results_to_evidence, untrusted_evidence_notice};
 
-mod json;
+pub(crate) mod json;
 #[cfg(test)]
 pub(crate) use json::clean_json_string;
 mod output;
 mod search;
 mod evidence;
 mod followup;
-pub use followup::{generate_decision_objects, generate_followup_suggestions};
+pub use followup::{generate_decision_objects, generate_followup_suggestions, run_mini_deliberation, run_re_deliberation, run_single_seat_followup};
 use json::{parse_model_json, truncate_for_repair};
 use output::{CritiqueOutput, IndependentOutput, PhaseRun, ProposalOutput, SeatCallResult, VoteOutput};
 use search::{format_search_results, try_extract_search_tool, SEARCH_TOOL_INSTRUCTION};

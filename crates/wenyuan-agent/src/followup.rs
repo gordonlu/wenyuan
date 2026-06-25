@@ -1,11 +1,16 @@
 use chrono::Utc;
 use std::collections::HashSet;
+use std::sync::Arc;
+use std::time::Duration;
 use uuid::Uuid;
 use wenyuan_core::{
     DecisionObject, DecisionObjectKind, DecisionObjectPriority, DecisionObjectStatus,
-    FollowUpKind, FollowUpMode, FollowUpSuggestion, SeatKind, Session, SessionPhase,
+    FollowUpKind, FollowUpImpact, FollowUpMode, FollowUpSuggestion, SeatKind, Session,
+    SessionPhase,
 };
+use wenyuan_provider::{LlmProvider, LlmRequest, LlmResponse, ProviderError};
 
+use crate::json::parse_model_json;
 use crate::DiscussionArtifacts;
 
 /// Generate decision objects from a completed session's artifacts.
@@ -325,6 +330,246 @@ pub fn generate_decision_objects(
     // Limit to 8 objects
     objects.truncate(8);
     objects
+}
+
+/// Run a single-seat follow-up expansion.
+/// Calls the LLM for the given seat, parses the structured JSON output.
+pub async fn run_single_seat_followup(
+    provider: Arc<dyn LlmProvider>,
+    session_id: Uuid,
+    topic: &str,
+    decision_summary: &str,
+    object: &DecisionObject,
+    seat: SeatKind,
+    user_input: Option<&str>,
+) -> Result<(serde_json::Value, FollowUpImpact), String> {
+    let system_prompt = "你正在对一个已完成的文渊阁合议进行续议。请只围绕指定的决策对象展开，不要重跑完整合议，不要重复原报告。";
+
+    let seat_label = seat.label();
+    let object_kind_label = object.kind.label();
+    let user_input_text = user_input.map(|u| format!("\n\n用户补充信息：\n{}", u)).unwrap_or_default();
+
+    let user_prompt = format!(
+        r#"原议题：
+{}
+
+原多数结论：
+{}
+
+当前续议对象：
+类型：{object_kind_label}
+来源席位：{seat_label}
+内容：{}
+
+请输出 JSON：
+{{
+  "summary": "本次续议的简短结论",
+  "why_it_matters": "为什么这个对象重要",
+  "analysis": "展开分析",
+  "recommended_next_step": "下一步建议",
+  "impact_on_original_decision": "no_change | clarifies | adds_condition | adds_action | raises_new_risk | suggests_redeliberation | changes_decision",
+  "needs_user_input": false,
+  "user_input_questions": []
+}}{user_input_text}"#,
+        topic,
+        decision_summary,
+        object.summary,
+    );
+
+    let response = call_followup_llm(provider, session_id, seat, &system_prompt, &user_prompt)
+        .await
+        .map_err(|e| format!("续议调用失败：{e}"))?;
+
+    let parsed: serde_json::Value = parse_model_json(&response.content)
+        .map_err(|e| format!("续议输出解析失败：{e}"))?;
+
+    let impact_str = parsed
+        .get("impact_on_original_decision")
+        .and_then(|v| v.as_str())
+        .unwrap_or("no_change");
+    let impact = serde_json::from_str::<FollowUpImpact>(&format!("\"{impact_str}\""))
+        .unwrap_or(FollowUpImpact::NoChange);
+
+    Ok((parsed, impact))
+}
+
+async fn call_followup_llm(
+    provider: Arc<dyn LlmProvider>,
+    session_id: Uuid,
+    seat: SeatKind,
+    system_prompt: &str,
+    user_prompt: &str,
+) -> Result<LlmResponse, ProviderError> {
+    let request = LlmRequest {
+        session_id,
+        seat,
+        phase: SessionPhase::Completed,
+        messages: vec![
+            wenyuan_core::ChatMessage {
+                role: "system".into(),
+                content: system_prompt.to_string(),
+            },
+            wenyuan_core::ChatMessage {
+                role: "user".into(),
+                content: user_prompt.to_string(),
+            },
+        ],
+        repair_json: false,
+        max_tokens: 2000,
+        prompt_version: "followup-single-seat-v1".into(),
+        reasoning_effort: None,
+        override_model: None,
+    };
+
+    let mut last_err = Err(ProviderError::Request("no attempt".into()));
+    let mut delay_ms = 500u64;
+    for _ in 0..3 {
+        let result = tokio::time::timeout(Duration::from_secs(60), provider.complete(request.clone())).await;
+        match result {
+            Ok(Ok(response)) => return Ok(response),
+            Ok(Err(e)) => {
+                last_err = Err(e);
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                delay_ms = (delay_ms * 2).min(8_000);
+            }
+            Err(_) => {
+                last_err = Err(ProviderError::Timeout);
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                delay_ms = (delay_ms * 2).min(8_000);
+            }
+        }
+    }
+    last_err
+}
+
+/// Run a mini-deliberation follow-up.
+/// Calls the LLM once (all three seats respond in the same prompt), parses positions.
+pub async fn run_mini_deliberation(
+    provider: Arc<dyn LlmProvider>,
+    session_id: Uuid,
+    topic: &str,
+    decision_summary: &str,
+    object: &DecisionObject,
+    user_input: Option<&str>,
+) -> Result<(serde_json::Value, FollowUpImpact), String> {
+    let system_prompt = "你们正在围绕原合议中的一个局部对象进行小合议。每席只给一个短判断和一个关键理由。不要重跑完整独议、批议、复议、投票流程。";
+
+    let user_input_text = user_input.map(|u| format!("\n\n用户补充信息：\n{}", u)).unwrap_or_default();
+
+    let user_prompt = format!(
+        r#"原议题：
+{}
+
+原多数结论：
+{}
+
+当前讨论对象：
+类型：{}
+内容：{}
+
+请输出 JSON：
+{{
+  "question": "本次小合议要解决的问题",
+  "positions": [
+    {{"seat": "mouyuan", "view": "谋远席观点", "reason": "关键理由"}},
+    {{"seat": "jingshi", "view": "经世席观点", "reason": "关键理由"}},
+    {{"seat": "chizheng", "view": "持正席观点", "reason": "关键理由"}}
+  ],
+  "synthesis": "综合判断",
+  "recommended_next_step": "建议下一步",
+  "impact_on_original_decision": "no_change | clarifies | adds_condition | adds_action | raises_new_risk | suggests_redeliberation | changes_decision"
+}}{user_input_text}"#,
+        topic,
+        decision_summary,
+        object.kind.label(),
+        object.summary,
+    );
+
+    let response = call_followup_llm(provider, session_id, SeatKind::Chizheng, system_prompt, &user_prompt)
+        .await
+        .map_err(|e| format!("小合议调用失败：{e}"))?;
+
+    let parsed: serde_json::Value = parse_model_json(&response.content)
+        .map_err(|e| format!("小合议输出解析失败：{e}"))?;
+
+    let impact_str = parsed
+        .get("impact_on_original_decision")
+        .and_then(|v| v.as_str())
+        .unwrap_or("no_change");
+    let impact = serde_json::from_str::<FollowUpImpact>(&format!("\"{impact_str}\""))
+        .unwrap_or(FollowUpImpact::NoChange);
+
+    Ok((parsed, impact))
+}
+
+/// Run a new-fact re-deliberation.
+/// Three seats each produce a short revision; backend builds updated decision.
+pub async fn run_re_deliberation(
+    provider: Arc<dyn LlmProvider>,
+    session_id: Uuid,
+    topic: &str,
+    decision_summary: &str,
+    new_fact: &str,
+    affected_objects: &[DecisionObject],
+) -> Result<(serde_json::Value, FollowUpImpact), String> {
+    let system_prompt = "用户补充了一个可能影响原结论的新事实。请判断这个新事实是否改变原结论。三席分别给出修正意见，并形成更新结论。";
+
+    let affected_text = if affected_objects.is_empty() {
+        "无".into()
+    } else {
+        affected_objects
+            .iter()
+            .map(|o| format!("- {}（{}）", o.title, o.kind.label()))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    let user_prompt = format!(
+        r#"原议题：
+{}
+
+原多数结论：
+{}
+
+新事实：
+{new_fact}
+
+受影响的决策对象：
+{affected_text}
+
+请输出 JSON：
+{{
+  "new_fact": "{new_fact}",
+  "fact_importance": "low | medium | high",
+  "affected_objects": [],
+  "seat_revisions": [
+    {{"seat": "mouyuan", "revision": "修正意见"}},
+    {{"seat": "jingshi", "revision": "修正意见"}},
+    {{"seat": "chizheng", "revision": "修正意见"}}
+  ],
+  "decision_changed": true,
+  "updated_decision": "更新后的结论",
+  "why_changed": "为什么改变或不改变",
+  "next_step": "下一步建议"
+}}"#,
+        topic,
+        decision_summary,
+    );
+
+    let response = call_followup_llm(provider, session_id, SeatKind::Chizheng, system_prompt, &user_prompt)
+        .await
+        .map_err(|e| format!("新事实复议调用失败：{e}"))?;
+
+    let parsed: serde_json::Value = parse_model_json(&response.content)
+        .map_err(|e| format!("新事实复议输出解析失败：{e}"))?;
+
+    let impact = if parsed.get("decision_changed").and_then(|v| v.as_bool()).unwrap_or(false) {
+        FollowUpImpact::ChangesDecision
+    } else {
+        FollowUpImpact::NoChange
+    };
+
+    Ok((parsed, impact))
 }
 
 /// Generate follow-up suggestions from decision objects.

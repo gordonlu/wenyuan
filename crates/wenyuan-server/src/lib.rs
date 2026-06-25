@@ -26,11 +26,11 @@ use tower_http::{
 };
 use tracing::{error, info};
 use uuid::Uuid;
-use wenyuan_agent::{AgentError, AgentRunner, CancellationFlag, ProgressSink, generate_decision_objects, generate_followup_suggestions};
+use wenyuan_agent::{AgentError, AgentRunner, CancellationFlag, ProgressSink, generate_decision_objects, generate_followup_suggestions, run_mini_deliberation, run_re_deliberation, run_single_seat_followup};
 use wenyuan_core::{
     DecisionObject, DecisionObjectStatus, DeliberationMode, Evidence, FollowUpEventKind,
-    FollowUpMode, FollowUpSuggestion, FollowUpTurn, SearchBackend, SeatKind, SeatModelConfig,
-    Session, SessionPhase, VotePolicy, VoteStrategy,
+    FollowUpImpact, FollowUpKind, FollowUpMode, FollowUpSuggestion, FollowUpTurn, SearchBackend,
+    SeatKind, SeatModelConfig, Session, SessionPhase, VotePolicy, VoteStrategy,
 };
 use wenyuan_provider::{
     CustomSearchBackend, DoubaoBackend, GoogleCustomSearchBackend,
@@ -1450,19 +1450,80 @@ pub async fn start_followup(
     let suggestion = state.store.followup_suggestion(suggestion_id).await?;
     let session_id = suggestion.session_id;
 
-    let turn_id = Uuid::new_v4();
-    // Stub: actual execution will be implemented in Task 6/7
-    let result = serde_json::json!({
-        "summary": "续议功能实现中",
-        "note": "this is a stub response — single seat / mini deliberation not yet implemented"
-    });
-    let impact = wenyuan_core::FollowUpImpact::NoChange;
-
     state.store.append_followup_event(
         session_id,
         FollowUpEventKind::FollowUpStarted,
         Some(serde_json::json!({"suggestion_id": suggestion_id, "mode": body.mode})),
     ).await?;
+
+    let turn_id = Uuid::new_v4();
+
+    let (result, impact) = match body.mode {
+        FollowUpMode::SingleSeat => {
+            let details = state.store.get_session(session_id).await?;
+            let objects = state.store.decision_objects(session_id).await?;
+            let object = objects.iter().find(|o| o.id == suggestion.object_id)
+                .ok_or_else(|| ApiError::bad_request("decision object not found"))?;
+            let seat = seat_for_followup(&suggestion, object);
+            let decision_summary = details.session.result.as_ref()
+                .map(|d| serde_json::to_string(&d.majority_reasons).unwrap_or_default())
+                .unwrap_or_default();
+
+            let provider = state.runner.provider().clone();
+            match run_single_seat_followup(
+                provider,
+                session_id,
+                &details.session.topic,
+                &decision_summary,
+                object,
+                seat,
+                body.user_input.as_deref(),
+            ).await {
+                Ok((result_json, impact)) => (result_json, impact),
+                Err(err) => {
+                    let _ = state.store.append_followup_event(
+                        session_id,
+                        FollowUpEventKind::FollowUpFailed,
+                        Some(serde_json::json!({"suggestion_id": suggestion_id, "error": err})),
+                    ).await;
+                    return Err(ApiError::internal(err));
+                }
+            }
+        }
+        FollowUpMode::MiniDeliberation => {
+            let details = state.store.get_session(session_id).await?;
+            let objects = state.store.decision_objects(session_id).await?;
+            let object = objects.iter().find(|o| o.id == suggestion.object_id)
+                .ok_or_else(|| ApiError::bad_request("decision object not found"))?;
+            let decision_summary = details.session.result.as_ref()
+                .map(|d| serde_json::to_string(&d.majority_reasons).unwrap_or_default())
+                .unwrap_or_default();
+
+            let provider = state.runner.provider().clone();
+            match run_mini_deliberation(
+                provider,
+                session_id,
+                &details.session.topic,
+                &decision_summary,
+                object,
+                body.user_input.as_deref(),
+            ).await {
+                Ok((result_json, impact)) => (result_json, impact),
+                Err(err) => {
+                    let _ = state.store.append_followup_event(
+                        session_id,
+                        FollowUpEventKind::FollowUpFailed,
+                        Some(serde_json::json!({"suggestion_id": suggestion_id, "error": err})),
+                    ).await;
+                    return Err(ApiError::internal(err));
+                }
+            }
+        }
+        FollowUpMode::ReDeliberation => {
+            // Stub — will be implemented in Task 7
+            (serde_json::json!({"summary": "新事实复议功能实现中"}), FollowUpImpact::NoChange)
+        }
+    };
 
     let turn = FollowUpTurn {
         id: turn_id,
@@ -1486,8 +1547,20 @@ pub async fn start_followup(
     Ok(Json(StartFollowupResponse {
         turn_id,
         result,
-        impact: "no_change".into(),
+        impact: serde_json::to_string(&impact).unwrap_or_default(),
     }))
+}
+
+fn seat_for_followup(suggestion: &FollowUpSuggestion, object: &DecisionObject) -> SeatKind {
+    match suggestion.kind {
+        FollowUpKind::MitigateRisk => SeatKind::Chizheng,
+        FollowUpKind::VerifyAssumption => object.seat.unwrap_or(SeatKind::Chizheng),
+        FollowUpKind::BuildActionPlan => SeatKind::Jingshi,
+        FollowUpKind::ExpandOpportunity => SeatKind::Mouyuan,
+        FollowUpKind::ResolveOpenQuestion => object.seat.unwrap_or(SeatKind::Jingshi),
+        FollowUpKind::DiscussMinorityConcern => SeatKind::Chizheng,
+        FollowUpKind::ReDeliberateWithNewFact => SeatKind::Chizheng,
+    }
 }
 
 #[derive(Deserialize)]
@@ -1502,29 +1575,64 @@ pub struct ReDeliberateResponse {
     pub result: serde_json::Value,
 }
 
-/// New fact re-deliberation (stub for now).
+/// New fact re-deliberation.
 pub async fn re_deliberate(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
     Json(body): Json<ReDeliberateRequest>,
 ) -> Result<Json<ReDeliberateResponse>, ApiError> {
-    let turn_id = Uuid::new_v4();
-    let result = serde_json::json!({
-        "summary": "新事实复议功能实现中",
-        "note": "this is a stub response — redeliberation not yet implemented"
-    });
+    let details = state.store.get_session(id).await?;
+    let decision_summary = details.session.result.as_ref()
+        .map(|d| serde_json::to_string(&d.majority_reasons).unwrap_or_default())
+        .unwrap_or_default();
 
+    let all_objects = state.store.decision_objects(id).await?;
+    let affected: Vec<_> = all_objects.into_iter()
+        .filter(|o| body.affected_object_ids.contains(&o.id))
+        .collect();
+
+    let provider = state.runner.provider().clone();
+    let (result, impact) = match run_re_deliberation(
+        provider,
+        id,
+        &details.session.topic,
+        &decision_summary,
+        &body.new_fact,
+        &affected,
+    ).await {
+        Ok(r) => r,
+        Err(err) => {
+            state.store.append_followup_event(
+                id,
+                FollowUpEventKind::FollowUpFailed,
+                Some(serde_json::json!({"error": err})),
+            ).await?;
+            return Err(ApiError::internal(err));
+        }
+    };
+
+    let turn_id = Uuid::new_v4();
     let turn = FollowUpTurn {
         id: turn_id,
         session_id: id,
         suggestion_id: None,
         mode: FollowUpMode::ReDeliberation,
-        user_input: Some(body.new_fact),
+        user_input: Some(body.new_fact.clone()),
         result_json: result.clone(),
-        impact: wenyuan_core::FollowUpImpact::NoChange,
+        impact,
         created_at: Utc::now(),
     };
     state.store.insert_followup_turn(&turn).await?;
+
+    // If decision changed, mark affected objects as superseded
+    if impact == FollowUpImpact::ChangesDecision {
+        for object_id in &body.affected_object_ids {
+            let _ = state.store
+                .update_decision_object_status(*object_id, wenyuan_core::DecisionObjectStatus::Superseded)
+                .await;
+        }
+    }
+
     state.store.append_followup_event(
         id,
         FollowUpEventKind::FollowUpCompleted,
