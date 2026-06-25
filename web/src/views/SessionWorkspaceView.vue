@@ -104,6 +104,10 @@
       <a v-if="supportedClaims.length > 0" href="#claims" title="主张"><span class="nav-dot" /><span>主张</span></a>
       <a href="#stats" title="运行统计"><span class="nav-dot" /><span>统计</span></a>
       <a href="#timeline" title="时间线"><span class="nav-dot" /><span>时间</span></a>
+      <a v-if="hasDecisionObjects" href="#decision-objects" title="决策对象"><span class="nav-dot" /><span>决策</span></a>
+      <a v-if="hasFollowups" href="#followups" title="续议建议"><span class="nav-dot" /><span>续议</span></a>
+      <a v-if="hasFollowupTurns" href="#followup-timeline" title="续议时间线"><span class="nav-dot" /><span>续议时间</span></a>
+      <a v-if="hasDecisionObjects" href="#re-deliberation" title="新事实复议"><span class="nav-dot" /><span>复议</span></a>
     </nav>
     <div class="workspace-main">
     <PhaseProgressBar :phase="details.session.phase" />
@@ -152,7 +156,14 @@
 
     <div v-if="viewMode === 'workbench' && currentDigest" class="digest-row">
       <DecisionDigest :digest="currentDigest" />
-      <EvidenceSummary v-if="currentEvidenceSummary" :summary="currentEvidenceSummary" />
+      <EvidenceSummary
+        v-if="currentEvidenceSummary"
+        element-id="quality"
+        :summary="currentEvidenceSummary"
+        :donut-segments="donutData"
+        :radar-axes="radarData"
+        :quality-metrics="qualityMetricRows(details.artifacts.quality, hasTokenUsage)"
+      />
     </div>
 
     <DecisionSummary v-if="primaryDecision" :decision="primaryDecision" :vote-policy="details.session.vote_policy" :mode="details.session.mode" />
@@ -164,7 +175,7 @@
           <Pen :size="16" />
         </button>
       </div>
-      <p>{{ reportText(details.session.topic) }}</p>
+      <div class="formatted-text" v-html="renderReportText(details.session.topic)" />
       <template v-if="editingContext">
         <textarea v-model="newContext" rows="4" placeholder="补充背景信息…" style="margin-top: 12px" />
         <div class="actions" style="margin-top: 8px">
@@ -172,7 +183,7 @@
           <button @click="editingContext = false">取消</button>
         </div>
       </template>
-      <p v-else-if="reportText(details.session.context)" class="muted" style="margin-top: 8px">{{ reportText(details.session.context) }}</p>
+      <div v-else-if="renderReportText(details.session.context)" class="formatted-text muted" style="margin-top: 8px" v-html="renderReportText(details.session.context)" />
     </section>
 
     <section id="evidence" v-if="externalEvidence.length" class="panel evidence-source-panel">
@@ -188,7 +199,7 @@
               {{ evidenceTrustLabels[ev.trust_level ?? 'internal'] ?? ev.trust_level }}
             </span>
           </div>
-          <p>{{ reportText(ev.content) }}</p>
+          <div class="formatted-text" v-html="renderReportText(ev.content)" />
           <p class="muted evidence-source-url">{{ compactSource(ev.source) }}</p>
           <div v-if="evidenceSafetyLabels(ev.safety_flags).length" class="evidence-safety-row">
             <span
@@ -286,21 +297,11 @@
 
     <VoteChanges id="vote-changes" :votes="details.artifacts.votes" :proposals="details.artifacts.proposals" />
 
-    <section id="quality" class="panel">
-      <h2>讨论质量</h2>
-      <div class="stat-grid">
-        <article v-for="metric in qualityMetricRows(details.artifacts.quality, hasTokenUsage)" :key="metric.label" class="stat">
-          <span>{{ metric.label }}</span>
-          <strong>{{ metric.value }}</strong>
-        </article>
-      </div>
-    </section>
-
     <section id="deep-report" v-if="details.artifacts.scribe_report" class="panel">
       <h2>深度研究报告</h2>
       <div class="scribe-report">
         <h3>共识总结</h3>
-        <p>{{ details.artifacts.scribe_report.consensus_summary }}</p>
+        <div class="formatted-text" v-html="renderReportText(details.artifacts.scribe_report.consensus_summary)" />
         <div v-if="details.artifacts.scribe_report.structural_gaps.length">
           <h3>结构缺失</h3>
           <ul>
@@ -315,7 +316,7 @@
         </div>
         <details>
           <summary>研究全文</summary>
-          <div class="scribe-final-report">{{ details.artifacts.scribe_report.final_report }}</div>
+          <div class="scribe-final-report formatted-text" v-html="renderReportText(details.artifacts.scribe_report.final_report)" />
         </details>
       </div>
     </section>
@@ -328,7 +329,7 @@
             <span :class="['seat-tag', claim.proposed_by]">{{ seatLabels[claim.proposed_by] }}</span>
             <span class="badge ok">有证据</span>
           </div>
-          <p>{{ reportText(claim.content) }}</p>
+          <div class="formatted-text" v-html="renderReportText(claim.content)" />
           <p class="muted">来源：{{ reportText(claim.context) }}</p>
           <p v-if="detailEvidence(claim.evidence_ids)" class="muted">
             证据：{{ detailEvidence(claim.evidence_ids)?.map((ev) => evidenceKindLabels[ev.kind] + ': ' + reportText(ev.content)).join(' | ') }}
@@ -344,7 +345,7 @@
             <span :class="['seat-tag', claim.proposed_by]">{{ seatLabels[claim.proposed_by] }}</span>
             <span class="badge warn">未验证</span>
           </div>
-          <p>{{ reportText(claim.content) }}</p>
+          <div class="formatted-text" v-html="renderReportText(claim.content)" />
           <p class="muted">来源：{{ reportText(claim.context) }}</p>
           <p v-if="detailEvidence(claim.evidence_ids)" class="muted">
             证据：{{ detailEvidence(claim.evidence_ids)?.map((ev) => evidenceKindLabels[ev.kind] + ': ' + reportText(ev.content)).join(' | ') }}
@@ -398,6 +399,40 @@
         </div>
       </div>
     </section>
+
+    <DecisionObjectsPanel
+      id="decision-objects"
+      v-if="hasDecisionObjects"
+      :objects="decisionObjects"
+      @resolve="handleResolveObject"
+      @dismiss="handleDismissObject"
+    />
+
+    <FollowUpCards
+      id="followups"
+      v-if="hasFollowups"
+      :suggestions="followupSuggestions"
+      :loading="followupsLoading"
+      @regenerate="handleRegenerateFollowups"
+      @start="handleStartFollowup"
+    />
+
+    <FollowUpTimeline
+      id="followup-timeline"
+      v-if="hasFollowupTurns"
+      :turns="followupTurns"
+    />
+
+    <ReDeliberationBox
+      id="re-deliberation"
+      v-if="hasDecisionObjects"
+      :objects="decisionObjects"
+      :running="reDelibRunning"
+      :result="reDelibResult"
+      :error-message="reDelibError"
+      @submit="handleReDeliberate"
+      @clear="reDelibError = ''"
+    />
     </div>
     </template>
 
@@ -442,15 +477,21 @@ import DecisionSummary from '../components/DecisionSummary.vue'
 import EvidenceSummary from '../components/EvidenceSummary.vue'
 import ShareExportPanel from '../components/ShareExportPanel.vue'
 import IdeaCard from '../components/IdeaCard.vue'
+import DecisionObjectsPanel from '../components/DecisionObjectsPanel.vue'
+import FollowUpCards from '../components/FollowUpCards.vue'
+import FollowUpTimeline from '../components/FollowUpTimeline.vue'
 import PhaseProgressBar from '../components/PhaseProgressBar.vue'
 import ProposalCompare from '../components/ProposalCompare.vue'
+import ReDeliberationBox from '../components/ReDeliberationBox.vue'
+
 import ReportView from '../components/ReportView.vue'
 import SeatRoleCard from '../components/SeatRoleCard.vue'
 import VoteChanges from '../components/VoteChanges.vue'
 import VoteDisplay from '../components/VoteDisplay.vue'
 import { hasStoredViewMode, useViewMode } from '../composables/useViewMode'
 import { useConfirm } from '../composables/useConfirm'
-import { cleanReportText, decisionDigest, evidenceSafetyLabels, evidenceSourceKindLabels, evidenceSummary, evidenceTrustLabels, exportSessionMarkdown, ideaStatusLabels, evidenceKindLabels, modeLabels, phaseLabels, qualityMetricRows, revisionDiffs, seatLabels, seatRunStats, toolRunSummary, voteStrategyLabels, type SeatKind, type SessionDetails } from '../domain/session'
+import { cleanReportText, decisionDigest, evidenceSafetyLabels, evidenceSourceKindLabels, evidenceSummary, evidenceTrustLabels, exportSessionMarkdown, followUpImpactLabels, followUpKindLabels, ideaStatusLabels, evidenceKindLabels, modeLabels, phaseLabels, qualityMetricRows, renderReportText, revisionDiffs, seatLabels, seatRunStats, toolNameLabel, toolRunSummary, voteStrategyLabels, type DecisionObject, type FollowUpSuggestion, type FollowUpTurn, type SeatKind, type SessionDetails } from '../domain/session'
+import { evidenceDonutSegments, qualityRadarAxes } from '../utils/chart-data'
 
 const route = useRoute()
 const router = useRouter()
@@ -469,6 +510,19 @@ const showExportMenu = ref(false)
 const showMdMenu = ref(false)
 const showShare = ref(false)
 
+// Follow-up / 续议
+const decisionObjects = ref<DecisionObject[]>([])
+const followupSuggestions = ref<FollowUpSuggestion[]>([])
+const followupTurns = ref<FollowUpTurn[]>([])
+const followupsLoading = ref(false)
+const reDelibRunning = ref(false)
+const reDelibResult = ref<unknown>(null)
+const reDelibError = ref('')
+
+const hasDecisionObjects = computed(() => decisionObjects.value.length > 0)
+const hasFollowups = computed(() => followupSuggestions.value.length > 0)
+const hasFollowupTurns = computed(() => followupTurns.value.length > 0)
+
 const shareDigest = computed(() => {
   if (!details.value) return null
   const deets = details.value
@@ -477,6 +531,7 @@ const shareDigest = computed(() => {
     status_label: currentDigest.value?.status_label ?? '尚无结论',
     status_class: currentDigest.value?.status_class ?? 'warn',
     selected_proposal_title: currentDigest.value?.selected_proposal_title ?? '',
+    selected_proposal_summary: currentDigest.value?.selected_proposal_summary ?? '',
     majority_summary: currentDigest.value?.majority_reason_summary ?? '',
     risk_summary: currentDigest.value?.has_risk_blocker ? '存在风险阻塞，需先处理采纳条件' : '',
     evidence_total: currentEvidenceSummary.value?.total ?? 0,
@@ -511,6 +566,9 @@ const hasTokenUsage = computed(() => (details.value?.artifacts.seat_runs ?? []).
 const scribeMode = computed(() => details.value?.session.scribe_enabled ? 'full' : 'light')
 const primaryDecision = computed(() => details.value?.session.result ?? details.value?.artifacts.decision ?? null)
 const currentEvidenceSummary = computed(() => details.value ? evidenceSummary(details.value) : null)
+
+const donutData = computed(() => evidenceDonutSegments(currentEvidenceSummary.value))
+const radarData = computed(() => qualityRadarAxes(details.value?.artifacts.quality))
 const currentDigest = computed(() => {
   if (!details.value) return null
   const evSum = currentEvidenceSummary.value ?? undefined
@@ -693,15 +751,6 @@ function compactPath(value: string) {
   return cleaned.split('/').filter(Boolean).pop() || '本地来源'
 }
 
-function toolNameLabel(name: string) {
-  const labels: Record<string, string> = {
-    web_search: '网页搜索',
-    document_parse: '文档解析',
-    code_search: '代码搜索',
-  }
-  return labels[name] ?? name
-}
-
 function toolActionLabel(name?: string) {
   if (name === 'web_search') return '搜索'
   return name ? toolNameLabel(name) : '工具'
@@ -739,6 +788,8 @@ function exportJSON() {
     quality: details.value.artifacts.quality,
     claims: details.value.artifacts.claims,
     evidence: details.value.artifacts.evidence,
+    decision_objects: decisionObjects.value,
+    followup_turns: followupTurns.value,
   }
 }
 
@@ -820,6 +871,7 @@ async function load() {
     if (data) {
       details.value = data
       error.value = ''
+      loadFollowupData()
     } else {
       error.value = '未找到合议记录'
     }
@@ -910,6 +962,87 @@ function downloadMarkdown(level: 'brief' | 'standard' | 'audit') {
   URL.revokeObjectURL(url)
 }
 
+// ── Follow-up handlers ──
+
+async function loadFollowupData() {
+  if (!details.value || details.value.session.phase !== 'completed') return
+  try {
+    const [objResp, sugResp, turnResp] = await Promise.all([
+      api.getDecisionObjects(id.value),
+      api.getFollowups(id.value),
+      api.getFollowupTurns(id.value),
+    ])
+    decisionObjects.value = objResp.objects
+    followupSuggestions.value = sugResp.suggestions
+    followupTurns.value = turnResp.turns
+  } catch {
+    // non-critical; follow-up data is supplementary
+  }
+}
+
+async function handleRegenerateFollowups() {
+  followupsLoading.value = true
+  try {
+    const resp = await api.regenerateFollowups(id.value)
+    followupSuggestions.value = resp.suggestions
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : '重新生成续议建议失败'
+  } finally {
+    followupsLoading.value = false
+  }
+}
+
+async function handleStartFollowup(payload: { suggestion: FollowUpSuggestion; mode: string }) {
+  try {
+    const resp = await api.startFollowup(payload.suggestion.id, payload.mode)
+    // Reload turns to include the new one
+    const turnResp = await api.getFollowupTurns(id.value)
+    followupTurns.value = turnResp.turns
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : '启动续议失败'
+  }
+}
+
+async function handleReDeliberate(payload: { new_fact: string; affected_object_ids: string[] }) {
+  reDelibRunning.value = true
+  reDelibResult.value = null
+  reDelibError.value = ''
+  try {
+    const resp = await api.reDeliberate(id.value, payload.new_fact, payload.affected_object_ids)
+    reDelibResult.value = resp.result
+    // Reload decision objects (some may now be superseded)
+    const objResp = await api.getDecisionObjects(id.value)
+    decisionObjects.value = objResp.objects
+    // Reload turns
+    const turnResp = await api.getFollowupTurns(id.value)
+    followupTurns.value = turnResp.turns
+  } catch (err) {
+    reDelibError.value = err instanceof Error ? err.message : '复议失败'
+  } finally {
+    reDelibRunning.value = false
+  }
+}
+
+async function handleResolveObject(objectId: string) {
+  try {
+    await api.updateDecisionObjectStatus(objectId, 'resolved')
+    const objResp = await api.getDecisionObjects(id.value)
+    decisionObjects.value = objResp.objects
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : '更新状态失败'
+  }
+}
+
+async function handleDismissObject(objectId: string) {
+  try {
+    await api.updateDecisionObjectStatus(objectId, 'dismissed')
+    const objResp = await api.getDecisionObjects(id.value)
+    decisionObjects.value = objResp.objects
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : '更新状态失败'
+  }
+}
+
 function safeFilename(value: string) {
   return value.trim().replace(/[\\/:*?"<>|]+/g, '-').replace(/\s+/g, '-').slice(0, 80) || 'wenyuan-session'
 }
@@ -982,9 +1115,7 @@ onBeforeUnmount(() => {
   padding: 12px;
   background: var(--color-bg-subtle);
   border-radius: var(--radius-sm);
-  white-space: pre-wrap;
   font-size: 14px;
-  line-height: 1.7;
 }
 
 .evidence-source-panel .row-head {

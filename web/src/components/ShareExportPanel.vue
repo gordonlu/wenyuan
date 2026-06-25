@@ -26,7 +26,10 @@
             <div class="share-card-status">{{ digest.status_label }}</div>
             <div v-if="digest.selected_proposal_title" class="share-card-row">
               <span class="share-card-label">结论</span>
-              <span class="share-card-value">{{ digest.selected_proposal_title }}</span>
+              <span class="share-card-value">
+                <strong>{{ digest.selected_proposal_title }}</strong>
+                <span v-if="digest.selected_proposal_summary" style="display:block;margin-top:4px;font-size:13px;color:#8aa8b8">{{ digest.selected_proposal_summary }}</span>
+              </span>
             </div>
             <div v-if="digest.majority_summary" class="share-card-row">
               <span class="share-card-label">依据</span>
@@ -53,6 +56,13 @@
               <div class="xhs-cover-badge">{{ digest.status_label }}</div>
             </div>
             <div class="xhs-body">
+              <div v-if="digest.selected_proposal_title" class="xhs-section">
+                <div class="xhs-section-label">结论</div>
+                <div class="xhs-section-value">
+                  <strong>{{ digest.selected_proposal_title }}</strong>
+                  <span v-if="digest.selected_proposal_summary" style="display:block;margin-top:6px;font-size:14px;color:#5a4a3a">{{ digest.selected_proposal_summary }}</span>
+                </div>
+              </div>
               <div class="xhs-section">
                 <div class="xhs-section-label">三席观点</div>
                 <div class="xhs-section-value">{{ seatSummary }}</div>
@@ -94,6 +104,7 @@ interface ShareDigest {
   status_label: string
   status_class: string
   selected_proposal_title: string
+  selected_proposal_summary: string
   majority_summary: string
   risk_summary: string
   evidence_total: number
@@ -131,6 +142,7 @@ function copyText() {
     lines.push('')
     lines.push(`结论：${props.digest.status_label}`)
     if (props.digest.selected_proposal_title) lines.push(`多数策案：${props.digest.selected_proposal_title}`)
+    if (props.digest.selected_proposal_summary) lines.push(`结论：${props.digest.selected_proposal_summary}`)
     if (props.digest.majority_summary) lines.push(`主要依据：${props.digest.majority_summary}`)
     if (props.digest.risk_summary) lines.push(`风险提醒：${props.digest.risk_summary}`)
     lines.push('')
@@ -143,6 +155,7 @@ function copyText() {
     lines.push(`让三个 AI 席位对一个复杂议题分别思考、互相批议、修订方案，最终投票形成结论。`)
     lines.push('')
     if (props.digest.selected_proposal_title) lines.push(`最终判断：${props.digest.selected_proposal_title}`)
+    if (props.digest.selected_proposal_summary) lines.push(`结论详情：${props.digest.selected_proposal_summary}`)
     lines.push('')
     lines.push(`三席观点：${props.seatSummary}`)
     lines.push('')
@@ -215,8 +228,15 @@ async function downloadImage() {
     yPos += 28
     ctx.fillStyle = '#f0f4f8'
     ctx.font = '20px sans-serif'
-    const proposalLines = wrapText(ctx, props.digest.selected_proposal_title, 40, yPos, width - 80, 26)
-    yPos += proposalLines * 28
+    const titleLines = wrapText(ctx, props.digest.selected_proposal_title, 40, yPos, width - 80, 26)
+    yPos += titleLines * 28
+    if (props.digest.selected_proposal_summary) {
+      yPos += 8
+      ctx.fillStyle = '#8aa8b8'
+      ctx.font = '16px sans-serif'
+      const summaryLines = wrapText(ctx, props.digest.selected_proposal_summary, 40, yPos, width - 80, 22)
+      yPos += summaryLines * 24
+    }
   }
 
   // Risk

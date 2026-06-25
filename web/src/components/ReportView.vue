@@ -29,41 +29,50 @@
 
     <section id="report-topic" class="panel report-topic">
       <h2>议题</h2>
-      <p>{{ reportText(details.session.topic) }}</p>
-      <p v-if="reportText(details.session.context)" class="muted">{{ reportText(details.session.context) }}</p>
+      <div class="formatted-text" v-html="renderReportText(details.session.topic)" />
+      <div v-if="renderReportText(details.session.context)" class="formatted-text muted" v-html="renderReportText(details.session.context)" />
     </section>
 
     <DecisionSummary v-if="primaryDecision" :decision="primaryDecision" :vote-policy="details.session.vote_policy" :mode="details.session.mode" />
 
     <ProposalCompare id="report-proposals" :proposals="details.artifacts.proposals" />
 
-    <section id="report-evidence" v-if="scribeMode === 'full' && externalEvidence.length" class="panel evidence-source-panel">
-      <div class="row-head">
-        <h2>来源证据</h2>
-        <span class="badge flat">{{ externalEvidence.length }} 条</span>
+    <div v-if="donutData.length || radarData.length || (scribeMode === 'full' && externalEvidence.length)" class="panel">
+      <EvidenceSummary
+        v-if="currentEvidenceSummary"
+        :summary="currentEvidenceSummary"
+        :donut-segments="donutData"
+        :radar-axes="radarData"
+        :quality-metrics="qualityMetricRows(details.artifacts.quality, hasTokenUsage)"
+      />
+      <div v-if="scribeMode === 'full' && externalEvidence.length" class="evidence-list" style="margin-top: var(--space-md)">
+        <div class="row-head" style="margin-bottom: var(--space-md)">
+          <h3 style="font-size:13px;color:var(--color-text-muted);font-weight:700;text-transform:uppercase;letter-spacing:0.04em;margin:0">来源证据</h3>
+          <span class="badge flat">{{ externalEvidence.length }} 条</span>
+        </div>
+        <div class="item-grid evidence-source-grid">
+          <article v-for="ev in externalEvidence.slice(0, 12)" :key="ev.id" class="item evidence-source-item">
+            <div class="item-head">
+              <span>{{ evidenceSourceKindLabels[ev.source_kind ?? 'internal'] ?? ev.source_kind }}</span>
+              <span :class="['badge', ev.trust_level === 'untrusted_external' ? 'warn' : 'ok']">
+                {{ evidenceTrustLabels[ev.trust_level ?? 'internal'] ?? ev.trust_level }}
+              </span>
+            </div>
+            <div class="formatted-text" v-html="renderReportText(ev.content)" />
+            <p class="muted evidence-source-url">{{ compactSource(ev.source) }}</p>
+            <div v-if="evidenceSafetyLabels(ev.safety_flags).length" class="evidence-safety-row">
+              <span
+                v-for="label in evidenceSafetyLabels(ev.safety_flags)"
+                :key="label"
+                class="badge warn"
+              >
+                {{ label }}
+              </span>
+            </div>
+          </article>
+        </div>
       </div>
-      <div class="item-grid evidence-source-grid">
-        <article v-for="ev in externalEvidence.slice(0, 12)" :key="ev.id" class="item evidence-source-item">
-          <div class="item-head">
-            <span>{{ evidenceSourceKindLabels[ev.source_kind ?? 'internal'] ?? ev.source_kind }}</span>
-            <span :class="['badge', ev.trust_level === 'untrusted_external' ? 'warn' : 'ok']">
-              {{ evidenceTrustLabels[ev.trust_level ?? 'internal'] ?? ev.trust_level }}
-            </span>
-          </div>
-          <p>{{ reportText(ev.content) }}</p>
-          <p class="muted evidence-source-url">{{ compactSource(ev.source) }}</p>
-          <div v-if="evidenceSafetyLabels(ev.safety_flags).length" class="evidence-safety-row">
-            <span
-              v-for="label in evidenceSafetyLabels(ev.safety_flags)"
-              :key="label"
-              class="badge warn"
-            >
-              {{ label }}
-            </span>
-          </div>
-        </article>
-      </div>
-    </section>
+    </div>
 
     <section id="report-tools" v-if="scribeMode === 'full' && toolRuns.length" class="panel tool-run-panel">
       <div class="row-head">
@@ -76,7 +85,7 @@
             <span>{{ toolNameLabel(run.tool_name) }}</span>
             <span :class="['badge', run.status === 'completed' ? 'ok' : 'warn']">{{ run.status }}</span>
           </div>
-          <p>{{ reportText(run.input_summary) }}</p>
+          <div class="formatted-text" v-html="renderReportText(run.input_summary)" />
           <p class="muted">{{ (run.duration_ms / 1000).toFixed(1) }} 秒 · {{ run.evidence_ids?.length ?? 0 }} 条证据</p>
           <p v-if="run.error" class="muted tool-run-error">{{ run.error }}</p>
         </article>
@@ -102,16 +111,6 @@
 
     <VoteChanges v-if="scribeMode === 'full'" id="report-vote-changes" :votes="details.artifacts.votes" :proposals="details.artifacts.proposals" />
 
-    <section id="report-quality" class="panel">
-      <h2>讨论质量</h2>
-      <div class="stat-grid">
-        <article v-for="metric in qualityMetricRows(details.artifacts.quality, hasTokenUsage)" :key="metric.label" class="stat">
-          <span>{{ metric.label }}</span>
-          <strong>{{ metric.value }}</strong>
-        </article>
-      </div>
-    </section>
-
     <section id="report-claims" v-if="scribeMode === 'full' && details.artifacts.claims?.length" class="panel">
       <h2>证据与待核验判断</h2>
       <div class="item-grid">
@@ -122,7 +121,7 @@
               {{ claim.is_supported ? '已有依据' : '仍需核验' }}
             </span>
           </div>
-          <p>{{ reportText(claim.content) }}</p>
+          <div class="formatted-text" v-html="renderReportText(claim.content)" />
           <p class="muted">来源：{{ reportText(claim.context) }}</p>
           <p v-if="detailEvidence(claim.evidence_ids)" class="muted">
             证据：{{ detailEvidence(claim.evidence_ids)?.map((ev) => evidenceKindLabels[ev.kind] + ': ' + reportText(ev.content)).join(' | ') }}
@@ -140,7 +139,9 @@ import ProposalCompare from './ProposalCompare.vue'
 import SeatRoleCard from './SeatRoleCard.vue'
 import VoteChanges from './VoteChanges.vue'
 import VoteDisplay from './VoteDisplay.vue'
-import { cleanReportText, decisionDigest, evidenceSafetyLabels, evidenceSourceKindLabels, evidenceSummary, evidenceTrustLabels, evidenceKindLabels, modeLabels, phaseLabels, qualityMetricRows, seatLabels, type EvidenceItem, type SeatKind, type SessionDetails, type ToolRun } from '../domain/session'
+import { cleanReportText, decisionDigest, evidenceSafetyLabels, evidenceSourceKindLabels, evidenceSummary, evidenceTrustLabels, evidenceKindLabels, modeLabels, phaseLabels, qualityMetricRows, renderReportText, seatLabels, type EvidenceItem, type SeatKind, type SessionDetails, type ToolRun } from '../domain/session'
+import { evidenceDonutSegments, qualityRadarAxes } from '../utils/chart-data'
+import EvidenceSummary from './EvidenceSummary.vue'
 
 interface ClaimItem {
   id: string
@@ -171,6 +172,9 @@ const currentDigest = computed(() => {
 })
 const primaryDecision = computed(() => props.details?.session.result ?? props.details?.artifacts.decision ?? null)
 const hasTokenUsage = computed(() => (props.details?.artifacts.seat_runs ?? []).some((run) => typeof (run as any).total_tokens === 'number'))
+
+const donutData = computed(() => evidenceDonutSegments(currentEvidenceSummary.value))
+const radarData = computed(() => qualityRadarAxes(props.details?.artifacts.quality))
 
 function topicTypeLabel(key: string) {
   const labels: Record<string, string> = {
@@ -378,5 +382,58 @@ function seatProviderRef(seat: SeatKind) {
 
 section[id] {
   scroll-margin-top: 80px;
+}
+
+/* ── Charts ── */
+.chart-sidebar {
+  display: flex;
+  gap: var(--space-lg);
+  align-items: flex-start;
+  flex-wrap: wrap;
+}
+.chart-sidebar-item {
+  flex-shrink: 0;
+  min-width: 180px;
+}
+.chart-sidebar-item h3 {
+  margin: 0 0 var(--space-sm);
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--color-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.chart-main {
+  flex: 1;
+  min-width: 260px;
+}
+.chart-radar-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-lg);
+  flex-wrap: wrap;
+}
+.chart-stats-col {
+  display: grid;
+  gap: 2px;
+  min-width: 140px;
+}
+.chart-stat-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 4px 0;
+  font-size: 12px;
+  border-bottom: 1px solid var(--color-border-light);
+}
+.chart-stat-row:last-child {
+  border-bottom: none;
+}
+.chart-stat-label {
+  color: var(--color-text-muted);
+}
+.chart-stat-value {
+  font-weight: 700;
+  color: var(--color-text);
 }
 </style>

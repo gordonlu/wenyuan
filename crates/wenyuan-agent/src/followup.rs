@@ -5,8 +5,8 @@ use std::time::Duration;
 use uuid::Uuid;
 use wenyuan_core::{
     DecisionObject, DecisionObjectKind, DecisionObjectPriority, DecisionObjectStatus,
-    FollowUpKind, FollowUpImpact, FollowUpMode, FollowUpSuggestion, SeatKind, Session,
-    SessionPhase,
+    FollowUpKind, FollowUpImpact, FollowUpMode, FollowUpSuggestion, RiskPolicy, SeatKind,
+    Session, SessionPhase,
 };
 use wenyuan_provider::{LlmProvider, LlmRequest, LlmResponse, ProviderError};
 
@@ -62,7 +62,7 @@ pub fn generate_decision_objects(
                     id: Uuid::new_v4(),
                     session_id,
                     kind: DecisionObjectKind::Risk,
-                    seat: source_seat_for_risk(prop.proposed_by),
+                    seat: Some(SeatKind::Chizheng),
                     title: truncate_title(risk),
                     summary: risk.clone(),
                     source_phase: Some(SessionPhase::Revision),
@@ -342,8 +342,12 @@ pub async fn run_single_seat_followup(
     object: &DecisionObject,
     seat: SeatKind,
     user_input: Option<&str>,
+    risk_policy: RiskPolicy,
 ) -> Result<(serde_json::Value, FollowUpImpact), String> {
-    let system_prompt = "你正在对一个已完成的文渊阁合议进行续议。请只围绕指定的决策对象展开，不要重跑完整合议，不要重复原报告。";
+    let system_prompt = format!(
+        "你正在对一个已完成的文渊阁合议进行续议。请只围绕指定的决策对象展开，不要重跑完整合议，不要重复原报告。{}",
+        risk_policy.system_prompt_suffix(),
+    );
 
     let seat_label = seat.label();
     let object_kind_label = object.kind.label();
@@ -379,6 +383,7 @@ pub async fn run_single_seat_followup(
     let response = call_followup_llm(provider, session_id, seat, &system_prompt, &user_prompt)
         .await
         .map_err(|e| format!("续议调用失败：{e}"))?;
+
 
     let parsed: serde_json::Value = parse_model_json(&response.content)
         .map_err(|e| format!("续议输出解析失败：{e}"))?;
@@ -451,8 +456,10 @@ pub async fn run_mini_deliberation(
     decision_summary: &str,
     object: &DecisionObject,
     user_input: Option<&str>,
+    risk_policy: RiskPolicy,
 ) -> Result<(serde_json::Value, FollowUpImpact), String> {
-    let system_prompt = "你们正在围绕原合议中的一个局部对象进行小合议。每席只给一个短判断和一个关键理由。不要重跑完整独议、批议、复议、投票流程。";
+    let base = "你们正在围绕原合议中的一个局部对象进行小合议。每席只给一个短判断和一个关键理由。不要重跑完整独议、批议、复议、投票流程。";
+    let system_prompt = format!("{}{}", base, risk_policy.system_prompt_suffix());
 
     let user_input_text = user_input.map(|u| format!("\n\n用户补充信息：\n{}", u)).unwrap_or_default();
 
@@ -485,7 +492,7 @@ pub async fn run_mini_deliberation(
         object.summary,
     );
 
-    let response = call_followup_llm(provider, session_id, SeatKind::Chizheng, system_prompt, &user_prompt)
+    let response = call_followup_llm(provider, session_id, SeatKind::Chizheng, &system_prompt, &user_prompt)
         .await
         .map_err(|e| format!("小合议调用失败：{e}"))?;
 
@@ -511,8 +518,10 @@ pub async fn run_re_deliberation(
     decision_summary: &str,
     new_fact: &str,
     affected_objects: &[DecisionObject],
+    risk_policy: RiskPolicy,
 ) -> Result<(serde_json::Value, FollowUpImpact), String> {
-    let system_prompt = "用户补充了一个可能影响原结论的新事实。请判断这个新事实是否改变原结论。三席分别给出修正意见，并形成更新结论。";
+    let base = "用户补充了一个可能影响原结论的新事实。请判断这个新事实是否改变原结论。三席分别给出修正意见，并形成更新结论。";
+    let system_prompt = format!("{}{}", base, risk_policy.system_prompt_suffix());
 
     let affected_text = if affected_objects.is_empty() {
         "无".into()
@@ -556,7 +565,7 @@ pub async fn run_re_deliberation(
         decision_summary,
     );
 
-    let response = call_followup_llm(provider, session_id, SeatKind::Chizheng, system_prompt, &user_prompt)
+    let response = call_followup_llm(provider, session_id, SeatKind::Chizheng, &system_prompt, &user_prompt)
         .await
         .map_err(|e| format!("新事实复议调用失败：{e}"))?;
 
@@ -694,9 +703,9 @@ fn truncate_title(s: &str) -> String {
 
 fn contains_risk_keyword(s: &str) -> bool {
     let lower = s.to_lowercase();
-    lower.contains("风险")
-        || lower.contains("危险")
-        || lower.contains("隐患")
+    s.contains("风险")
+        || s.contains("危险")
+        || s.contains("隐患")
         || lower.contains("risk")
         || lower.contains("danger")
         || lower.contains("blocking")
@@ -704,13 +713,6 @@ fn contains_risk_keyword(s: &str) -> bool {
         || lower.contains("不确定")
         || lower.contains("不清楚")
         || lower.contains("warning")
-}
-
-fn source_seat_for_risk(proposed_by: SeatKind) -> Option<SeatKind> {
-    match proposed_by {
-        SeatKind::Chizheng => Some(SeatKind::Chizheng),
-        _ => Some(SeatKind::Chizheng), // Default to Chizheng for risk objects
-    }
 }
 
 fn priority_rank(p: DecisionObjectPriority) -> u8 {

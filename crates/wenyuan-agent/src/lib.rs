@@ -505,12 +505,51 @@ impl AgentRunner {
         })?;
 
         let raw = response.content;
-        let report: ScribeReport = serde_json::from_str(&raw).map_err(|err| AgentError::Parse {
-            seat: SeatKind::Mouyuan,
-            phase: SessionPhase::Completed,
-            message: format!("书记官输出解析失败: {err}"),
-            raw_output: raw.clone(),
-        })?;
+        let report: Result<ScribeReport, _> = parse_model_json(&raw);
+        let report = match report {
+            Ok(r) => r,
+            Err(parse_err) => {
+                let repair_request = LlmRequest {
+                    session_id: session.id,
+                    seat: SeatKind::Mouyuan,
+                    phase: SessionPhase::Completed,
+                    repair_json: true,
+                    max_tokens: prompt.max_tokens,
+                    prompt_version: prompt.version.to_string(),
+                    reasoning_effort: None,
+                    messages: vec![
+                        ChatMessage {
+                            role: "system".into(),
+                            content: prompt.content.to_string(),
+                        },
+                        ChatMessage {
+                            role: "user".into(),
+                            content: format!(
+                                "解析错误：{}\n上一轮原始输出：{}\n\n请只返回合法 JSON，schema 如下：\n{{\n  \"consensus_summary\": \"...\",\n  \"structural_gaps\": [\"...\"],\n  \"unresolved_conflicts\": [\"...\"],\n  \"final_report\": \"...\"\n}}",
+                                parse_err, raw
+                            ),
+                        },
+                    ],
+                    override_model: None,
+                };
+                let (repair_response, _) = self.call_provider(repair_request, cancel).await;
+                match repair_response {
+                    Ok(resp) => parse_model_json(&resp.content).map_err(|err| AgentError::Parse {
+                        seat: SeatKind::Mouyuan,
+                        phase: SessionPhase::Completed,
+                        message: format!("书记官输出解析失败: {err}"),
+                        raw_output: raw.clone(),
+                    })?,
+                    Err(ProviderError::Cancelled) => return Err(AgentError::Cancelled),
+                    Err(source) => {
+                        return Err(AgentError::Provider {
+                            seat: SeatKind::Mouyuan,
+                            source,
+                        })
+                    }
+                }
+            }
+        };
 
         emit_progress(
             progress,

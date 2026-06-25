@@ -52,6 +52,16 @@ pub enum TopicType {
 }
 
 impl TopicType {
+    pub fn risk_policy(self) -> RiskPolicy {
+        match self {
+            TopicType::Medical => RiskPolicy::ProfessionalRequired,
+            TopicType::Legal => RiskPolicy::ProfessionalRequired,
+            TopicType::Financial => RiskPolicy::Cautious,
+            TopicType::PersonalLife => RiskPolicy::Cautious,
+            _ => RiskPolicy::Normal,
+        }
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Self::PersonalLife => "生活决策",
@@ -1101,6 +1111,16 @@ pub enum RiskPolicy {
     Normal,
     Cautious,
     ProfessionalRequired,
+}
+
+impl RiskPolicy {
+    pub fn system_prompt_suffix(self) -> &'static str {
+        match self {
+            Self::Normal => "",
+            Self::Cautious => "\n\n请注意：该议题涉及较高风险领域，以下分析仅供参考，请结合自身实际情况审慎决策。",
+            Self::ProfessionalRequired => "\n\n警告：该议题涉及专业领域，AI的分析不能替代专业人士的判断。以下内容仅供参考，请咨询持有相应资质的专业人士。",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

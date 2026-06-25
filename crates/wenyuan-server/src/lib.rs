@@ -26,11 +26,11 @@ use tower_http::{
 };
 use tracing::{error, info};
 use uuid::Uuid;
-use wenyuan_agent::{AgentError, AgentRunner, CancellationFlag, ProgressSink, generate_decision_objects, generate_followup_suggestions, run_mini_deliberation, run_re_deliberation, run_single_seat_followup};
+use wenyuan_agent::{AgentError, AgentRunner, CancellationFlag, DiscussionArtifacts, ProgressSink, generate_decision_objects, generate_followup_suggestions, run_mini_deliberation, run_re_deliberation, run_single_seat_followup};
 use wenyuan_core::{
     DecisionObject, DecisionObjectStatus, DeliberationMode, Evidence, FollowUpEventKind,
-    FollowUpImpact, FollowUpKind, FollowUpMode, FollowUpSuggestion, FollowUpTurn, SearchBackend,
-    SeatKind, SeatModelConfig, Session, SessionPhase, VotePolicy, VoteStrategy,
+    FollowUpImpact, FollowUpKind, FollowUpMode, FollowUpSuggestion, FollowUpTurn, RiskPolicy,
+    SearchBackend, SeatKind, SeatModelConfig, Session, SessionPhase, VotePolicy, VoteStrategy,
 };
 use wenyuan_provider::{
     CustomSearchBackend, DoubaoBackend, GoogleCustomSearchBackend,
@@ -1137,24 +1137,7 @@ pub async fn start_session(
                         running_map.lock().await.remove(&id);
                         return;
                     }
-                    // Generate follow-up decision objects and suggestions
-                    if let Some(ref final_session) = artifacts.session {
-                        if final_session.phase == SessionPhase::Completed {
-                            let objects = generate_decision_objects(final_session, &artifacts);
-                            if let Err(err) = store.upsert_decision_objects(&objects).await {
-                                error!("failed to persist decision objects: {err}");
-                            }
-                            let suggestions = generate_followup_suggestions(&objects);
-                            if let Err(err) = store.replace_open_followup_suggestions(id, &suggestions).await {
-                                error!("failed to persist follow-up suggestions: {err}");
-                            }
-                            let _ = store.append_followup_event(
-                                id,
-                                FollowUpEventKind::SuggestionsGenerated,
-                                None,
-                            ).await;
-                        }
-                    }
+                    try_generate_followup_data(&store, id, &artifacts).await;
                     if let Err(err) = store.complete_execution(id, execution_token).await {
                         error!("failed to complete session execution: {err}");
                     }
@@ -1332,23 +1315,7 @@ pub async fn retry_phase(
                         running_map.lock().await.remove(&id);
                         return;
                     }
-                    if let Some(ref final_session) = result_artifacts.session {
-                        if final_session.phase == SessionPhase::Completed {
-                            let objects = generate_decision_objects(final_session, &result_artifacts);
-                            if let Err(err) = store.upsert_decision_objects(&objects).await {
-                                error!("failed to persist decision objects: {err}");
-                            }
-                            let suggestions = generate_followup_suggestions(&objects);
-                            if let Err(err) = store.replace_open_followup_suggestions(id, &suggestions).await {
-                                error!("failed to persist follow-up suggestions: {err}");
-                            }
-                            let _ = store.append_followup_event(
-                                id,
-                                FollowUpEventKind::SuggestionsGenerated,
-                                None,
-                            ).await;
-                        }
-                    }
+                    try_generate_followup_data(&store, id, &result_artifacts).await;
                     if let Err(err) = store.complete_execution(id, execution_token).await {
                         error!("failed to complete session execution: {err}");
                     }
@@ -1385,6 +1352,31 @@ pub async fn phase_trajectory(
 }
 
 // --- Follow-up / 续议 API ---
+
+/// Generate and persist follow-up decision objects + suggestions after a session completes.
+async fn try_generate_followup_data(
+    store: &Store,
+    id: Uuid,
+    artifacts: &DiscussionArtifacts,
+) {
+    if let Some(ref final_session) = artifacts.session {
+        if final_session.phase == SessionPhase::Completed {
+            let objects = generate_decision_objects(final_session, artifacts);
+            if let Err(err) = store.upsert_decision_objects(&objects).await {
+                error!("failed to persist decision objects: {err}");
+            }
+            let suggestions = generate_followup_suggestions(&objects);
+            if let Err(err) = store.replace_open_followup_suggestions(id, &suggestions).await {
+                error!("failed to persist follow-up suggestions: {err}");
+            }
+            let _ = store.append_followup_event(
+                id,
+                FollowUpEventKind::SuggestionsGenerated,
+                None,
+            ).await;
+        }
+    }
+}
 
 #[derive(Serialize)]
 pub struct DecisionObjectsResponse {
@@ -1468,6 +1460,9 @@ pub async fn start_followup(
             let decision_summary = details.session.result.as_ref()
                 .map(|d| serde_json::to_string(&d.majority_reasons).unwrap_or_default())
                 .unwrap_or_default();
+            let risk_policy = details.artifacts.topic_type
+                .map(|t| t.risk_policy())
+                .unwrap_or(RiskPolicy::Normal);
 
             let provider = state.runner.provider().clone();
             match run_single_seat_followup(
@@ -1478,6 +1473,7 @@ pub async fn start_followup(
                 object,
                 seat,
                 body.user_input.as_deref(),
+                risk_policy,
             ).await {
                 Ok((result_json, impact)) => (result_json, impact),
                 Err(err) => {
@@ -1498,6 +1494,9 @@ pub async fn start_followup(
             let decision_summary = details.session.result.as_ref()
                 .map(|d| serde_json::to_string(&d.majority_reasons).unwrap_or_default())
                 .unwrap_or_default();
+            let risk_policy = details.artifacts.topic_type
+                .map(|t| t.risk_policy())
+                .unwrap_or(RiskPolicy::Normal);
 
             let provider = state.runner.provider().clone();
             match run_mini_deliberation(
@@ -1507,6 +1506,7 @@ pub async fn start_followup(
                 &decision_summary,
                 object,
                 body.user_input.as_deref(),
+                risk_policy,
             ).await {
                 Ok((result_json, impact)) => (result_json, impact),
                 Err(err) => {
@@ -1520,8 +1520,11 @@ pub async fn start_followup(
             }
         }
         FollowUpMode::ReDeliberation => {
-            // Stub — will be implemented in Task 7
-            (serde_json::json!({"summary": "新事实复议功能实现中"}), FollowUpImpact::NoChange)
+            let details = state.store.get_session(session_id).await?;
+            let risk_policy = details.artifacts.topic_type
+                .map(|t| t.risk_policy())
+                .unwrap_or(RiskPolicy::Normal);
+            (serde_json::json!({"summary": format!("新事实复议功能实现中（风险策略：{:?}）", risk_policy)}), FollowUpImpact::NoChange)
         }
     };
 
@@ -1591,6 +1594,9 @@ pub async fn re_deliberate(
         .filter(|o| body.affected_object_ids.contains(&o.id))
         .collect();
 
+    let risk_policy = details.artifacts.topic_type
+        .map(|t| t.risk_policy())
+        .unwrap_or(RiskPolicy::Normal);
     let provider = state.runner.provider().clone();
     let (result, impact) = match run_re_deliberation(
         provider,
@@ -1599,6 +1605,7 @@ pub async fn re_deliberate(
         &decision_summary,
         &body.new_fact,
         &affected,
+        risk_policy,
     ).await {
         Ok(r) => r,
         Err(err) => {
@@ -1628,7 +1635,7 @@ pub async fn re_deliberate(
     if impact == FollowUpImpact::ChangesDecision {
         for object_id in &body.affected_object_ids {
             let _ = state.store
-                .update_decision_object_status(*object_id, wenyuan_core::DecisionObjectStatus::Superseded)
+                .update_decision_object_status(*object_id, DecisionObjectStatus::Superseded)
                 .await;
         }
     }

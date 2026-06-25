@@ -1,4 +1,4 @@
-import type { CodeSearchResponse, ConfigStatus, EvidenceItem, ParseDocumentResponse, ProviderSettings, SessionDetails, SessionRecord, SessionSummary, TestProviderResponse, ToolRun, UserPreferences } from './domain/session'
+import type { CodeSearchResponse, ConfigStatus, DecisionObject, EvidenceItem, FollowUpSuggestion, FollowUpTurn, ParseDocumentResponse, ProviderSettings, SessionDetails, SessionRecord, SessionSummary, TestProviderResponse, ToolRun, UserPreferences } from './domain/session'
 
 const base = ''
 let localToken: string | null = null
@@ -134,6 +134,39 @@ export const api = {
     return request<TestProviderResponse>('/api/settings/test-provider', {
       method: 'POST',
       body: JSON.stringify(input),
+    })
+  },
+
+  // ── Follow-up / 续议 API ──
+
+  getDecisionObjects(sessionId: string) {
+    return request<{ objects: DecisionObject[] }>(`/api/sessions/${sessionId}/decision-objects`)
+  },
+  getFollowups(sessionId: string) {
+    return request<{ suggestions: FollowUpSuggestion[] }>(`/api/sessions/${sessionId}/followups`)
+  },
+  regenerateFollowups(sessionId: string) {
+    return request<{ suggestions: FollowUpSuggestion[] }>(`/api/sessions/${sessionId}/followups/generate`, { method: 'POST' })
+  },
+  startFollowup(suggestionId: string, mode: string, userInput?: string) {
+    return request<{ turn_id: string; result: unknown; impact: string }>(`/api/followups/${suggestionId}/start`, {
+      method: 'POST',
+      body: JSON.stringify({ mode, user_input: userInput ?? null }),
+    })
+  },
+  reDeliberate(sessionId: string, newFact: string, affectedObjectIds: string[]) {
+    return request<{ turn_id: string; result: unknown }>(`/api/sessions/${sessionId}/re-deliberate`, {
+      method: 'POST',
+      body: JSON.stringify({ new_fact: newFact, affected_object_ids: affectedObjectIds }),
+    })
+  },
+  getFollowupTurns(sessionId: string) {
+    return request<{ turns: FollowUpTurn[] }>(`/api/sessions/${sessionId}/followup-turns`)
+  },
+  updateDecisionObjectStatus(objectId: string, status: string) {
+    return request<void>(`/api/decision-objects/${objectId}/status`, {
+      method: 'POST',
+      body: JSON.stringify({ status }),
     })
   },
 }

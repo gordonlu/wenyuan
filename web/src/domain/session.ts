@@ -1,3 +1,5 @@
+import { renderMarkdown } from '../utils/markdown'
+
 export type SeatKind = 'mouyuan' | 'jingshi' | 'chizheng'
 export type SessionPhase =
   | 'draft'
@@ -710,6 +712,35 @@ export function exportSessionMarkdown(details: SessionDetails, level: 'brief' | 
     lines.push(`- ${metric.label}：${metric.value}`)
   }
 
+  // Follow-up data (if available as top-level keys from API composition)
+  const followupObjects = (details as unknown as Record<string, unknown>).decision_objects as DecisionObject[] | undefined
+  const followupTurnsData = (details as unknown as Record<string, unknown>).followup_turns as FollowUpTurn[] | undefined
+
+  if (followupObjects?.length) {
+    lines.push('## 8. 决策对象', '')
+    for (const obj of followupObjects) {
+      lines.push(`- [${decisionObjectKindLabels[obj.kind]}] **${markdownText(obj.title)}** — ${markdownText(obj.summary)}`)
+      lines.push(`  - 状态：${decisionObjectStatusLabels[obj.status]}，优先级：${decisionObjectPriorityLabels[obj.priority]}${obj.seat ? `，来源：${seatLabels[obj.seat as SeatKind] ?? obj.seat}` : ''}`)
+    }
+    lines.push('')
+  }
+
+  if (followupTurnsData?.length) {
+    lines.push('## 9. 续议记录', '')
+    for (const turn of followupTurnsData) {
+      lines.push(`- **${followUpModeLabels[turn.mode]}** — 影响：${followUpImpactLabels[turn.impact]}`)
+      if (turn.user_input) lines.push(`  - 用户输入：${markdownText(turn.user_input)}`)
+      lines.push(`  - 时间：${turn.created_at}`)
+      try {
+        const resultStr = JSON.stringify(turn.result_json)
+        if (resultStr && resultStr !== '{}') {
+          lines.push(`  - 结果：${resultStr.slice(0, 300)}`)
+        }
+      } catch { /* skip */ }
+    }
+    lines.push('')
+  }
+
   if (level === 'audit') {
     if (details.artifacts.claims?.length) {
       lines.push('', '## 主张池（Audit）', '')
@@ -832,6 +863,12 @@ export function cleanReportText(value?: string | null) {
   return lines.join('\n').replace(/\n{3,}/g, '\n\n').trim()
 }
 
+export function renderReportText(value?: string | null) {
+  const cleaned = cleanReportText(value)
+  if (!cleaned) return ''
+  return renderMarkdown(cleaned)
+}
+
 function cleanReportList(values?: string[]) {
   return values?.map((value) => markdownText(value)).filter(Boolean) ?? []
 }
@@ -947,6 +984,7 @@ export interface DecisionDigest {
   status_label: string
   status_class: 'ok' | 'warn' | 'danger'
   selected_proposal_title: string
+  selected_proposal_summary: string
   selected_proposal_seat: SeatKind | ''
   vote_count: number
   has_risk_blocker: boolean
@@ -971,6 +1009,7 @@ export function decisionDigest(details: SessionDetails, evidenceSummaryResult?: 
       status_label: '尚无结论',
       status_class: 'warn',
       selected_proposal_title: '',
+      selected_proposal_summary: '',
       selected_proposal_seat: '',
       vote_count: 0,
       has_risk_blocker: false,
@@ -1003,6 +1042,7 @@ export function decisionDigest(details: SessionDetails, evidenceSummaryResult?: 
     status_label,
     status_class,
     selected_proposal_title: decision.selected_proposal?.title ?? '',
+    selected_proposal_summary: decision.selected_proposal?.summary ?? '',
     selected_proposal_seat: decision.selected_proposal?.proposed_by ?? '',
     vote_count: decision.vote_count,
     has_risk_blocker: !!decision.has_risk_blocker,
@@ -1024,4 +1064,163 @@ function normalizeText(value: string) {
 
 function formatPercent(value: number) {
   return `${Math.round(value * 100)}%`
+}
+
+// ── Follow-up / 续议 types ──
+
+export type DecisionObjectKind = 'assumption' | 'risk' | 'opportunity' | 'action_item' | 'open_question' | 'minority_concern'
+
+export type DecisionObjectStatus = 'open' | 'expanded' | 'resolved' | 'dismissed' | 'superseded'
+
+export type DecisionObjectPriority = 'critical' | 'high' | 'medium' | 'low'
+
+export interface DecisionObject {
+  id: string
+  session_id: string
+  kind: DecisionObjectKind
+  seat?: string | null
+  title: string
+  summary: string
+  source_phase?: string | null
+  source_ref?: string | null
+  status: DecisionObjectStatus
+  priority: DecisionObjectPriority
+  created_at: string
+  updated_at: string
+}
+
+export type FollowUpKind =
+  | 'verify_assumption'
+  | 'mitigate_risk'
+  | 'expand_opportunity'
+  | 'build_action_plan'
+  | 'discuss_minority_concern'
+  | 'resolve_open_question'
+  | 're_deliberate_with_new_fact'
+
+export type FollowUpMode = 'single_seat' | 'mini_deliberation' | 're_deliberation'
+
+export type FollowUpImpact =
+  | 'no_change'
+  | 'clarifies_original_decision'
+  | 'adds_condition'
+  | 'adds_action_item'
+  | 'raises_new_risk'
+  | 'suggests_re_deliberation'
+  | 'changes_decision'
+
+export type FollowUpEventKind =
+  | 'suggestions_generated'
+  | 'suggestion_accepted'
+  | 'follow_up_started'
+  | 'follow_up_completed'
+  | 'follow_up_failed'
+  | 'decision_object_resolved'
+  | 're_deliberation_triggered'
+
+export interface FollowUpSuggestion {
+  id: string
+  session_id: string
+  object_id: string
+  kind: FollowUpKind
+  title: string
+  message: string
+  action_label: string
+  suggested_mode: FollowUpMode
+  status: string
+  created_at: string
+}
+
+export interface FollowUpTurn {
+  id: string
+  session_id: string
+  suggestion_id?: string | null
+  mode: FollowUpMode
+  user_input?: string | null
+  result_json: unknown
+  impact: FollowUpImpact
+  created_at: string
+}
+
+export interface FollowUpEvent {
+  id: string
+  session_id: string
+  turn_id?: string | null
+  event_kind: FollowUpEventKind
+  payload_json?: unknown
+  created_at: string
+}
+
+export const decisionObjectKindLabels: Record<DecisionObjectKind, string> = {
+  assumption: '假设',
+  risk: '风险',
+  opportunity: '机会',
+  action_item: '行动项',
+  open_question: '开放问题',
+  minority_concern: '少数意见',
+}
+
+export const decisionObjectStatusLabels: Record<DecisionObjectStatus, string> = {
+  open: '待处理',
+  expanded: '已展开',
+  resolved: '已解决',
+  dismissed: '已忽略',
+  superseded: '被取代',
+}
+
+export const decisionObjectPriorityLabels: Record<DecisionObjectPriority, string> = {
+  critical: '关键',
+  high: '高',
+  medium: '中',
+  low: '低',
+}
+
+export const followUpKindLabels: Record<FollowUpKind, string> = {
+  verify_assumption: '验证假设',
+  mitigate_risk: '风险缓解',
+  expand_opportunity: '扩展机会',
+  build_action_plan: '构建行动计划',
+  discuss_minority_concern: '讨论少数意见',
+  resolve_open_question: '解决开放问题',
+  re_deliberate_with_new_fact: '新事实复议',
+}
+
+export const followUpModeLabels: Record<FollowUpMode, string> = {
+  single_seat: '单席展开',
+  mini_deliberation: '小合议',
+  re_deliberation: '新事实复议',
+}
+
+const followUpSeatLabels: Record<FollowUpKind, string> = {
+  verify_assumption: '持正席',
+  mitigate_risk: '持正席',
+  expand_opportunity: '谋远席',
+  build_action_plan: '经世席',
+  discuss_minority_concern: '持正席',
+  resolve_open_question: '经世席',
+  re_deliberate_with_new_fact: '持正席',
+}
+
+export function followUpSeatLabel(kind: FollowUpKind): string {
+  return followUpSeatLabels[kind] ?? '持正席'
+}
+
+export const followUpImpactLabels: Record<FollowUpImpact, string> = {
+  no_change: '不改变原结论',
+  clarifies_original_decision: '补充说明',
+  adds_condition: '增加条件',
+  adds_action_item: '增加行动项',
+  raises_new_risk: '新风险',
+  suggests_re_deliberation: '建议重新复议',
+  changes_decision: '改变结论',
+}
+
+export const followUpEventKindLabels: Record<FollowUpEventKind, string> = {
+  suggestions_generated: '续议建议已生成',
+  suggestion_accepted: '续议建议已接受',
+  follow_up_started: '续议已开始',
+  follow_up_completed: '续议已完成',
+  follow_up_failed: '续议失败',
+  decision_object_resolved: '决策对象已解决',
+  re_deliberation_triggered: '新事实复议已触发',
 }
