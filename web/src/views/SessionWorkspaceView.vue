@@ -92,16 +92,16 @@
     <nav class="side-nav">
       <a href="#seats" title="三席状态"><span class="nav-dot" /><span>三席</span></a>
       <a href="#topic" title="议题"><span class="nav-dot" /><span>议题</span></a>
-      <a href="#evidence" title="证据"><span class="nav-dot" /><span>证据</span></a>
-      <a href="#tools" title="工具轨迹"><span class="nav-dot" /><span>工具</span></a>
+      <a v-if="externalEvidence.length > 0" href="#evidence" title="证据"><span class="nav-dot" /><span>证据</span></a>
+      <a v-if="toolRuns.length > 0" href="#tools" title="工具轨迹"><span class="nav-dot" /><span>工具</span></a>
       <a href="#ideas" title="创意池"><span class="nav-dot" /><span>创意</span></a>
       <a href="#critiques" title="批议摘要"><span class="nav-dot" /><span>批议</span></a>
       <a href="#revisions" title="差异对比"><span class="nav-dot" /><span>差异</span></a>
       <a href="#proposals" title="策案对比"><span class="nav-dot" /><span>策案</span></a>
       <a href="#votes" title="投票"><span class="nav-dot" /><span>投票</span></a>
       <a href="#quality" title="讨论质量"><span class="nav-dot" /><span>质量</span></a>
-      <a href="#deep-report" title="深度报告"><span class="nav-dot" /><span>深度</span></a>
-      <a href="#claims" title="主张"><span class="nav-dot" /><span>主张</span></a>
+      <a v-if="details?.artifacts.scribe_report" href="#deep-report" title="深度报告"><span class="nav-dot" /><span>深度</span></a>
+      <a v-if="supportedClaims.length > 0" href="#claims" title="主张"><span class="nav-dot" /><span>主张</span></a>
       <a href="#stats" title="运行统计"><span class="nav-dot" /><span>统计</span></a>
       <a href="#timeline" title="时间线"><span class="nav-dot" /><span>时间</span></a>
     </nav>
@@ -381,7 +381,7 @@
       <div class="timeline-box">
         <ol class="timeline">
           <li v-for="event in timelineEvents" :key="event.id">
-            <time>{{ new Date(event.created_at).toLocaleString() }}</time>
+            <time v-if="event.created_at">{{ new Date(event.created_at).toLocaleString() }}</time>
             <span :class="['badge', eventBadge(event.event_type)]">{{ eventLabel(event) }}</span>
           </li>
         </ol>
@@ -665,7 +665,10 @@ function artifactEventLabel(type: string): string | undefined {
   if (type.startsWith('search_completed')) return '搜索完成'
   if (type.startsWith('search_failed')) return '搜索失败'
   if (type.startsWith('scribe_completed')) return '书记官完成'
-  if (type.startsWith('scribe_failed')) return '书记官失败'
+  if (type.startsWith('scribe_failed')) {
+    const err = type.slice('scribe_failed'.length).trim().replace(/^:/, '').trim()
+    return err ? `书记官失败：${err}` : '书记官失败'
+  }
   return undefined
 }
 

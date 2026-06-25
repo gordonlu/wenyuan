@@ -7,8 +7,10 @@ use tracing::info;
 use uuid::Uuid;
 use rust_embed::RustEmbed;
 use wenyuan_agent::AgentRunner;
+use wenyuan_core::SearchBackend;
 use wenyuan_server::{
-    AppState, app, provider_from_env, provider_timeout_from_env, settings::SettingsManager,
+    AppState, app, provider_from_env, provider_timeout_from_env,
+    search_backend_from_env, settings::SettingsManager,
 };
 
 #[derive(RustEmbed)]
@@ -87,7 +89,11 @@ pub async fn start_local_server(config: ServerConfig) -> anyhow::Result<LocalSer
 
     let (provider, config_status) = provider_from_env(&db_url);
     let local_token = Uuid::new_v4().to_string();
-    let search_backend = None;
+    let settings_manager = SettingsManager::new(config.data_dir.clone());
+    let settings_config = settings_manager.load_config();
+    let search_pool = search_backend_from_env(Some(&settings_config));
+    let search_backend: Option<Arc<dyn SearchBackend>> =
+        search_pool.map(|p| p as Arc<dyn SearchBackend>);
 
     let state = AppState {
         store,
@@ -98,7 +104,7 @@ pub async fn start_local_server(config: ServerConfig) -> anyhow::Result<LocalSer
         search_backend,
         preferences_path: Arc::new(config.preferences_path),
         web_dist: Arc::new(config.web_dist),
-        settings: Arc::new(SettingsManager::new(config.data_dir.clone())),
+        settings: Arc::new(settings_manager),
         local_token: local_token.clone(),
     };
 

@@ -35,6 +35,7 @@ use wenyuan_provider::{
     LlmProvider, MockProvider, MockScenario, OpenAiCompatibleConfig, OpenAiCompatibleProvider,
     SearXNGSearchBackend, SearchPool, SeatRoutedProvider, TavilyBackend,
 };
+use crate::settings::ProviderConfig;
 use wenyuan_store::{SessionDetails, Store};
 use wenyuan_tools::{
     CodeSearchResultSet, ParsedDocument, code_search_to_evidence, document_to_evidence,
@@ -337,24 +338,52 @@ pub fn normalize_preferences(mut preferences: UserPreferences) -> UserPreference
     preferences
 }
 
-pub fn search_backend_from_env() -> Option<Arc<SearchPool>> {
-    let provider = env::var("WENYUAN_SEARCH_PROVIDER")
+pub fn search_backend_from_env(settings_config: Option<&ProviderConfig>) -> Option<Arc<SearchPool>> {
+    let env_provider = env::var("WENYUAN_SEARCH_PROVIDER")
         .unwrap_or_default()
         .to_lowercase()
         .trim()
         .to_string();
-    if provider.is_empty() || matches!(provider.as_str(), "none" | "off" | "disabled") {
+
+    // Priority: env var > saved settings
+    let provider = if !env_provider.is_empty()
+        && !matches!(env_provider.as_str(), "none" | "off" | "disabled")
+    {
+        env_provider.clone()
+    } else if let Some(cfg) = settings_config {
+        let sp = cfg.search_provider.trim().to_lowercase();
+        if !sp.is_empty() && !matches!(sp.as_str(), "none" | "off" | "disabled") && sp == "custom" {
+            "custom".to_string()
+        } else {
+            info!(
+                "WENYUAN_SEARCH_PROVIDER not set and saved search_provider={:?} not usable; search disabled",
+                cfg.search_provider
+            );
+            return None;
+        }
+    } else {
         info!("WENYUAN_SEARCH_PROVIDER not set; search disabled");
         return None;
-    }
+    };
+
     let mut backends: Vec<Box<dyn SearchBackend>> = Vec::new();
     for name in provider.split(',') {
         match name.trim() {
             "custom" => {
-                let url = env::var("WENYUAN_SEARCH_API_URL").unwrap_or_default();
-                if !url.is_empty() {
+                let url = env::var("WENYUAN_SEARCH_API_URL")
+                    .ok()
+                    .filter(|s| !s.is_empty())
+                    .or_else(|| {
+                        settings_config
+                            .filter(|_| provider == "custom")
+                            .map(|cfg| cfg.search_api_url.clone())
+                            .filter(|u| !u.is_empty())
+                    });
+                if let Some(url) = url {
                     let key = env::var("WENYUAN_SEARCH_API_KEY").ok();
                     backends.push(Box::new(CustomSearchBackend::new(url, key)));
+                } else {
+                    info!("custom search URL not configured");
                 }
             }
             "doubao" => {
@@ -386,7 +415,7 @@ pub fn search_backend_from_env() -> Option<Arc<SearchPool>> {
         }
     }
     if backends.is_empty() {
-        info!("WENYUAN_SEARCH_PROVIDER={provider} but no backends could be initialized (missing keys/URLs); search disabled");
+        info!("{provider} provider(s) specified but no backends could be initialized (missing keys/URLs); search disabled");
         return None;
     }
     Some(Arc::new(SearchPool::new(backends)))

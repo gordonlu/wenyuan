@@ -35,7 +35,12 @@ async fn main() -> anyhow::Result<()> {
         info!("marked {recovered} stale session execution(s) as retry_required");
     }
     let (provider, config) = provider_from_env(&database_url);
-    let search_pool = search_backend_from_env();
+    let data_dir = env::var("WENYUAN_DATA_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("."));
+    let settings_manager = SettingsManager::new(data_dir.clone());
+    let settings_config = settings_manager.load_config();
+    let search_pool = search_backend_from_env(Some(&settings_config));
     let search_backend: Option<Arc<dyn SearchBackend>> =
         search_pool.clone().map(|p| p as Arc<dyn SearchBackend>);
     if search_backend.is_some() {
@@ -50,11 +55,7 @@ async fn main() -> anyhow::Result<()> {
         search_backend,
         preferences_path,
         web_dist,
-        settings: Arc::new(SettingsManager::new(
-            env::var("WENYUAN_DATA_DIR")
-                .map(PathBuf::from)
-                .unwrap_or_else(|_| PathBuf::from(".")),
-        )),
+        settings: Arc::new(settings_manager),
         local_token: uuid::Uuid::new_v4().to_string(),
     };
 
