@@ -1,56 +1,83 @@
 <template>
   <section class="panel" v-if="proposals.length">
     <h2>策案对比</h2>
-    <div class="compare-grid" :style="{ '--col-count': proposals.length }">
-      <div class="compare-header">维度</div>
-      <template v-for="proposal in proposals" :key="proposal.id">
-        <div class="compare-header seat-col">
-          <span>{{ seatLabel(proposal.proposed_by) }}</span>
-          <span v-if="proposal.confidence !== undefined" class="badge">{{ Math.round(proposal.confidence * 100) }}%</span>
-        </div>
-      </template>
 
-      <div class="compare-label">标题</div>
-      <div v-for="p in proposals" :key="p.id" class="compare-cell">{{ p.title }}</div>
+    <!-- Summary rows -->
+    <div class="compare-summary-grid" :style="{ '--col-count': proposals.length }">
+      <div class="compare-header">席位</div>
+      <div v-for="p in proposals" :key="p.id" class="compare-header seat-col" :class="{ selected: p.id === selectedId }">
+        {{ seatLabel(p.proposed_by) }}
+      </div>
+
+      <div class="compare-label">策案</div>
+      <div v-for="p in proposals" :key="p.id" class="compare-cell" :class="{ selected: p.id === selectedId }">
+        <strong>{{ p.title }}</strong>
+      </div>
+
+      <div class="compare-label">置信度</div>
+      <div v-for="p in proposals" :key="p.id" class="compare-cell" :class="{ selected: p.id === selectedId }">
+        <span v-if="p.confidence !== undefined" class="badge"
+          :class="p.confidence >= 0.7 ? 'ok' : p.confidence >= 0.5 ? '' : 'warn'"
+        >{{ Math.round(p.confidence * 100) }}%</span>
+      </div>
 
       <div class="compare-label">摘要</div>
-      <div v-for="p in proposals" :key="p.id" class="compare-cell formatted" v-html="renderMarkdown(p.summary)" />
+      <div v-for="p in proposals" :key="p.id" class="compare-cell formatted" :class="{ selected: p.id === selectedId }"
+        v-html="renderMarkdown(p.summary)"
+      />
 
-      <div class="compare-label">落地路径</div>
-      <div v-for="p in proposals" :key="p.id" class="compare-cell formatted" v-html="renderMarkdown(p.implementation_path)" />
-
-      <div class="compare-label">采纳观点</div>
-      <div v-for="p in proposals" :key="p.id" class="compare-cell">
-        <span v-if="!p.adopted_points?.length" class="muted">无</span>
-        <span v-else>{{ p.adopted_points.join('、') }}</span>
-      </div>
-
-      <div class="compare-label">拒绝观点</div>
-      <div v-for="p in proposals" :key="p.id" class="compare-cell">
-        <span v-if="!p.rejected_points?.length" class="muted">无</span>
-        <span v-else>{{ p.rejected_points.join('、') }}</span>
-      </div>
-
-      <div class="compare-label">风险</div>
-      <div v-for="p in proposals" :key="p.id" class="compare-cell">
+      <div class="compare-label">主要风险</div>
+      <div v-for="p in proposals" :key="p.id" class="compare-cell" :class="{ selected: p.id === selectedId }">
         <span v-if="!p.risks?.length" class="muted">无</span>
-        <span v-else>{{ p.risks.join('、') }}</span>
+        <span v-else>{{ p.risks.slice(0, 3).join('、') }}</span>
       </div>
 
-      <div class="compare-label">成功指标</div>
-      <div v-for="p in proposals" :key="p.id" class="compare-cell">
-        <span v-if="!p.success_metrics?.length" class="muted">无</span>
-        <span v-else>{{ p.success_metrics.join('、') }}</span>
+      <div class="compare-label">选择状态</div>
+      <div v-for="p in proposals" :key="p.id" class="compare-cell" :class="{ selected: p.id === selectedId }">
+        <span v-if="p.id === selectedId" class="badge ok">最终方案</span>
+        <span v-else class="muted">未采纳</span>
       </div>
+    </div>
+
+    <!-- Dimension toggle -->
+    <div class="detail-toggle">
+      <button
+        v-for="dim in dimensions"
+        :key="dim.key"
+        type="button"
+        :class="['tab-toggle', { active: activeDimension === dim.key }]"
+        @click="activeDimension = dim.key === activeDimension ? null : dim.key"
+      >
+        {{ dim.label }}
+      </button>
+    </div>
+
+    <!-- Dimension detail -->
+    <div v-if="activeDimension" class="compare-dim-grid" :style="{ '--col-count': proposals.length }">
+      <div class="compare-header">席位</div>
+      <div v-for="p in proposals" :key="p.id" class="compare-header seat-col"
+        :class="{ selected: p.id === selectedId }">
+        {{ seatLabel(p.proposed_by) }}
+      </div>
+
+      <div class="compare-label">{{ dimensionLabel }}</div>
+      <div
+        v-for="p in proposals"
+        :key="p.id"
+        class="compare-cell formatted"
+        :class="{ selected: p.id === selectedId }"
+        v-html="dimensionContent(p)"
+      />
     </div>
   </section>
 </template>
 
 <script setup lang="ts">
+import { ref } from 'vue'
 import { seatLabels, type SeatKind } from '../domain/session'
 import { renderMarkdown } from '../utils/markdown'
 
-defineProps<{
+const props = defineProps<{
   proposals: Array<{
     id: string
     proposed_by: string
@@ -63,51 +90,101 @@ defineProps<{
     success_metrics?: string[]
     confidence?: number
   }>
+  selectedId?: string
 }>()
 
 function seatLabel(key: string) {
   return seatLabels[key as SeatKind] || key
 }
+
+const activeDimension = ref<string | null>(null)
+
+const dimensions = [
+  { key: 'implementation', label: '落地路径' },
+  { key: 'adopted', label: '采纳与拒绝' },
+  { key: 'metrics', label: '成功指标' },
+]
+
+const dimensionLabel = computed(() => {
+  const d = dimensions.find((d) => d.key === activeDimension.value)
+  return d?.label ?? ''
+})
+
+import { computed } from 'vue'
+
+function dimensionContent(p: typeof props.proposals[0]) {
+  if (activeDimension.value === 'implementation') {
+    return renderMarkdown(p.implementation_path) || '<span class="muted">无</span>'
+  }
+  if (activeDimension.value === 'adopted') {
+    let html = ''
+    if (p.adopted_points?.length) {
+      html += `<p><strong>采纳：</strong>${p.adopted_points.join('、')}</p>`
+    }
+    if (p.rejected_points?.length) {
+      html += `<p><strong>拒绝：</strong>${p.rejected_points.join('、')}</p>`
+    }
+    return html || '<span class="muted">无</span>'
+  }
+  if (activeDimension.value === 'metrics') {
+    if (p.success_metrics?.length) return p.success_metrics.join('、')
+    return '<span class="muted">无</span>'
+  }
+  return ''
+}
 </script>
 
 <style scoped>
-.compare-grid {
+.compare-summary-grid {
   display: grid;
-  grid-template-columns: 100px repeat(var(--col-count), 1fr);
+  grid-template-columns: 80px repeat(var(--col-count), 1fr);
   gap: 1px;
   background: #d8dfd9;
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
   overflow: hidden;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.62);
+  margin-bottom: 12px;
+}
+.compare-dim-grid {
+  display: grid;
+  grid-template-columns: 80px repeat(var(--col-count), 1fr);
+  gap: 1px;
+  background: #d8dfd9;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
 }
 .compare-header {
   background: #f3f6f2;
-  padding: 12px;
+  padding: 10px 12px;
   font-weight: 600;
   font-size: 13px;
   font-family: var(--font-display);
-  display: flex;
-  align-items: center;
-  gap: 8px;
 }
 .compare-header.seat-col {
-  justify-content: center;
+  text-align: center;
+}
+.compare-header.selected {
+  background: #e8f2ee;
+  color: var(--color-accent);
 }
 .compare-label {
   background: #f3f6f2;
-  padding: 10px 12px;
-  font-size: 12px;
+  padding: 8px 10px;
+  font-size: 11px;
   color: var(--color-text-muted);
   font-weight: 700;
   white-space: nowrap;
 }
 .compare-cell {
   background: #fff;
-  padding: 10px 12px;
+  padding: 8px 10px;
   font-size: 13px;
   line-height: 1.5;
   color: var(--color-text);
+}
+.compare-cell.selected {
+  background: #f3faf5;
 }
 .compare-cell.formatted :deep(p) {
   margin: 0.3em 0;
@@ -119,5 +196,31 @@ function seatLabel(key: string) {
 .compare-cell.formatted :deep(ol) {
   padding-left: 1.3em;
   margin: 0.2em 0;
+}
+.detail-toggle {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+}
+.tab-toggle {
+  padding: 5px 14px;
+  border: 1px solid var(--color-border-light);
+  border-radius: 14px;
+  background: var(--color-bg-subtle);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.tab-toggle:hover {
+  background: var(--color-bg);
+  color: var(--color-text);
+}
+.tab-toggle.active {
+  background: var(--color-accent);
+  color: #fff;
+  border-color: var(--color-accent);
 }
 </style>

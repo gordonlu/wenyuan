@@ -89,350 +89,100 @@
     </header>
 
     <template v-if="viewMode === 'workbench'">
-    <nav class="side-nav">
-      <a href="#seats" title="三席状态"><span class="nav-dot" /><span>三席</span></a>
-      <a href="#topic" title="议题"><span class="nav-dot" /><span>议题</span></a>
-      <a v-if="externalEvidence.length > 0" href="#evidence" title="证据"><span class="nav-dot" /><span>证据</span></a>
-      <a v-if="toolRuns.length > 0" href="#tools" title="工具轨迹"><span class="nav-dot" /><span>工具</span></a>
-      <a href="#ideas" title="创意池"><span class="nav-dot" /><span>创意</span></a>
-      <a href="#critiques" title="批议摘要"><span class="nav-dot" /><span>批议</span></a>
-      <a href="#revisions" title="差异对比"><span class="nav-dot" /><span>差异</span></a>
-      <a href="#proposals" title="策案对比"><span class="nav-dot" /><span>策案</span></a>
-      <a href="#votes" title="投票"><span class="nav-dot" /><span>投票</span></a>
-      <a href="#quality" title="讨论质量"><span class="nav-dot" /><span>质量</span></a>
-      <a v-if="details?.artifacts.scribe_report" href="#deep-report" title="深度报告"><span class="nav-dot" /><span>深度</span></a>
-      <a v-if="supportedClaims.length > 0" href="#claims" title="主张"><span class="nav-dot" /><span>主张</span></a>
-      <a href="#stats" title="运行统计"><span class="nav-dot" /><span>统计</span></a>
-      <a href="#timeline" title="时间线"><span class="nav-dot" /><span>时间</span></a>
-      <a v-if="hasDecisionObjects" href="#decision-objects" title="决策对象"><span class="nav-dot" /><span>决策</span></a>
-      <a v-if="hasFollowups" href="#followups" title="续议建议"><span class="nav-dot" /><span>续议</span></a>
-      <a v-if="hasFollowupTurns" href="#followup-timeline" title="续议时间线"><span class="nav-dot" /><span>续议时间</span></a>
-      <a v-if="hasDecisionObjects" href="#re-deliberation" title="新事实复议"><span class="nav-dot" /><span>复议</span></a>
-    </nav>
+    <WorkspaceTabs :tab="currentTab" @update:tab="setTab" />
     <div class="workspace-main">
-    <PhaseProgressBar :phase="details.session.phase" />
-    <section id="seats" class="role-card-row" aria-label="三席状态">
-      <SeatRoleCard
-        v-for="seat in seats"
-        :key="seat"
-        :seat="seat"
+      <WorkspaceOverviewTab
+        v-if="currentTab === 'overview'"
         :phase="details.session.phase"
-        :events="details.events"
         :running="details.execution.running"
-        :runs="details.artifacts.seat_runs"
-        :tool-runs="toolRuns"
-        :provider-ref="seatProviderRef(seat)"
-        :inactive="details.session.mode === 'single_agent' && seat !== 'mouyuan'"
-      />
-    </section>
-
-    <ApiErrorState :message="error" />
-    <ApiErrorState v-if="details.session.failure_reason" :message="`失败原因：${details.session.failure_reason}`" />
-    <section v-if="recentFailedRuns.length" class="panel">
-      <h2>最近失败调用</h2>
-      <ul class="failure-list">
-        <li v-for="run in recentFailedRuns" :key="run.id">
-          <span :class="['seat-tag', run.seat]">{{ seatLabels[run.seat] }} · {{ phaseLabels[run.phase] }}</span>
-          <strong>{{ run.error || '模型返回内容无法解析' }}</strong>
-        </li>
-      </ul>
-    </section>
-    <div v-if="details.execution.recovery_state === 'retry_required'" class="status-bar status-bar-warn" role="status">
-      <span class="status-bar-icon">&#9888;</span>
-      <span>上次执行未正常完成，请使用重试继续。</span>
-    </div>
-    <div v-else-if="details.execution.recovery_state === 'paused'" class="status-bar status-bar-warn" role="status">
-      <span class="status-bar-icon">&#9208;</span>
-      <span>已暂停。你可以补充背景信息后继续。</span>
-    </div>
-    <div v-else-if="details.execution.running" class="status-bar status-bar-live" role="status" aria-live="polite">
-      <span class="status-bar-dot" />
-      <span class="status-bar-phase">{{ phaseLabels[details.session.phase] }}</span>
-      <span class="status-bar-sep">·</span>
-      <span class="status-bar-seat">{{ runningSeatLabel }}</span>
-      <span v-if="runningActivityLabel" class="status-bar-tool">{{ runningActivityLabel }}</span>
-      <span v-if="details.events?.length" class="status-bar-time">{{ lastEventTime }}</span>
-    </div>
-
-    <div v-if="viewMode === 'workbench' && currentDigest" class="digest-row">
-      <DecisionDigest :digest="currentDigest" />
-      <EvidenceSummary
-        v-if="currentEvidenceSummary"
-        element-id="quality"
-        :summary="currentEvidenceSummary"
-        :donut-segments="donutData"
-        :radar-axes="radarData"
+        :events="details.events"
+        :seat-list="seatSlotList"
+        :error-message="error"
+        :failure-reason="details.session.failure_reason ?? undefined"
+        :failed-runs="failedRunSlots"
+        :retry-required="details.execution.recovery_state === 'retry_required'"
+        :paused="details.execution.recovery_state === 'paused'"
+        :phase-label="phaseLabels[details.session.phase]"
+        :running-seat-label="runningSeatLabel"
+        :running-activity-label="runningActivityLabel"
+        :last-event-time="lastEventTime"
+        :current-digest="currentDigest"
+        :evidence-summary="currentEvidenceSummary"
+        :donut-data="donutData"
+        :radar-data="radarData"
         :quality-metrics="qualityMetricRows(details.artifacts.quality, hasTokenUsage)"
+        :primary-decision="primaryDecision"
+        :vote-policy="details.session.vote_policy"
+        :mode="details.session.mode"
+        :recent-events="recentFiveEvents"
       />
-    </div>
-
-    <DecisionSummary v-if="primaryDecision" :decision="primaryDecision" :vote-policy="details.session.vote_policy" :mode="details.session.mode" />
-
-    <section id="topic" class="panel">
-      <div class="row-head">
-        <h2>议题</h2>
-        <button v-if="!editingContext" class="icon" title="补充背景" @click="editingContext = true">
-          <Pen :size="16" />
-        </button>
-      </div>
-      <div class="formatted-text" v-html="renderReportText(details.session.topic)" />
-      <template v-if="editingContext">
-        <textarea v-model="newContext" rows="4" placeholder="补充背景信息…" style="margin-top: 12px" />
-        <div class="actions" style="margin-top: 8px">
-          <button @click="saveContext">保存</button>
-          <button @click="editingContext = false">取消</button>
-        </div>
-      </template>
-      <div v-else-if="renderReportText(details.session.context)" class="formatted-text muted" style="margin-top: 8px" v-html="renderReportText(details.session.context)" />
-    </section>
-
-    <section id="evidence" v-if="externalEvidence.length" class="panel evidence-source-panel">
-      <div class="row-head">
-        <h2>来源证据</h2>
-        <span class="badge flat">{{ externalEvidence.length }} 条</span>
-      </div>
-      <div class="item-grid evidence-source-grid">
-        <article v-for="ev in externalEvidence.slice(0, 12)" :key="ev.id" class="item evidence-source-item">
-          <div class="item-head">
-            <span>{{ evidenceSourceKindLabels[ev.source_kind ?? 'internal'] ?? ev.source_kind }}</span>
-            <span :class="['badge', ev.trust_level === 'untrusted_external' ? 'warn' : 'ok']">
-              {{ evidenceTrustLabels[ev.trust_level ?? 'internal'] ?? ev.trust_level }}
-            </span>
-          </div>
-          <div class="formatted-text" v-html="renderReportText(ev.content)" />
-          <p class="muted evidence-source-url">{{ compactSource(ev.source) }}</p>
-          <div v-if="evidenceSafetyLabels(ev.safety_flags).length" class="evidence-safety-row">
-            <span
-              v-for="label in evidenceSafetyLabels(ev.safety_flags)"
-              :key="label"
-              class="badge warn"
-            >
-              {{ label }}
-            </span>
-          </div>
-        </article>
-      </div>
-    </section>
-
-    <section id="tools" v-if="toolRuns.length" class="panel tool-run-panel">
-      <div class="row-head">
-        <h2>工具轨迹</h2>
-        <button class="icon" title="展开详情" @click="showToolDetail = !showToolDetail">
-          <ChevronDown v-if="!showToolDetail" :size="16" />
-          <ChevronUp v-else :size="16" />
-        </button>
-      </div>
-      <div v-if="!showToolDetail" class="tool-run-summary">
-        <span v-for="(count, name) in toolRunSummaryData.by_tool" :key="name" class="tool-run-chip">
-          {{ toolNameLabel(name) }} {{ count }} 次
-        </span>
-        <span class="tool-run-meta">{{ (toolRunSummaryData.total_ms / 1000).toFixed(1) }} 秒 · {{ toolRunSummaryData.failed }} 次失败</span>
-      </div>
-      <div v-else class="item-grid tool-run-grid">
-        <article v-for="run in toolRuns" :key="run.id" class="item tool-run-item">
-          <div class="item-head">
-            <span>{{ toolNameLabel(run.tool_name) }}</span>
-            <span :class="['badge', run.status === 'completed' ? 'ok' : 'warn']">{{ run.status }}</span>
-          </div>
-          <p>{{ reportText(run.input_summary) }}</p>
-          <p class="muted">{{ (run.duration_ms / 1000).toFixed(1) }} 秒 · {{ run.evidence_ids?.length ?? 0 }} 条证据</p>
-          <p v-if="run.error" class="muted tool-run-error">{{ run.error }}</p>
-        </article>
-      </div>
-    </section>
-
-    <section id="ideas" class="panel">
-      <h2>创意池（{{ details.artifacts.ideas.length }}）</h2>
-      <div class="item-grid">
-        <IdeaCard v-for="idea in details.artifacts.ideas" :key="idea.id" :idea="idea" />
-      </div>
-    </section>
-
-    <section id="critiques" class="panel">
-      <h2>批议摘要</h2>
-      <div class="item-grid">
-        <article v-for="critique in details.artifacts.critiques" :key="`${critique.reviewer}-${critique.target_seat}`" class="item">
-          <div class="item-head">
-            <span :class="['seat-tag', critique.reviewer]">{{ seatLabels[critique.reviewer] }}</span> → <span :class="['seat-tag', critique.target_seat]">{{ seatLabels[critique.target_seat] }}</span>
-          </div>
-          <p class="muted" v-if="critique.strongest_point">强点：{{ critique.strongest_point }}</p>
-          <p class="muted" v-if="critique.weakest_point">弱点：{{ critique.weakest_point }}</p>
-          <p>{{ critique.challenge }}</p>
-          <p v-if="critique.counterexample" class="muted">反例：{{ critique.counterexample }}</p>
-          <p class="muted">{{ critique.suggested_improvement }}</p>
-          <p v-if="critique.evidence_question" class="muted">补证：{{ critique.evidence_question }}</p>
-        </article>
-      </div>
-    </section>
-
-    <CritiqueGraph
-      v-if="details.artifacts.critiques.length"
-      :ideas="details.artifacts.ideas"
-      :critiques="details.artifacts.critiques"
-      :proposals="details.artifacts.proposals"
-    />
-
-    <section id="revisions" class="panel">
-      <h2>独议 / 复议差异</h2>
-      <div class="item-grid">
-        <article v-for="diff in revisionDiffs(details)" :key="diff.seat" class="item">
-          <div class="item-head">
-            <span :class="['seat-tag', diff.seat]">{{ seatLabels[diff.seat] }}</span>
-            <span v-if="diff.titleChanged || diff.summaryChanged" class="badge ok">已调整</span>
-            <span v-else class="badge">延续</span>
-          </div>
-          <h3>{{ diff.proposalTitle || '暂无复议策案' }}</h3>
-          <p class="muted">采纳独议：{{ diff.ideaTitles.join('、') || '暂无' }}</p>
-          <p v-if="diff.initialSummary" class="muted">独议：{{ diff.initialSummary }}</p>
-          <p v-if="diff.revisedSummary">复议：{{ diff.revisedSummary }}</p>
-          <p v-if="diff.addedImplementationPath" class="muted">落地：{{ diff.addedImplementationPath }}</p>
-          <p v-if="diff.addedSuccessMetrics.length" class="muted">指标：{{ diff.addedSuccessMetrics.join('、') }}</p>
-        </article>
-      </div>
-    </section>
-
-    <ProposalCompare id="proposals" :proposals="details.artifacts.proposals" />
-
-    <VoteDisplay id="votes" :votes="details.artifacts.votes" :proposals="details.artifacts.proposals" />
-
-    <VoteChanges id="vote-changes" :votes="details.artifacts.votes" :proposals="details.artifacts.proposals" />
-
-    <section id="deep-report" v-if="details.artifacts.scribe_report" class="panel">
-      <h2>深度研究报告</h2>
-      <div class="scribe-report">
-        <h3>共识总结</h3>
-        <div class="formatted-text" v-html="renderReportText(details.artifacts.scribe_report.consensus_summary)" />
-        <div v-if="details.artifacts.scribe_report.structural_gaps.length">
-          <h3>结构缺失</h3>
-          <ul>
-            <li v-for="gap in details.artifacts.scribe_report.structural_gaps" :key="gap">{{ gap }}</li>
-          </ul>
-        </div>
-        <div v-if="details.artifacts.scribe_report.unresolved_conflicts.length">
-          <h3>未解决分歧</h3>
-          <ul>
-            <li v-for="conflict in details.artifacts.scribe_report.unresolved_conflicts" :key="conflict">{{ conflict }}</li>
-          </ul>
-        </div>
-        <details>
-          <summary>研究全文</summary>
-          <div class="scribe-final-report formatted-text" v-html="renderReportText(details.artifacts.scribe_report.final_report)" />
-        </details>
-      </div>
-    </section>
-
-    <section id="claims" v-if="supportedClaims.length" class="panel">
-      <h2>有证据的主张</h2>
-      <div class="item-grid">
-        <article v-for="claim in supportedClaims" :key="claim.id" class="item">
-          <div class="item-head">
-            <span :class="['seat-tag', claim.proposed_by]">{{ seatLabels[claim.proposed_by] }}</span>
-            <span class="badge ok">有证据</span>
-          </div>
-          <div class="formatted-text" v-html="renderReportText(claim.content)" />
-          <p class="muted">来源：{{ reportText(claim.context) }}</p>
-          <p v-if="detailEvidence(claim.evidence_ids)" class="muted">
-            证据：{{ detailEvidence(claim.evidence_ids)?.map((ev) => evidenceKindLabels[ev.kind] + ': ' + reportText(ev.content)).join(' | ') }}
-          </p>
-        </article>
-      </div>
-    </section>
-    <section v-if="unsupportedClaims.length" class="panel">
-      <h2>未验证的主张</h2>
-      <div class="item-grid">
-        <article v-for="claim in unsupportedClaims" :key="claim.id" class="item">
-          <div class="item-head">
-            <span :class="['seat-tag', claim.proposed_by]">{{ seatLabels[claim.proposed_by] }}</span>
-            <span class="badge warn">未验证</span>
-          </div>
-          <div class="formatted-text" v-html="renderReportText(claim.content)" />
-          <p class="muted">来源：{{ reportText(claim.context) }}</p>
-          <p v-if="detailEvidence(claim.evidence_ids)" class="muted">
-            证据：{{ detailEvidence(claim.evidence_ids)?.map((ev) => evidenceKindLabels[ev.kind] + ': ' + reportText(ev.content)).join(' | ') }}
-          </p>
-        </article>
-      </div>
-    </section>
-
-    <section id="stats" class="panel">
-      <h2>运行统计</h2>
-      <p v-if="details.artifacts.seat_runs.length && !hasTokenUsage" class="muted usage-note">
-        当前 Provider 未返回 token usage；费用和额度请以供应商按调用次数或控制台账单为准。
-      </p>
-      <div class="stat-grid">
-        <article v-for="stat in seatRunStats(details.artifacts.seat_runs)" :key="stat.seat" class="stat">
-          <span :class="['seat-tag', stat.seat]">{{ seatLabels[stat.seat] }}</span>
-          <strong>{{ stat.calls }} 次调用</strong>
-          <p>
-            {{ stat.durationMs ? (stat.durationMs / 1000).toFixed(1) : 0 }} 秒 · {{ stat.failed }} 次失败 · {{ stat.repaired }} 次修复
-            <template v-if="stat.hasUsage"> · {{ stat.tokens }} tokens</template>
-          </p>
-          <p class="muted">{{ stat.promptVersions || '暂无 Prompt 版本' }}</p>
-        </article>
-      </div>
-    </section>
-
-    <section id="timeline" class="panel">
-      <div class="row-head timeline-head">
-        <h2>事件时间线</h2>
-        <button v-if="!showTrajectory" class="stat-action" title="查看阶段轨迹" @click="loadTrajectory">
-          <RotateCw :size="14" /> 查看阶段轨迹
-        </button>
-      </div>
-      <div class="timeline-box">
-        <ol class="timeline">
-          <li v-for="event in timelineEvents" :key="event.id">
-            <time v-if="event.created_at">{{ new Date(event.created_at).toLocaleString() }}</time>
-            <span :class="['badge', eventBadge(event.event_type)]">{{ eventLabel(event) }}</span>
-          </li>
-        </ol>
-      </div>
-      <div v-if="showTrajectory && trajectory.length" class="trajectory-block">
-        <h3>阶段轨迹</h3>
-        <div class="timeline-box compact">
-          <ol class="timeline">
-            <li v-for="ev in trajectoryEvents" :key="ev.id">
-              <time>{{ new Date(ev.created_at).toLocaleString() }}</time>
-              <span class="badge ok">{{ ev.event_type }}</span>
-            </li>
-          </ol>
-        </div>
-      </div>
-    </section>
-
-    <DecisionObjectsPanel
-      id="decision-objects"
-      v-if="hasDecisionObjects"
-      :objects="decisionObjects"
-      @resolve="handleResolveObject"
-      @dismiss="handleDismissObject"
-    />
-
-    <FollowUpCards
-      id="followups"
-      v-if="hasFollowups"
-      :suggestions="followupSuggestions"
-      :loading="followupsLoading"
-      @regenerate="handleRegenerateFollowups"
-      @start="handleStartFollowup"
-    />
-
-    <FollowUpTimeline
-      id="followup-timeline"
-      v-if="hasFollowupTurns"
-      :turns="followupTurns"
-    />
-
-    <ReDeliberationBox
-      id="re-deliberation"
-      v-if="hasDecisionObjects"
-      :objects="decisionObjects"
-      :running="reDelibRunning"
-      :result="reDelibResult"
-      :error-message="reDelibError"
-      @submit="handleReDeliberate"
-      @clear="reDelibError = ''"
-    />
+      <WorkspaceProcessTab
+        v-else-if="currentTab === 'process'"
+        :topic-html="renderReportText(details.session.topic)"
+        :context-html="renderReportText(details.session.context)"
+        :editing-context="editingContext"
+        :edit-context-text="newContext"
+        :ideas="details.artifacts.ideas"
+        :critiques="details.artifacts.critiques"
+        :proposals="details.artifacts.proposals"
+        :revision-diffs="revisionDiffs(details)"
+        :selected-proposal-id="selectedProposalId"
+        @start-edit-context="editingContext = true"
+        @save-context="saveContext"
+        @cancel-edit-context="editingContext = false"
+      />
+      <WorkspaceEvidenceTab
+        v-else-if="currentTab === 'evidence'"
+        :evidence-summary="currentEvidenceSummary"
+        :donut-data="donutData"
+        :radar-data="radarData"
+        :quality-metrics="qualityMetricRows(details.artifacts.quality, hasTokenUsage)"
+        :external-evidence="externalEvidenceSlots"
+        :tool-runs="toolRunSlots"
+        :tool-run-summary="toolRunSummaryData.by_tool"
+        :tool-run-duration="(toolRunSummaryData.total_ms / 1000).toFixed(1)"
+        :tool-run-failed="toolRunSummaryData.failed"
+        :supported-claims="claimSlots(true)"
+        :unsupported-claims="claimSlots(false)"
+      />
+      <WorkspaceDecisionTab
+        v-else-if="currentTab === 'decision'"
+        :primary-decision="primaryDecision"
+        :vote-policy="details.session.vote_policy"
+        :mode="details.session.mode"
+        :votes="details.artifacts.votes"
+        :proposals="details.artifacts.proposals"
+        :has-decision-objects="hasDecisionObjects"
+        :decision-objects="decisionObjects"
+        @resolve-object="handleResolveObject"
+        @dismiss-object="handleDismissObject"
+      />
+      <WorkspaceFollowUpTab
+        v-else-if="currentTab === 'followup'"
+        :suggestions="followupSuggestions"
+        :loading="followupsLoading"
+        :turns="followupTurns"
+        :objects="decisionObjects"
+        :re-delib-running="reDelibRunning"
+        :re-delib-result="reDelibResult"
+        :re-delib-error="reDelibError"
+        @regenerate="handleRegenerateFollowups"
+        @start-followup="handleStartFollowup"
+        @re-deliberate="handleReDeliberate"
+        @clear-re-delib-error="reDelibError = ''"
+      />
+      <WorkspaceAuditTab
+        v-else-if="currentTab === 'audit'"
+        :failed-runs="failedRunSlots"
+        :seat-runs="details.artifacts.seat_runs"
+        :seat-stats="auditSeatStats"
+        :has-token-usage="hasTokenUsage"
+        :show-trajectory="showTrajectory"
+        :timeline-events="auditTimelineSlots"
+        :trajectory-events="trajectorySlotList"
+        :scribe-report="auditScribeReport"
+        @load-trajectory="loadTrajectory"
+      />
     </div>
     </template>
 
@@ -470,24 +220,15 @@ import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { Ban, ChevronDown, ChevronUp, Copy, Download, FileText, Pause, Pen, Play, RefreshCw, RotateCw, Share2 } from '@lucide/vue'
 import { api } from '../api'
-import ApiErrorState from '../components/ApiErrorState.vue'
-import CritiqueGraph from '../components/CritiqueGraph.vue'
-import DecisionDigest from '../components/DecisionDigest.vue'
-import DecisionSummary from '../components/DecisionSummary.vue'
-import EvidenceSummary from '../components/EvidenceSummary.vue'
-import ShareExportPanel from '../components/ShareExportPanel.vue'
-import IdeaCard from '../components/IdeaCard.vue'
-import DecisionObjectsPanel from '../components/DecisionObjectsPanel.vue'
-import FollowUpCards from '../components/FollowUpCards.vue'
-import FollowUpTimeline from '../components/FollowUpTimeline.vue'
-import PhaseProgressBar from '../components/PhaseProgressBar.vue'
-import ProposalCompare from '../components/ProposalCompare.vue'
-import ReDeliberationBox from '../components/ReDeliberationBox.vue'
-
 import ReportView from '../components/ReportView.vue'
-import SeatRoleCard from '../components/SeatRoleCard.vue'
-import VoteChanges from '../components/VoteChanges.vue'
-import VoteDisplay from '../components/VoteDisplay.vue'
+import ShareExportPanel from '../components/ShareExportPanel.vue'
+import WorkspaceTabs from '../components/workspace/WorkspaceTabs.vue'
+import WorkspaceOverviewTab from '../components/workspace/WorkspaceOverviewTab.vue'
+import WorkspaceProcessTab from '../components/workspace/WorkspaceProcessTab.vue'
+import WorkspaceEvidenceTab from '../components/workspace/WorkspaceEvidenceTab.vue'
+import WorkspaceDecisionTab from '../components/workspace/WorkspaceDecisionTab.vue'
+import WorkspaceFollowUpTab from '../components/workspace/WorkspaceFollowUpTab.vue'
+import WorkspaceAuditTab from '../components/workspace/WorkspaceAuditTab.vue'
 import { hasStoredViewMode, useViewMode } from '../composables/useViewMode'
 import { useConfirm } from '../composables/useConfirm'
 import { cleanReportText, decisionDigest, evidenceSafetyLabels, evidenceSourceKindLabels, evidenceSummary, evidenceTrustLabels, exportSessionMarkdown, followUpImpactLabels, followUpKindLabels, ideaStatusLabels, evidenceKindLabels, modeLabels, phaseLabels, qualityMetricRows, renderReportText, revisionDiffs, seatLabels, seatRunStats, toolNameLabel, toolRunSummary, voteStrategyLabels, type DecisionObject, type FollowUpSuggestion, type FollowUpTurn, type SeatKind, type SessionDetails } from '../domain/session'
@@ -565,6 +306,7 @@ const recentFailedRuns = computed(() =>
 const hasTokenUsage = computed(() => (details.value?.artifacts.seat_runs ?? []).some((run) => typeof run.total_tokens === 'number'))
 const scribeMode = computed(() => details.value?.session.scribe_enabled ? 'full' : 'light')
 const primaryDecision = computed(() => details.value?.session.result ?? details.value?.artifacts.decision ?? null)
+const selectedProposalId = computed(() => primaryDecision.value?.selected_proposal?.id ?? '')
 const currentEvidenceSummary = computed(() => details.value ? evidenceSummary(details.value) : null)
 
 const donutData = computed(() => evidenceDonutSegments(currentEvidenceSummary.value))
@@ -640,6 +382,114 @@ const unsupportedClaims = computed(() =>
 )
 const toolRuns = computed(() => details.value?.artifacts.tool_runs ?? [])
 const toolRunSummaryData = computed(() => toolRunSummary(toolRuns.value))
+
+// ── Tab state ──
+const currentTab = computed(() => {
+  const tab = route.query.tab
+  const validTabs = ['overview', 'process', 'evidence', 'decision', 'followup', 'audit']
+  return typeof tab === 'string' && validTabs.includes(tab) ? tab : 'overview'
+})
+
+function setTab(tab: string) {
+  router.replace({ query: { ...route.query, tab } })
+}
+
+// ── Tab slot data ──
+const seatSlotList = computed(() => seats.map((seat) => ({
+  seat,
+  runs: details.value!.artifacts.seat_runs,
+  toolRuns: toolRuns.value,
+  providerRef: seatProviderRef(seat),
+  inactive: details.value!.session.mode === 'single_agent' && seat !== 'mouyuan',
+})))
+
+const failedRunSlots = computed(() => recentFailedRuns.value.map((r) => ({
+  id: r.id,
+  seat: r.seat,
+  seatLabel: seatLabels[r.seat],
+  phase: r.phase,
+  phaseLabel: phaseLabels[r.phase],
+  error: r.error ?? undefined,
+})))
+
+const recentFiveEvents = computed(() => {
+  const evs = details.value?.events ?? []
+  return evs.slice(-5).reverse().map((e) => ({
+    id: (e as any).id ?? '',
+    time: (e as any).created_at ? new Date((e as any).created_at).toLocaleString() : '',
+    label: eventLabel(e),
+    badgeClass: eventBadge(e.event_type),
+  }))
+})
+
+const externalEvidenceSlots = computed(() => externalEvidence.value.slice(0, 12).map((ev) => ({
+  id: ev.id,
+  kindLabel: evidenceSourceKindLabels[ev.source_kind ?? 'internal'] ?? ev.source_kind,
+  trustClass: ev.trust_level === 'untrusted_external' ? 'warn' : 'ok',
+  trustLabel: evidenceTrustLabels[ev.trust_level ?? 'internal'] ?? ev.trust_level,
+  contentHtml: renderReportText(ev.content),
+  source: compactSource(ev.source),
+  safetyLabels: evidenceSafetyLabels(ev.safety_flags),
+})))
+
+const toolRunSlots = computed(() => toolRuns.value.map((r) => ({
+  id: r.id,
+  toolName: toolNameLabel(r.tool_name),
+  status: r.status,
+  summary: reportText(r.input_summary),
+  duration: (r.duration_ms / 1000).toFixed(1),
+  evidenceCount: r.evidence_ids?.length ?? 0,
+  error: r.error ?? undefined,
+})))
+
+function claimSlots(supported: boolean) {
+  const claims = supported ? supportedClaims.value : unsupportedClaims.value
+  return claims.map((c) => ({
+    id: c.id,
+    seat: c.proposed_by,
+    seatLabel: seatLabels[c.proposed_by] ?? c.proposed_by,
+    contentHtml: renderReportText(c.content),
+    contextText: reportText(c.context),
+    evidenceDetail: detailEvidence(c.evidence_ids)
+      ?.map((ev) => evidenceKindLabels[ev.kind] + ': ' + reportText(ev.content)).join(' | '),
+  }))
+}
+
+const auditSeatStats = computed(() => seatRunStats(details.value!.artifacts.seat_runs).map((s) => ({
+  seat: s.seat,
+  seatLabel: seatLabels[s.seat] ?? s.seat,
+  calls: s.calls,
+  duration: s.durationMs ? (s.durationMs / 1000).toFixed(1) + ' 秒' : '0 秒',
+  failed: s.failed,
+  repaired: s.repaired,
+  hasUsage: s.hasUsage,
+  tokens: s.hasUsage ? String(s.tokens) : undefined,
+  promptVersions: s.promptVersions,
+})))
+
+const auditTimelineSlots = computed(() => timelineEvents.value.map((e) => ({
+  id: (e as any).id ?? '',
+  time: (e as any).created_at ? new Date((e as any).created_at).toLocaleString() : undefined,
+  label: eventLabel(e),
+  badgeClass: eventBadge(e.event_type),
+})))
+
+const trajectorySlotList = computed(() => trajectoryEvents.value.map((e) => ({
+  id: (e as any).id ?? '',
+  time: (e as any).created_at ? new Date((e as any).created_at).toLocaleString() : undefined,
+  label: (e as any).event_type ?? '',
+})))
+
+const auditScribeReport = computed(() => {
+  const report = details.value?.artifacts.scribe_report
+  if (!report) return null
+  return {
+    consensusHtml: renderReportText(report.consensus_summary),
+    gaps: report.structural_gaps,
+    conflicts: report.unresolved_conflicts,
+    finalHtml: renderReportText(report.final_report),
+  }
+})
 
 // Tick every 3s so lastEventTime refreshes even without new SSE events
 const tick = ref(0)
@@ -882,11 +732,13 @@ async function load() {
   }
 }
 
-async function saveContext() {
+async function saveContext(text?: string) {
   if (!details.value) return
   try {
-    details.value = await api.updateContext(id.value, newContext.value)
+    const ctx = text ?? newContext.value
+    details.value = await api.updateContext(id.value, ctx)
     editingContext.value = false
+    newContext.value = ''
   } catch (err) {
     error.value = err instanceof Error ? err.message : '保存失败'
   }
@@ -1386,70 +1238,8 @@ onBeforeUnmount(() => {
   font-size: 13px;
 }
 
-.side-nav {
-  position: fixed;
-  right: 36px;
-  top: 50%;
-  transform: translateY(-50%);
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  padding: 10px 8px;
-  z-index: 50;
-  background: rgba(248, 250, 248, 0.5);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
-  border: 1px solid rgba(0, 0, 0, 0.06);
-  border-radius: 14px;
-  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.06);
-  width: auto;
-  min-width: 28px;
-  transition: min-width 250ms ease;
-  overflow: hidden;
-}
-.side-nav:hover {
-  min-width: 56px;
-}
-.side-nav a {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 5px 6px;
-  font-size: 11px;
-  color: var(--color-text-muted);
-  text-decoration: none;
-  border-radius: 6px;
-  line-height: 1.2;
-  white-space: nowrap;
-  transition: background 120ms, color 120ms;
-}
-.side-nav a:hover {
-  background: rgba(255, 255, 255, 0.85);
-  color: var(--color-text);
-}
-.nav-dot {
-  flex: 0 0 6px;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--color-text-dim);
-  opacity: 0.4;
-  transition: opacity 150ms, background 150ms;
-}
-.side-nav a:hover .nav-dot {
-  opacity: 0.8;
-  background: var(--color-accent);
-}
 .workspace-main {
   min-width: 0;
-}
-section[id] {
-  scroll-margin-top: 80px;
-}
-@media (max-width: 900px) {
-  .side-nav {
-    display: none;
-  }
 }
 
 @media (prefers-reduced-motion: reduce) {

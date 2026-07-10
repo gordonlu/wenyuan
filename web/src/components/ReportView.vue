@@ -35,7 +35,7 @@
 
     <DecisionSummary v-if="primaryDecision" :decision="primaryDecision" :vote-policy="details.session.vote_policy" :mode="details.session.mode" />
 
-    <ProposalCompare id="report-proposals" :proposals="details.artifacts.proposals" />
+    <ProposalCompare id="report-proposals" :proposals="details.artifacts.proposals" :selected-id="selectedProposalId" />
 
     <div v-if="donutData.length || radarData.length || (scribeMode === 'full' && externalEvidence.length)" class="panel">
       <EvidenceSummary
@@ -171,6 +171,7 @@ const currentDigest = computed(() => {
   return decisionDigest(props.details, evSum)
 })
 const primaryDecision = computed(() => props.details?.session.result ?? props.details?.artifacts.decision ?? null)
+const selectedProposalId = computed(() => primaryDecision.value?.selected_proposal?.id ?? '')
 const hasTokenUsage = computed(() => (props.details?.artifacts.seat_runs ?? []).some((run) => typeof (run as any).total_tokens === 'number'))
 
 const donutData = computed(() => evidenceDonutSegments(currentEvidenceSummary.value))

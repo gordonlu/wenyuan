@@ -1463,3 +1463,35 @@ button:disabled {
     gap: var(--space-xs);
   }
 }
+
+/* ── Workspace tab contents ── */
+.tab-content {
+  position: relative;
+}
+.tab-nav {
+  display: flex;
+  gap: 4px;
+  padding: 8px 0;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  border-bottom: 1px solid var(--color-border-light);
+  margin-bottom: 16px;
+}
+.tab-nav a {
+  padding: 4px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-text-muted);
+  text-decoration: none;
+  border-radius: 4px;
+  white-space: nowrap;
+  transition: color 0.15s, background 0.15s;
+}
+.tab-nav a:hover {
+  color: var(--color-text);
+  background: var(--color-bg-subtle);
+}
+.tab-content section[id],
+.tab-content [id] {
+  scroll-margin-top: 64px;
+}
