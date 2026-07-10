@@ -9,4 +9,5 @@ anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 tokio.workspace = true
+dotenvy.workspace = true
 open = "5"

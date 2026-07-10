@@ -16,7 +16,7 @@
         :stroke-width="strokeWidth"
         :stroke-dasharray="`${s.arcLength} ${circumference}`"
         :stroke-dashoffset="-s.offset"
-        transform="rotate(-90, cx, cy)"
+        :transform="`rotate(-90, ${cx}, ${cy})`"
         class="donut-segment"
         style="transition: stroke-dasharray 0.8s ease"
       />

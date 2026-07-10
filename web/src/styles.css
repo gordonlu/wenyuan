@@ -1470,28 +1470,42 @@ button:disabled {
 }
 .tab-nav {
   display: flex;
-  gap: 4px;
-  padding: 8px 0;
+  gap: 6px;
+  padding: 10px 0;
   overflow-x: auto;
   -webkit-overflow-scrolling: touch;
   border-bottom: 1px solid var(--color-border-light);
-  margin-bottom: 16px;
+  margin-bottom: 20px;
 }
 .tab-nav a {
-  padding: 4px 12px;
+  padding: 5px 14px;
   font-size: 12px;
   font-weight: 600;
   color: var(--color-text-muted);
   text-decoration: none;
-  border-radius: 4px;
+  border-radius: 14px;
   white-space: nowrap;
   transition: color 0.15s, background 0.15s;
+  border: 1px solid transparent;
 }
 .tab-nav a:hover {
   color: var(--color-text);
   background: var(--color-bg-subtle);
+  border-color: var(--color-border-light);
 }
 .tab-content section[id],
 .tab-content [id] {
   scroll-margin-top: 64px;
+}
+
+.digest-row {
+  display: grid !important;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--space-lg);
+  margin-bottom: var(--space-lg);
+}
+@media (max-width: 700px) {
+  .digest-row {
+    grid-template-columns: 1fr;
+  }
 }

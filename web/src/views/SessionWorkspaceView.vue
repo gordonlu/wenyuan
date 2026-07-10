@@ -1112,20 +1112,6 @@ onBeforeUnmount(() => {
   margin-left: auto;
 }
 
-/* ── Digest row ── */
-.digest-row {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 16px;
-  margin-bottom: 16px;
-}
-
-@media (max-width: 860px) {
-  .digest-row {
-    grid-template-columns: 1fr;
-  }
-}
-
 /* ── Status bar ── */
 .status-bar {
   display: flex;

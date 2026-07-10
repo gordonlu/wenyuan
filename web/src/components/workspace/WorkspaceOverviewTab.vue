@@ -69,6 +69,7 @@
       :decision="primaryDecision"
       :vote-policy="votePolicy"
       :mode="mode"
+      style="margin-top: var(--space-lg)"
     />
 
     <section v-if="recentEvents.length" class="panel">

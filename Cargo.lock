@@ -3092,6 +3092,7 @@ name = "wenyuan-app"
 version = "0.1.1"
 dependencies = [
  "anyhow",
+ "dotenvy",
  "open",
  "tokio",
  "tracing",

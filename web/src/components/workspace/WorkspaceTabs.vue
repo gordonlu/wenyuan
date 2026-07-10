@@ -31,42 +31,43 @@ const tabs = [
 <style scoped>
 .workspace-tabs {
   display: flex;
-  gap: 0;
-  border-bottom: 2px solid var(--color-border-light);
+  gap: 2px;
   overflow-x: auto;
   -webkit-overflow-scrolling: touch;
   padding: 0 var(--space-md);
+  background: var(--color-bg);
+  border-bottom: 1px solid var(--color-border);
 }
-
 .workspace-tabs button {
-  padding: 10px 18px;
+  padding: 10px 20px;
   border: none;
-  background: none;
+  background: transparent;
   font-size: 14px;
   font-weight: 600;
   color: var(--color-text-muted);
   cursor: pointer;
   white-space: nowrap;
-  border-bottom: 2px solid transparent;
-  margin-bottom: -2px;
-  transition: color 0.15s ease, border-color 0.15s ease;
+  border-radius: 6px 6px 0 0;
+  transition: color 0.15s ease, background 0.15s ease;
 }
-
 .workspace-tabs button:hover {
   color: var(--color-text);
+  background: var(--color-bg-subtle);
 }
-
 .workspace-tabs button.active {
   color: var(--color-accent);
-  border-bottom-color: var(--color-accent);
+  background: var(--color-surface);
+  box-shadow: 0 -1px 0 var(--color-accent) inset;
 }
-
+.workspace-tabs button.active:hover {
+  background: var(--color-surface);
+}
 @media (max-width: 640px) {
   .workspace-tabs {
     padding: 0 var(--space-sm);
   }
   .workspace-tabs button {
-    padding: 10px 12px;
+    padding: 10px 14px;
     font-size: 13px;
   }
 }
