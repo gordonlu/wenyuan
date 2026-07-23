@@ -1,15 +1,18 @@
 <template>
   <section v-if="details" :class="['page', 'workspace', { 'report-mode': viewMode === 'report' }]">
-    <header class="page-head row-head">
-      <div>
-        <p class="phase-label">{{ phaseLabels[details.session.phase] }}</p>
-        <h1>{{ details.session.title }}</h1>
-        <div class="title-tag-row" style="margin-top: 4px">
-          <span v-if="details.artifacts.topic_type" class="badge flat topic-tag">{{ topicTypeLabel(details.artifacts.topic_type) }}</span>
-          <span class="badge flat">{{ modeLabels[details.session.mode] }}</span>
-          <span v-if="details.session.vote_policy && details.session.mode !== 'single_agent'" class="badge flat" style="margin-left: 6px">
-            {{ voteStrategyLabels[details.session.vote_policy.strategy] }}
-          </span>
+    <header class="page-head row-head edict">
+      <div class="edict-head">
+        <span :class="['seal-stamp', 'edict-seal', sealKind]">{{ sealChar }}</span>
+        <div>
+          <p class="phase-label">{{ phaseLabels[details.session.phase] }}</p>
+          <h1>{{ details.session.title }}</h1>
+          <div class="title-tag-row" style="margin-top: 4px">
+            <span v-if="details.artifacts.topic_type" class="badge flat topic-tag">{{ topicTypeLabel(details.artifacts.topic_type) }}</span>
+            <span class="badge flat">{{ modeLabels[details.session.mode] }}</span>
+            <span v-if="details.session.vote_policy && details.session.mode !== 'single_agent'" class="badge flat" style="margin-left: 6px">
+              {{ voteStrategyLabels[details.session.vote_policy.strategy] }}
+            </span>
+          </div>
         </div>
       </div>
       <div class="actions workspace-actions">
@@ -263,6 +266,21 @@ const reDelibError = ref('')
 const hasDecisionObjects = computed(() => decisionObjects.value.length > 0)
 const hasFollowups = computed(() => followupSuggestions.value.length > 0)
 const hasFollowupTurns = computed(() => followupTurns.value.length > 0)
+
+// 议题卷轴印章状态
+const sealChar = computed(() => {
+  const phase = details.value?.session.phase
+  if (phase === 'completed') return '决'
+  if (phase === 'failed' || phase === 'cancelled') return '废'
+  if (phase === 'draft') return '启'
+  return '议'
+})
+const sealKind = computed(() => {
+  const phase = details.value?.session.phase
+  if (phase === 'completed') return ''
+  if (phase === 'failed' || phase === 'cancelled') return 'ash'
+  return 'jade'
+})
 
 const shareDigest = computed(() => {
   if (!details.value) return null
@@ -1232,6 +1250,50 @@ onBeforeUnmount(() => {
   .status-bar-dot {
     animation: none;
     opacity: 0.7;
+  }
+}
+
+/* ── 议题卷轴头 ── */
+.edict {
+  position: relative;
+  padding-left: 20px;
+}
+
+.edict::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 8px;
+  bottom: 8px;
+  width: 3px;
+  border-radius: 2px;
+  background: linear-gradient(180deg, #c03a2b, rgba(192, 58, 43, 0.08));
+}
+
+.edict-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+  min-width: 0;
+}
+
+.edict-seal {
+  margin-top: 10px;
+}
+
+.edict h1 {
+  font-family: var(--font-display);
+  font-size: 32px;
+  letter-spacing: 1.5px;
+  line-height: 1.3;
+}
+
+@media (max-width: 860px) {
+  .edict {
+    padding-left: 14px;
+  }
+  .edict h1 {
+    font-size: 24px;
   }
 }
 </style>

@@ -1,17 +1,33 @@
 <template>
   <section class="page new-session-page">
     <header class="hero">
-      <p class="hero-kicker">三席 AI 合议工作台 · WENYUAN COUNCIL</p>
-      <h1>把一个难题，交给<span class="hero-accent">三位席官</span>合议</h1>
-      <p class="hero-sub">谋远找新路径，经世看落地，持正守边界 —— 分阶段独立思考、交叉批议、修订策案、投票决策，给你一份经得起推敲的结论。</p>
-      <div class="hero-seats" aria-hidden="true">
-        <span class="hero-seat mouyuan"><i />谋远席 · 找新路径</span>
-        <span class="hero-seat jingshi"><i />经世席 · 看落地</span>
-        <span class="hero-seat chizheng"><i />持正席 · 守边界</span>
+      <div class="hero-side" aria-hidden="true">
+        <span class="v-text hero-side-title">文渊合议</span>
+        <span class="hero-side-rule" />
+        <span class="v-text hero-side-flow">独议 · 批议 · 复议 · 阁议</span>
+      </div>
+      <div class="hero-main">
+        <p class="hero-kicker">三席 AI 合议工作台 · WENYUAN COUNCIL</p>
+        <h1>把一个难题，<br />交给<span class="hero-accent">三位席官</span>合议</h1>
+        <p class="hero-sub">谋远找新路径，经世看落地，持正守边界。三席分阶段独立思考、交叉批议、修订策案、投票决策 —— 给你一份经得起推敲的结论。</p>
+        <div class="hero-medals" aria-hidden="true">
+          <span class="medal mouyuan"><b>谋</b><i>谋远席 · 找新路径</i></span>
+          <span class="medal-link" />
+          <span class="medal jingshi"><b>经</b><i>经世席 · 看落地</i></span>
+          <span class="medal-link" />
+          <span class="medal chizheng"><b>持</b><i>持正席 · 守边界</i></span>
+        </div>
       </div>
     </header>
+    <div class="compose-head">
+      <span class="seal-stamp small">奏</span>
+      <div>
+        <h2>呈递议题</h2>
+        <p>写清待决之事，三席即刻开议</p>
+      </div>
+    </div>
     <section class="template-bar">
-      <span>快速开始：</span>
+      <span>奏折范式：</span>
       <button type="button" v-for="t in templates" :key="t.id" class="template-btn" @click="applyTemplate(t)">
         {{ t.label }}
       </button>
@@ -336,11 +352,14 @@ async function submit() {
 </script>
 
 <style scoped>
-/* ── Hero ── */
+/* ── Hero · 开阁 ── */
 .hero {
   position: relative;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: clamp(24px, 5vw, 72px);
   margin: -6px 0 8px;
-  padding: 30px 0 26px;
+  padding: 44px 0 40px;
   border-bottom: 1px solid var(--color-border-light);
   overflow: hidden;
 }
@@ -350,8 +369,9 @@ async function submit() {
   position: absolute;
   inset: -40px -60px;
   background:
-    radial-gradient(circle at 78% 20%, rgba(47, 191, 212, 0.1), transparent 42%),
-    radial-gradient(circle at 18% 88%, rgba(232, 163, 61, 0.05), transparent 40%);
+    radial-gradient(circle at 78% 20%, rgba(47, 191, 212, 0.12), transparent 42%),
+    radial-gradient(circle at 30% 96%, rgba(232, 163, 61, 0.07), transparent 44%),
+    radial-gradient(circle at 96% 88%, rgba(224, 92, 138, 0.06), transparent 40%);
   pointer-events: none;
 }
 
@@ -359,8 +379,34 @@ async function submit() {
   position: relative;
 }
 
+.hero-side {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  padding: 6px 2px;
+}
+
+.hero-side-title {
+  color: var(--color-text);
+  font-family: var(--font-display);
+  font-size: 21px;
+  font-weight: 700;
+  opacity: 0.9;
+}
+
+.hero-side-rule {
+  width: 1px;
+  align-self: stretch;
+  background: linear-gradient(180deg, transparent, rgba(192, 58, 43, 0.65), transparent);
+}
+
+.hero-side-flow {
+  color: var(--color-text-dim);
+  font-size: 12.5px;
+}
+
 .hero-kicker {
-  margin: 0 0 10px;
+  margin: 0 0 12px;
   color: var(--color-accent-text);
   opacity: 0.85;
   font-family: var(--font-mono);
@@ -372,10 +418,10 @@ async function submit() {
   margin: 0;
   max-width: 720px;
   font-family: var(--font-display);
-  font-size: clamp(30px, 4.2vw, 44px);
+  font-size: clamp(32px, 4.6vw, 50px);
   font-weight: 700;
-  line-height: 1.25;
-  letter-spacing: 1px;
+  line-height: 1.28;
+  letter-spacing: 1.5px;
   color: var(--color-text);
   text-wrap: balance;
 }
@@ -388,50 +434,111 @@ async function submit() {
 }
 
 .hero-sub {
-  margin: 14px 0 0;
-  max-width: 640px;
+  margin: 16px 0 0;
+  max-width: 620px;
   color: var(--color-text-muted);
   font-size: 14.5px;
-  line-height: 1.8;
+  line-height: 1.85;
 }
 
-.hero-seats {
+/* ── 三席圆印 ── */
+.hero-medals {
   display: flex;
-  flex-wrap: wrap;
-  gap: 10px;
-  margin-top: 18px;
+  align-items: center;
+  gap: 14px;
+  margin-top: 30px;
 }
 
-.hero-seat {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 14px;
-  border: 1px solid var(--color-border-light);
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.03);
+.medal {
+  display: grid;
+  justify-items: center;
+  gap: 9px;
+}
+
+.medal b {
+  display: grid;
+  place-items: center;
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+  font-family: var(--font-display);
+  font-size: 27px;
+  font-weight: 700;
+  color: #fff;
+  background:
+    radial-gradient(circle at 32% 26%, rgba(255, 255, 255, 0.32), transparent 46%),
+    linear-gradient(150deg, var(--medal-main), var(--medal-deep));
+  box-shadow:
+    0 0 0 4px color-mix(in srgb, var(--medal-main) 26%, transparent),
+    0 10px 26px color-mix(in srgb, var(--medal-main) 42%, transparent),
+    inset 0 0 0 1.5px rgba(255, 255, 255, 0.4),
+    inset 0 -3px 8px rgba(0, 0, 0, 0.28);
+  text-shadow: 0 1px 6px rgba(0, 0, 0, 0.35);
+  transition: transform 220ms ease, box-shadow 220ms ease;
+}
+
+.medal:hover b {
+  transform: translateY(-3px) scale(1.04);
+  box-shadow:
+    0 0 0 5px color-mix(in srgb, var(--medal-main) 34%, transparent),
+    0 16px 34px color-mix(in srgb, var(--medal-main) 55%, transparent),
+    inset 0 0 0 1.5px rgba(255, 255, 255, 0.5),
+    inset 0 -3px 8px rgba(0, 0, 0, 0.28);
+}
+
+.medal i {
+  font-style: normal;
   color: var(--color-text-muted);
-  font-size: 12.5px;
+  font-size: 12px;
   font-weight: 600;
   letter-spacing: 0.5px;
+  white-space: nowrap;
 }
 
-.hero-seat i {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
+.medal.mouyuan { --medal-main: #19a8c0; --medal-deep: #063f55; }
+.medal.jingshi { --medal-main: #d18a12; --medal-deep: #6f3f00; }
+.medal.chizheng { --medal-main: #c2336e; --medal-deep: #641536; }
+
+.medal-link {
+  width: clamp(18px, 3vw, 44px);
+  height: 1px;
+  margin-bottom: 26px;
+  background: linear-gradient(90deg, rgba(148, 178, 199, 0.05), rgba(148, 178, 199, 0.45), rgba(148, 178, 199, 0.05));
 }
 
-.hero-seat.mouyuan i { background: var(--seat-mouyuan); box-shadow: 0 0 10px var(--seat-mouyuan); }
-.hero-seat.jingshi i { background: var(--seat-jingshi); box-shadow: 0 0 10px var(--seat-jingshi); }
-.hero-seat.chizheng i { background: var(--seat-chizheng); box-shadow: 0 0 10px var(--seat-chizheng); }
+/* ── 呈递议题（奏折头） ── */
+.compose-head {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin: 26px 0 4px;
+  padding: 0 4px;
+}
+
+.compose-head h2 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 21px;
+  font-weight: 700;
+  letter-spacing: 2px;
+  color: var(--color-text);
+}
+
+.compose-head p {
+  margin: 2px 0 0;
+  color: var(--color-text-dim);
+  font-size: 12.5px;
+}
 
 .create-session-panel {
+  position: relative;
   display: grid;
   grid-template-columns: minmax(0, 1fr) 340px;
   gap: 24px;
   align-items: start;
   padding: 24px;
+  border-top: 3px solid transparent;
+  border-image: linear-gradient(90deg, #c03a2b, rgba(192, 58, 43, 0.15) 55%, transparent) 1;
 }
 .create-main,
 .create-side {

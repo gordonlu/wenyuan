@@ -1,8 +1,8 @@
 <template>
   <section class="page">
     <header class="page-head">
-      <p>历史议题</p>
-      <h1>已创建的合议</h1>
+      <p>卷宗 · ARCHIVE OF COUNCILS</p>
+      <h1>历议卷宗</h1>
     </header>
 
     <div class="search-bar">
@@ -37,9 +37,10 @@
       <RouterLink
         v-for="session in filteredSessions"
         :key="session.id"
-        class="list-row"
+        class="list-row archive-row"
         :to="`/sessions/${session.id}`"
       >
+        <span :class="['seal-stamp', 'small', archiveSeal(session).kind]">{{ archiveSeal(session).char }}</span>
         <strong>{{ session.title }}</strong>
         <span class="badge flat">{{ modeLabels[session.mode] }}</span>
         <span :class="['badge', phaseBadge(session.phase)]">
@@ -59,9 +60,10 @@
         <RouterLink
           v-for="session in failedSessions"
           :key="session.id"
-          class="list-row"
+          class="list-row archive-row"
           :to="`/sessions/${session.id}`"
         >
+          <span :class="['seal-stamp', 'small', archiveSeal(session).kind]">{{ archiveSeal(session).char }}</span>
           <strong>{{ session.title }}</strong>
           <span class="badge warn">{{ phaseLabels[session.phase] }}</span>
           <time>{{ new Date(session.created_at).toLocaleString() }}</time>
@@ -90,6 +92,13 @@ function phaseBadge(phase: SessionPhase) {
   if (phase === 'completed') return 'ok'
   if (phase === 'failed' || phase === 'cancelled') return 'warn'
   return ''
+}
+
+function archiveSeal(session: { phase: SessionPhase }) {
+  if (session.phase === 'completed') return { char: '决', kind: '' }
+  if (session.phase === 'failed' || session.phase === 'cancelled') return { char: '废', kind: 'ash' }
+  if (session.phase === 'draft') return { char: '启', kind: 'jade' }
+  return { char: '议', kind: 'jade' }
 }
 
 const filteredSessions = computed(() => {
@@ -122,3 +131,20 @@ const failedSessions = computed(() => {
 
 onMounted(() => store.loadHistory())
 </script>
+
+<style scoped>
+.archive-row {
+  grid-template-columns: auto 1fr auto auto auto auto;
+}
+
+.archive-row strong {
+  font-size: 15.5px;
+  letter-spacing: 0.5px;
+}
+
+@media (max-width: 860px) {
+  .archive-row {
+    grid-template-columns: auto 1fr;
+  }
+}
+</style>

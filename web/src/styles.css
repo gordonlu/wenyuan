@@ -1589,3 +1589,111 @@ button:disabled {
     grid-template-columns: 1fr;
   }
 }
+
+/* ═══════════ 文渊夜阁 · 议事仪式层 ═══════════ */
+
+/* ── 朱砂印章戳（状态印） ── */
+.seal-stamp {
+  display: inline-grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  flex: 0 0 auto;
+  border-radius: 8px;
+  background:
+    linear-gradient(145deg, rgba(255, 255, 255, 0.14), transparent 52%),
+    linear-gradient(160deg, #c03a2b, #96231a);
+  box-shadow:
+    0 6px 16px rgba(192, 58, 43, 0.35),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.18),
+    inset 0 -2px 5px rgba(0, 0, 0, 0.3);
+  color: #fdf3ee;
+  font-family: var(--font-display);
+  font-size: 20px;
+  font-weight: 700;
+  line-height: 1;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
+  transform: rotate(-4deg);
+  user-select: none;
+}
+
+.seal-stamp.jade {
+  background:
+    linear-gradient(145deg, rgba(255, 255, 255, 0.14), transparent 52%),
+    linear-gradient(160deg, #10908f, #0a5f63);
+  box-shadow:
+    0 6px 16px rgba(47, 191, 212, 0.3),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.18),
+    inset 0 -2px 5px rgba(0, 0, 0, 0.3);
+}
+
+.seal-stamp.ash {
+  background:
+    linear-gradient(145deg, rgba(255, 255, 255, 0.1), transparent 52%),
+    linear-gradient(160deg, #55636f, #39434d);
+  box-shadow:
+    0 6px 16px rgba(0, 0, 0, 0.35),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.12),
+    inset 0 -2px 5px rgba(0, 0, 0, 0.3);
+}
+
+.seal-stamp.small {
+  width: 34px;
+  height: 34px;
+  border-radius: 6px;
+  font-size: 16px;
+}
+
+/* ── 竖排中文 ── */
+.v-text {
+  writing-mode: vertical-rl;
+  letter-spacing: 0.42em;
+  text-orientation: upright;
+}
+
+/* ── 席位舞台底光（三席卡片容器） ── */
+.role-card-row .seat-border {
+  filter: drop-shadow(0 22px 30px rgba(0, 0, 0, 0.45));
+  transition: filter 240ms ease, transform 180ms ease-out, box-shadow 180ms ease-out;
+}
+
+.role-card-row .seat-border::after {
+  content: '';
+  position: absolute;
+  left: 10%;
+  right: 10%;
+  bottom: -16px;
+  height: 22px;
+  border-radius: 50%;
+  pointer-events: none;
+  filter: blur(10px);
+  opacity: 0.42;
+  transition: opacity 240ms ease;
+  z-index: -1;
+}
+
+.role-card-row .seat-border.mouyuan::after {
+  background: radial-gradient(ellipse at center, rgba(47, 191, 212, 0.55), transparent 70%);
+}
+
+.role-card-row .seat-border.jingshi::after {
+  background: radial-gradient(ellipse at center, rgba(232, 163, 61, 0.5), transparent 70%);
+}
+
+.role-card-row .seat-border.chizheng::after {
+  background: radial-gradient(ellipse at center, rgba(224, 92, 138, 0.5), transparent 70%);
+}
+
+.role-card-row .seat-border:hover::after {
+  opacity: 0.7;
+}
+
+.role-card-row .seat-border.is-inactive::after {
+  opacity: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .seal-stamp {
+    transform: none;
+  }
+}
