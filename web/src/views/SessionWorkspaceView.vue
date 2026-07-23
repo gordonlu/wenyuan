@@ -1171,9 +1171,9 @@ onBeforeUnmount(() => {
   overflow: hidden;
   max-width: min(46vw, 520px);
   padding: 2px 8px;
-  border: 1px solid rgba(15, 138, 161, 0.22);
+  border: 1px solid rgba(47, 191, 212, 0.24);
   border-radius: 4px;
-  background: rgba(255, 255, 255, 0.58);
+  background: rgba(47, 191, 212, 0.08);
   color: var(--color-text);
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1194,16 +1194,16 @@ onBeforeUnmount(() => {
   font-weight: 600;
 }
 .seat-tag.mouyuan {
-  background: #e2eef9;
-  color: #1a5a8c;
+  background: rgba(47, 191, 212, 0.14);
+  color: #7fd9e8;
 }
 .seat-tag.jingshi {
-  background: #f0e6d3;
-  color: #7a5a2e;
+  background: rgba(232, 163, 61, 0.14);
+  color: #eec27f;
 }
 .seat-tag.chizheng {
-  background: #f5e8e8;
-  color: #8c3a3a;
+  background: rgba(224, 92, 138, 0.15);
+  color: #f0a0c0;
 }
 
 .title-tag-row {
@@ -1214,9 +1214,9 @@ onBeforeUnmount(() => {
 }
 
 .topic-tag {
-  background: #e8f0fe;
-  color: #1a5a8c;
-  border: 1px solid #c6dafc;
+  background: rgba(96, 165, 250, 0.14);
+  color: #93c5fd;
+  border: 1px solid rgba(96, 165, 250, 0.4);
 }
 
 .report-topic-tag {

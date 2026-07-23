@@ -364,16 +364,16 @@ function seatProviderRef(seat: SeatKind) {
   font-weight: 600;
 }
 .seat-tag.mouyuan {
-  background: #e2eef9;
-  color: #1a5a8c;
+  background: rgba(47, 191, 212, 0.14);
+  color: #7fd9e8;
 }
 .seat-tag.jingshi {
-  background: #f0e6d3;
-  color: #7a5a2e;
+  background: rgba(232, 163, 61, 0.14);
+  color: #eec27f;
 }
 .seat-tag.chizheng {
-  background: #f5e8e8;
-  color: #8c3a3a;
+  background: rgba(224, 92, 138, 0.15);
+  color: #f0a0c0;
 }
 
 .report-topic-tag {

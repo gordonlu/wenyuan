@@ -253,21 +253,21 @@ async function copyTemplate(template: PromptTemplate) {
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
   background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.86), transparent 56%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.045), transparent 56%),
     var(--color-surface);
   box-shadow: var(--shadow-md);
 }
 
 .template-card.seat-mouyuan {
-  border-top: 4px solid #0f8aa1;
+  border-top: 4px solid #2fbfd4;
 }
 
 .template-card.seat-jingshi {
-  border-top: 4px solid #c77a00;
+  border-top: 4px solid #e8a33d;
 }
 
 .template-card.seat-chizheng {
-  border-top: 4px solid #b62662;
+  border-top: 4px solid #e05c8a;
 }
 
 .template-main {
@@ -289,8 +289,8 @@ async function copyTemplate(template: PromptTemplate) {
 
 .template-main:hover {
   background:
-    radial-gradient(circle at 20% 0%, rgba(15, 143, 127, 0.1), transparent 32%),
-    rgba(255, 255, 255, 0.5);
+    radial-gradient(circle at 20% 0%, rgba(47, 191, 212, 0.12), transparent 32%),
+    rgba(255, 255, 255, 0.04);
 }
 
 .template-category {
@@ -356,7 +356,7 @@ async function copyTemplate(template: PromptTemplate) {
   padding: 14px;
   border: 1px solid var(--color-border-light);
   border-radius: var(--radius-sm);
-  background: #f7f8f4;
+  background: var(--color-surface-alt);
   color: var(--color-text);
   font-family: var(--font-body);
   font-size: 13px;

@@ -177,8 +177,8 @@ const hasDetail = computed(() => {
   color: var(--color-text);
 }
 .action-block {
-  background: #f8faf5;
-  border: 1px solid #d8e0ce;
+  background: var(--color-surface-alt);
+  border: 1px solid var(--color-border-light);
   border-radius: var(--radius-md);
   padding: var(--space-md);
   margin: var(--space-md) 0;
@@ -194,7 +194,7 @@ const hasDetail = computed(() => {
 }
 .action-list li {
   padding: 6px 10px;
-  background: #fff;
+  background: rgba(255, 255, 255, 0.04);
   border-radius: var(--radius-sm);
   border-left: 6px solid var(--color-accent);
   font-size: 13px;

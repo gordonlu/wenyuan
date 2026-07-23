@@ -145,11 +145,11 @@ function displayRoot(root: string) {
   gap: 12px;
   margin: 4px 0 16px;
   padding: 14px;
-  border: 1px solid rgba(15, 138, 161, 0.18);
+  border: 1px solid rgba(47, 191, 212, 0.2);
   border-radius: var(--radius-md);
   background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.72), transparent 58%),
-    rgba(245, 250, 248, 0.78);
+    linear-gradient(180deg, rgba(255, 255, 255, 0.035), transparent 58%),
+    rgba(13, 19, 25, 0.6);
 }
 
 .code-search-head > div {
@@ -192,7 +192,7 @@ function displayRoot(root: string) {
   padding: 12px;
   border: 1px solid var(--color-border-light);
   border-radius: var(--radius-sm);
-  background: rgba(255, 255, 255, 0.74);
+  background: rgba(255, 255, 255, 0.04);
 }
 
 .code-search-card-head {

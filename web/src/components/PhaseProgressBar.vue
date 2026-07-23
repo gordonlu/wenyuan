@@ -123,14 +123,14 @@ function isDone(phase: SessionPhase) {
 
 .phase-step.active .phase-step-circle {
   background: var(--color-accent);
-  color: #ffffff;
+  color: #04222a;
   box-shadow: 0 0 0 3px var(--color-accent-light);
   animation: step-pulse 1.6s ease-in-out infinite;
 }
 
 .phase-step.done .phase-step-circle {
   background: var(--color-success);
-  color: #ffffff;
+  color: #06251a;
 }
 
 .phase-step-label {

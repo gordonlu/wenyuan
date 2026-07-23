@@ -88,12 +88,12 @@ function cancel() {
 .btn-confirm {
   border: 0;
   background: var(--color-accent);
-  color: #ffffff;
-  box-shadow: 0 1px 3px rgba(15, 138, 161, 0.28);
+  color: #04222a;
+  box-shadow: 0 1px 3px rgba(47, 191, 212, 0.32);
 }
 .btn-confirm:hover {
   background: var(--color-accent-hover);
-  box-shadow: 0 2px 6px rgba(15, 138, 161, 0.34);
+  box-shadow: 0 2px 6px rgba(47, 191, 212, 0.4);
 }
 
 @keyframes overlay-in {

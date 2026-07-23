@@ -361,8 +361,8 @@ function roundRect(ctx: CanvasRenderingContext2D, x: number, y: number, w: numbe
 
 .share-tab.active {
   border-color: var(--color-accent);
-  border-bottom-color: #fff;
-  background: #fff;
+  border-bottom-color: var(--color-surface);
+  background: var(--color-surface);
   color: var(--color-accent-text);
 }
 

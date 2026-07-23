@@ -184,13 +184,13 @@ function formatResult(value: unknown): string {
   gap: 8px;
 }
 .chain-impact.impact-bar-danger {
-  background: #fdf2f2;
+  background: rgba(232, 132, 122, 0.1);
 }
 .chain-impact.impact-bar-warn {
-  background: #fef8f0;
+  background: rgba(217, 168, 63, 0.1);
 }
 .chain-impact.impact-bar-ok {
-  background: #f3faf5;
+  background: rgba(95, 206, 155, 0.1);
 }
 .chain-impact-label {
   font-size: 12px;
