@@ -27,12 +27,12 @@ const props = defineProps<{
 }>()
 
 const steps = [
-  { phase: 'draft' as SessionPhase, label: '待陈策', icon: '1' },
-  { phase: 'independent_deliberation' as SessionPhase, label: '独议', icon: '2' },
-  { phase: 'cross_critique' as SessionPhase, label: '批议', icon: '3' },
-  { phase: 'revision' as SessionPhase, label: '复议', icon: '4' },
-  { phase: 'voting' as SessionPhase, label: '阁议', icon: '5' },
-  { phase: 'convergence' as SessionPhase, label: '合案', icon: '6' },
+  { phase: 'draft' as SessionPhase, label: '待陈策', icon: '壹' },
+  { phase: 'independent_deliberation' as SessionPhase, label: '独议', icon: '贰' },
+  { phase: 'cross_critique' as SessionPhase, label: '批议', icon: '叁' },
+  { phase: 'revision' as SessionPhase, label: '复议', icon: '肆' },
+  { phase: 'voting' as SessionPhase, label: '阁议', icon: '伍' },
+  { phase: 'convergence' as SessionPhase, label: '合案', icon: '陆' },
   { phase: 'completed' as SessionPhase, label: '完成', icon: '✓' },
 ]
 
@@ -110,10 +110,11 @@ function isDone(phase: SessionPhase) {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 24px;
-  height: 24px;
+  width: 26px;
+  height: 26px;
   border-radius: 50%;
-  font-size: 12px;
+  font-family: var(--font-display);
+  font-size: 13px;
   font-weight: 700;
   line-height: 1;
   background: var(--color-surface-alt);
@@ -123,14 +124,14 @@ function isDone(phase: SessionPhase) {
 
 .phase-step.active .phase-step-circle {
   background: var(--color-accent);
-  color: #ffffff;
+  color: #04222a;
   box-shadow: 0 0 0 3px var(--color-accent-light);
   animation: step-pulse 1.6s ease-in-out infinite;
 }
 
 .phase-step.done .phase-step-circle {
   background: var(--color-success);
-  color: #ffffff;
+  color: #06251a;
 }
 
 .phase-step-label {

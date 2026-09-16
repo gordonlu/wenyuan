@@ -47,7 +47,7 @@
           :width="p.w"
           :height="p.h"
           :rx="6"
-          :fill="p.majority ? '#e8f2ee' : 'var(--color-bg-subtle)'"
+          :fill="p.majority ? 'rgba(95, 206, 155, 0.14)' : 'var(--color-bg-subtle)'"
           :stroke="p.majority ? 'var(--color-accent)' : 'var(--color-border-light)'"
           :stroke-width="p.majority ? 2 : 1"
         />
@@ -75,7 +75,7 @@
           <text
             :x="b.x + 10" :y="b.y"
             font-size="9"
-            fill="#a03030"
+            fill="#e8847a"
           >阻断</text>
         </g>
       </svg>
@@ -107,14 +107,14 @@ const props = defineProps<{
 }>()
 
 const seatColors: Record<string, string> = {
-  mouyuan: '#1a6ba0',
-  jingshi: '#9a6a30',
-  chizheng: '#a03040',
+  mouyuan: '#2fbfd4',
+  jingshi: '#e8a33d',
+  chizheng: '#e05c8a',
 }
 const seatBgs: Record<string, string> = {
-  mouyuan: '#e2eef9',
-  jingshi: '#f0e6d3',
-  chizheng: '#f5e8e8',
+  mouyuan: 'rgba(47, 191, 212, 0.16)',
+  jingshi: 'rgba(232, 163, 61, 0.16)',
+  chizheng: 'rgba(224, 92, 138, 0.16)',
 }
 
 // ── Seat choices ──
@@ -181,8 +181,8 @@ const seatNodes = computed(() =>
     label: seatLabels[sw.seat as SeatKind] ?? sw.seat,
     x: seatX,
     y: 50 + i * 70,
-    color: seatColors[sw.seat] ?? '#666',
-    bg: seatBgs[sw.seat] ?? '#f0f0f0',
+    color: seatColors[sw.seat] ?? '#8a99a8',
+    bg: seatBgs[sw.seat] ?? 'rgba(255, 255, 255, 0.06)',
     proposalId: sw.proposalId,
     blocking: sw.blocking,
   })),
@@ -220,7 +220,7 @@ const lines = computed(() => {
     result.push({
       x1: sn.x + 18, y1: sn.y,
       x2: pn.x - pn.w / 2, y2: pn.y,
-      color: seatColors[sn.seat] ?? '#999',
+      color: seatColors[sn.seat] ?? '#8a99a8',
       majority: sn.proposalId === majorityProposal.value,
       blocked: sn.blocking,
     })

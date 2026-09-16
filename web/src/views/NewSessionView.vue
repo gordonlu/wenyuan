@@ -1,11 +1,33 @@
 <template>
   <section class="page new-session-page">
-    <header class="page-head">
-      <p>新建议题</p>
-      <h1>启动一次合议</h1>
+    <header class="hero">
+      <div class="hero-side" aria-hidden="true">
+        <span class="v-text hero-side-title">文渊合议</span>
+        <span class="hero-side-rule" />
+        <span class="v-text hero-side-flow">独议 · 批议 · 复议 · 阁议</span>
+      </div>
+      <div class="hero-main">
+        <p class="hero-kicker">三席 AI 合议工作台 · WENYUAN COUNCIL</p>
+        <h1>把一个难题，<br />交给<span class="hero-accent">三位席官</span>合议</h1>
+        <p class="hero-sub">谋远找新路径，经世看落地，持正守边界。三席分阶段独立思考、交叉批议、修订策案、投票决策 —— 给你一份经得起推敲的结论。</p>
+        <div class="hero-medals" aria-hidden="true">
+          <span class="medal mouyuan"><b>谋</b><i>谋远席 · 找新路径</i></span>
+          <span class="medal-link" />
+          <span class="medal jingshi"><b>经</b><i>经世席 · 看落地</i></span>
+          <span class="medal-link" />
+          <span class="medal chizheng"><b>持</b><i>持正席 · 守边界</i></span>
+        </div>
+      </div>
     </header>
+    <div class="compose-head">
+      <span class="seal-stamp small">奏</span>
+      <div>
+        <h2>呈递议题</h2>
+        <p>写清待决之事，三席即刻开议</p>
+      </div>
+    </div>
     <section class="template-bar">
-      <span>快速开始：</span>
+      <span>奏折范式：</span>
       <button type="button" v-for="t in templates" :key="t.id" class="template-btn" @click="applyTemplate(t)">
         {{ t.label }}
       </button>
@@ -330,12 +352,193 @@ async function submit() {
 </script>
 
 <style scoped>
+/* ── Hero · 开阁 ── */
+.hero {
+  position: relative;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: clamp(24px, 5vw, 72px);
+  margin: -6px 0 8px;
+  padding: 44px 0 40px;
+  border-bottom: 1px solid var(--color-border-light);
+  overflow: hidden;
+}
+
+.hero::before {
+  content: '';
+  position: absolute;
+  inset: -40px -60px;
+  background:
+    radial-gradient(circle at 78% 20%, rgba(47, 191, 212, 0.12), transparent 42%),
+    radial-gradient(circle at 30% 96%, rgba(232, 163, 61, 0.07), transparent 44%),
+    radial-gradient(circle at 96% 88%, rgba(224, 92, 138, 0.06), transparent 40%);
+  pointer-events: none;
+}
+
+.hero > * {
+  position: relative;
+}
+
+.hero-side {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  padding: 6px 2px;
+}
+
+.hero-side-title {
+  color: var(--color-text);
+  font-family: var(--font-display);
+  font-size: 21px;
+  font-weight: 700;
+  opacity: 0.9;
+}
+
+.hero-side-rule {
+  width: 1px;
+  align-self: stretch;
+  background: linear-gradient(180deg, transparent, rgba(192, 58, 43, 0.65), transparent);
+}
+
+.hero-side-flow {
+  color: var(--color-text-dim);
+  font-size: 12.5px;
+}
+
+.hero-kicker {
+  margin: 0 0 12px;
+  color: var(--color-accent-text);
+  opacity: 0.85;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  letter-spacing: 3px;
+}
+
+.hero h1 {
+  margin: 0;
+  max-width: 720px;
+  font-family: var(--font-display);
+  font-size: clamp(32px, 4.6vw, 50px);
+  font-weight: 700;
+  line-height: 1.28;
+  letter-spacing: 1.5px;
+  color: var(--color-text);
+  text-wrap: balance;
+}
+
+.hero-accent {
+  background: linear-gradient(100deg, #5fd6e6 10%, #2fbfd4 45%, #e8a33d 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.hero-sub {
+  margin: 16px 0 0;
+  max-width: 620px;
+  color: var(--color-text-muted);
+  font-size: 14.5px;
+  line-height: 1.85;
+}
+
+/* ── 三席圆印 ── */
+.hero-medals {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-top: 30px;
+}
+
+.medal {
+  display: grid;
+  justify-items: center;
+  gap: 9px;
+}
+
+.medal b {
+  display: grid;
+  place-items: center;
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+  font-family: var(--font-display);
+  font-size: 27px;
+  font-weight: 700;
+  color: #fff;
+  background:
+    radial-gradient(circle at 32% 26%, rgba(255, 255, 255, 0.32), transparent 46%),
+    linear-gradient(150deg, var(--medal-main), var(--medal-deep));
+  box-shadow:
+    0 0 0 4px color-mix(in srgb, var(--medal-main) 26%, transparent),
+    0 10px 26px color-mix(in srgb, var(--medal-main) 42%, transparent),
+    inset 0 0 0 1.5px rgba(255, 255, 255, 0.4),
+    inset 0 -3px 8px rgba(0, 0, 0, 0.28);
+  text-shadow: 0 1px 6px rgba(0, 0, 0, 0.35);
+  transition: transform 220ms ease, box-shadow 220ms ease;
+}
+
+.medal:hover b {
+  transform: translateY(-3px) scale(1.04);
+  box-shadow:
+    0 0 0 5px color-mix(in srgb, var(--medal-main) 34%, transparent),
+    0 16px 34px color-mix(in srgb, var(--medal-main) 55%, transparent),
+    inset 0 0 0 1.5px rgba(255, 255, 255, 0.5),
+    inset 0 -3px 8px rgba(0, 0, 0, 0.28);
+}
+
+.medal i {
+  font-style: normal;
+  color: var(--color-text-muted);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  white-space: nowrap;
+}
+
+.medal.mouyuan { --medal-main: #19a8c0; --medal-deep: #063f55; }
+.medal.jingshi { --medal-main: #d18a12; --medal-deep: #6f3f00; }
+.medal.chizheng { --medal-main: #c2336e; --medal-deep: #641536; }
+
+.medal-link {
+  width: clamp(18px, 3vw, 44px);
+  height: 1px;
+  margin-bottom: 26px;
+  background: linear-gradient(90deg, rgba(148, 178, 199, 0.05), rgba(148, 178, 199, 0.45), rgba(148, 178, 199, 0.05));
+}
+
+/* ── 呈递议题（奏折头） ── */
+.compose-head {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin: 26px 0 4px;
+  padding: 0 4px;
+}
+
+.compose-head h2 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 21px;
+  font-weight: 700;
+  letter-spacing: 2px;
+  color: var(--color-text);
+}
+
+.compose-head p {
+  margin: 2px 0 0;
+  color: var(--color-text-dim);
+  font-size: 12.5px;
+}
+
 .create-session-panel {
+  position: relative;
   display: grid;
   grid-template-columns: minmax(0, 1fr) 340px;
   gap: 24px;
   align-items: start;
   padding: 24px;
+  border-top: 3px solid transparent;
+  border-image: linear-gradient(90deg, #c03a2b, rgba(192, 58, 43, 0.15) 55%, transparent) 1;
 }
 .create-main,
 .create-side {
@@ -364,14 +567,14 @@ async function submit() {
   font-weight: 500;
 }
 .required-mark {
-  color: #d32f2f;
+  color: var(--color-danger);
   font-weight: 700;
 }
 .field-error {
   font-size: 13px;
-  color: #d32f2f;
-  background: #fff5f5;
-  border: 1px solid #fcc;
+  color: var(--color-danger);
+  background: var(--color-danger-light);
+  border: 1px solid rgba(232, 132, 122, 0.4);
   border-radius: var(--radius-sm);
   padding: 5px 10px;
   display: inline-block;
@@ -379,15 +582,15 @@ async function submit() {
 }
 .create-main label:has(.field-error) input,
 .create-main label:has(.field-error) textarea {
-  border-color: #d32f2f;
-  box-shadow: 0 0 0 2px rgba(211, 47, 47, 0.1);
+  border-color: var(--color-danger);
+  box-shadow: 0 0 0 2px rgba(232, 132, 122, 0.14);
 }
 
 .create-main input,
 .create-main textarea {
-  border-color: rgba(15, 138, 161, 0.18);
-  background-color: #ffffff;
-  box-shadow: inset 0 1px 0 rgba(18, 20, 23, 0.02);
+  border-color: rgba(47, 191, 212, 0.2);
+  background-color: rgba(9, 14, 20, 0.7);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
 }
 
 .create-main textarea {
@@ -396,13 +599,13 @@ async function submit() {
 
 .create-main input::placeholder,
 .create-main textarea::placeholder {
-  color: rgba(56, 72, 80, 0.55);
+  color: rgba(157, 172, 187, 0.48);
   line-height: 1.72;
 }
 
 .create-main input:hover,
 .create-main textarea:hover {
-  border-color: rgba(15, 138, 161, 0.34);
+  border-color: rgba(47, 191, 212, 0.42);
 }
 
 .create-side {
@@ -411,73 +614,75 @@ async function submit() {
   display: grid;
   gap: 16px;
   padding: 18px;
-  border: 1px solid rgba(141, 219, 209, 0.22);
+  border: 1px solid rgba(95, 214, 230, 0.22);
   border-radius: var(--radius-md);
   background:
-    radial-gradient(circle at 18% 0%, rgba(15, 138, 161, 0.24), transparent 34%),
-    linear-gradient(145deg, rgba(255, 255, 255, 0.09), transparent 48%),
-    linear-gradient(180deg, #111b24, #0a1118);
-  color: #f8fafc;
+    radial-gradient(circle at 18% 0%, rgba(47, 191, 212, 0.2), transparent 38%),
+    radial-gradient(circle at 100% 100%, rgba(232, 163, 61, 0.07), transparent 42%),
+    linear-gradient(145deg, rgba(255, 255, 255, 0.06), transparent 48%),
+    linear-gradient(180deg, #101a23, #080e14);
+  color: #f4f8fb;
   box-shadow:
-    0 22px 54px rgba(0, 0, 0, 0.24),
-    inset 0 1px 0 rgba(255, 255, 255, 0.12);
+    0 24px 56px rgba(0, 0, 0, 0.5),
+    0 0 32px rgba(47, 191, 212, 0.06),
+    inset 0 1px 0 rgba(255, 255, 255, 0.08);
 }
 .create-side label {
-  color: #f8fafc;
+  color: #f4f8fb;
 }
 .create-side select,
 .create-side input {
-  border-color: rgba(141, 219, 209, 0.24);
-  background-color: rgba(5, 12, 18, 0.78);
-  color: #f8fafc;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  border-color: rgba(95, 214, 230, 0.24);
+  background-color: rgba(4, 9, 14, 0.8);
+  color: #f4f8fb;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
 }
 .create-side select {
   background-image:
-    linear-gradient(90deg, transparent, transparent calc(100% - 38px), rgba(141, 219, 209, 0.09) calc(100% - 38px)),
-    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='18' height='18' viewBox='0 0 24 24' fill='none' stroke='%238ddbd1' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+    linear-gradient(90deg, transparent, transparent calc(100% - 38px), rgba(95, 214, 230, 0.1) calc(100% - 38px)),
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='18' height='18' viewBox='0 0 24 24' fill='none' stroke='%235fd6e6' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
 }
 .create-side select:focus,
 .create-side input:focus {
-  border-color: #8ddbd1;
-  background-color: rgba(5, 12, 18, 0.9);
+  border-color: #5fd6e6;
+  background-color: rgba(4, 9, 14, 0.92);
   box-shadow:
-    0 0 0 3px rgba(15, 138, 161, 0.28),
-    inset 0 1px 0 rgba(255, 255, 255, 0.08);
+    0 0 0 3px rgba(47, 191, 212, 0.26),
+    inset 0 1px 0 rgba(255, 255, 255, 0.07);
 }
 .create-side-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
   padding-bottom: 14px;
-  border-bottom: 1px solid rgba(212, 226, 236, 0.14);
+  border-bottom: 1px solid rgba(148, 178, 199, 0.14);
 }
 .create-side-head span {
-  color: #b7c5cf;
+  color: #9dacbb;
   font-size: 12px;
   font-weight: 700;
 }
 .create-side-head strong {
-  color: #eafffb;
+  color: #d9f4f8;
   font-family: var(--font-display);
   font-size: 24px;
   line-height: 1;
 }
 .vote-policy-config,
 .model-config {
-  border: 1px solid rgba(141, 219, 209, 0.18);
+  border: 1px solid rgba(95, 214, 230, 0.16);
   border-radius: var(--radius-sm);
   padding: 12px;
   background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.06), transparent),
-    rgba(255, 255, 255, 0.035);
+    linear-gradient(180deg, rgba(255, 255, 255, 0.05), transparent),
+    rgba(255, 255, 255, 0.03);
 }
 .vote-policy-config summary,
 .model-config summary {
   cursor: pointer;
   font-weight: 600;
   user-select: none;
-  color: #e8f7f4;
+  color: #d9f4f8;
 }
 .vote-policy-body {
   display: grid;
@@ -488,7 +693,7 @@ async function submit() {
   display: block;
   margin-top: 4px;
   font-size: 12px;
-  color: #8db4b4;
+  color: #7d95a3;
   line-height: 1.4;
 }
 .toggle-row {
@@ -496,17 +701,17 @@ async function submit() {
   flex-direction: row;
   align-items: center;
   gap: 8px;
-  color: #f8fafc;
+  color: #f4f8fb;
 }
 .toggle-row input[type="checkbox"] {
   width: 18px;
   height: 18px;
-  accent-color: #8ddbd1;
+  accent-color: #2fbfd4;
 }
 .scribe-note {
   margin: 0;
   font-size: 12px;
-  color: #8db4b4;
+  color: #7d95a3;
   line-height: 1.4;
 }
 .seat-config {
@@ -517,7 +722,7 @@ async function submit() {
 }
 .seat-config strong {
   min-width: 60px;
-  color: #d8fff7;
+  color: #a5ecf5;
 }
 .seat-config select {
   flex: 1;
@@ -541,20 +746,21 @@ async function submit() {
 
 .template-btn {
   padding: 5px 14px;
-  border: 1px solid var(--color-border);
+  border: 1px solid var(--color-border-light);
   border-radius: 20px;
-  background: var(--color-surface);
+  background: rgba(255, 255, 255, 0.03);
   font-size: 13px;
   font-weight: 600;
-  color: var(--color-text);
+  color: var(--color-text-muted);
   cursor: pointer;
-  transition: border-color 150ms, background 150ms;
+  transition: border-color 150ms, background 150ms, color 150ms, box-shadow 150ms;
 }
 
 .template-btn:hover {
-  border-color: var(--color-accent);
+  border-color: rgba(47, 191, 212, 0.5);
   background: var(--color-accent-light);
   color: var(--color-accent-text);
+  box-shadow: 0 0 16px rgba(47, 191, 212, 0.12);
 }
 
 /* ── Source area ── */
@@ -563,7 +769,7 @@ async function submit() {
   border: 1px solid var(--color-border-light);
   border-radius: var(--radius-sm);
   padding: 12px;
-  background: var(--color-surface-alt);
+  background: rgba(255, 255, 255, 0.02);
 }
 
 .source-area summary {

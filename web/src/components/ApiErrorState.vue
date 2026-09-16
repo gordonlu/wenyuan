@@ -53,6 +53,6 @@ defineEmits<{
 
 .error-action:hover {
   background: var(--color-danger);
-  color: #ffffff;
+  color: #2a0f0c;
 }
 </style>

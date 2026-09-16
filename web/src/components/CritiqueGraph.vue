@@ -130,14 +130,14 @@ const props = defineProps<{
 // ── Seat configs ──
 const seats: SeatKind[] = ['mouyuan', 'jingshi', 'chizheng']
 const seatColors: Record<SeatKind, string> = {
-  mouyuan: '#1a6ba0',
-  jingshi: '#9a6a30',
-  chizheng: '#a03040',
+  mouyuan: '#2fbfd4',
+  jingshi: '#e8a33d',
+  chizheng: '#e05c8a',
 }
 const seatBgs: Record<SeatKind, string> = {
-  mouyuan: '#e2eef9',
-  jingshi: '#f0e6d3',
-  chizheng: '#f5e8e8',
+  mouyuan: 'rgba(47, 191, 212, 0.16)',
+  jingshi: 'rgba(232, 163, 61, 0.16)',
+  chizheng: 'rgba(224, 92, 138, 0.16)',
 }
 
 // ── SVG layout ──
@@ -348,7 +348,7 @@ const ideaProposalLinks = computed(() => {
   font-weight: 600;
   margin-right: 4px;
 }
-.seat-tag.mouyuan { background: #e2eef9; color: #1a5a8c; }
-.seat-tag.jingshi { background: #f0e6d3; color: #7a5a2e; }
-.seat-tag.chizheng { background: #f5e8e8; color: #8c3a3a; }
+.seat-tag.mouyuan { background: rgba(47, 191, 212, 0.14); color: #7fd9e8; }
+.seat-tag.jingshi { background: rgba(232, 163, 61, 0.14); color: #eec27f; }
+.seat-tag.chizheng { background: rgba(224, 92, 138, 0.15); color: #f0a0c0; }
 </style>

@@ -2,6 +2,7 @@
   <div class="shell">
     <aside class="side">
       <RouterLink class="brand" to="/">
+        <span class="brand-seal" aria-hidden="true">文</span>
         <span class="brand-text">
           <strong>文渊阁</strong>
           <small>WENYUAN COUNCIL</small>

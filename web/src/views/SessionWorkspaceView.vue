@@ -1,15 +1,18 @@
 <template>
   <section v-if="details" :class="['page', 'workspace', { 'report-mode': viewMode === 'report' }]">
-    <header class="page-head row-head">
-      <div>
-        <p class="phase-label">{{ phaseLabels[details.session.phase] }}</p>
-        <h1>{{ details.session.title }}</h1>
-        <div class="title-tag-row" style="margin-top: 4px">
-          <span v-if="details.artifacts.topic_type" class="badge flat topic-tag">{{ topicTypeLabel(details.artifacts.topic_type) }}</span>
-          <span class="badge flat">{{ modeLabels[details.session.mode] }}</span>
-          <span v-if="details.session.vote_policy && details.session.mode !== 'single_agent'" class="badge flat" style="margin-left: 6px">
-            {{ voteStrategyLabels[details.session.vote_policy.strategy] }}
-          </span>
+    <header class="page-head row-head edict">
+      <div class="edict-head">
+        <span :class="['seal-stamp', 'edict-seal', sealKind]">{{ sealChar }}</span>
+        <div>
+          <p class="phase-label">{{ phaseLabels[details.session.phase] }}</p>
+          <h1>{{ details.session.title }}</h1>
+          <div class="title-tag-row" style="margin-top: 4px">
+            <span v-if="details.artifacts.topic_type" class="badge flat topic-tag">{{ topicTypeLabel(details.artifacts.topic_type) }}</span>
+            <span class="badge flat">{{ modeLabels[details.session.mode] }}</span>
+            <span v-if="details.session.vote_policy && details.session.mode !== 'single_agent'" class="badge flat" style="margin-left: 6px">
+              {{ voteStrategyLabels[details.session.vote_policy.strategy] }}
+            </span>
+          </div>
         </div>
       </div>
       <div class="actions workspace-actions">
@@ -263,6 +266,21 @@ const reDelibError = ref('')
 const hasDecisionObjects = computed(() => decisionObjects.value.length > 0)
 const hasFollowups = computed(() => followupSuggestions.value.length > 0)
 const hasFollowupTurns = computed(() => followupTurns.value.length > 0)
+
+// 议题卷轴印章状态
+const sealChar = computed(() => {
+  const phase = details.value?.session.phase
+  if (phase === 'completed') return '决'
+  if (phase === 'failed' || phase === 'cancelled') return '废'
+  if (phase === 'draft') return '启'
+  return '议'
+})
+const sealKind = computed(() => {
+  const phase = details.value?.session.phase
+  if (phase === 'completed') return ''
+  if (phase === 'failed' || phase === 'cancelled') return 'ash'
+  return 'jade'
+})
 
 const shareDigest = computed(() => {
   if (!details.value) return null
@@ -1171,9 +1189,9 @@ onBeforeUnmount(() => {
   overflow: hidden;
   max-width: min(46vw, 520px);
   padding: 2px 8px;
-  border: 1px solid rgba(15, 138, 161, 0.22);
+  border: 1px solid rgba(47, 191, 212, 0.24);
   border-radius: 4px;
-  background: rgba(255, 255, 255, 0.58);
+  background: rgba(47, 191, 212, 0.08);
   color: var(--color-text);
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1194,16 +1212,16 @@ onBeforeUnmount(() => {
   font-weight: 600;
 }
 .seat-tag.mouyuan {
-  background: #e2eef9;
-  color: #1a5a8c;
+  background: rgba(47, 191, 212, 0.14);
+  color: #7fd9e8;
 }
 .seat-tag.jingshi {
-  background: #f0e6d3;
-  color: #7a5a2e;
+  background: rgba(232, 163, 61, 0.14);
+  color: #eec27f;
 }
 .seat-tag.chizheng {
-  background: #f5e8e8;
-  color: #8c3a3a;
+  background: rgba(224, 92, 138, 0.15);
+  color: #f0a0c0;
 }
 
 .title-tag-row {
@@ -1214,9 +1232,9 @@ onBeforeUnmount(() => {
 }
 
 .topic-tag {
-  background: #e8f0fe;
-  color: #1a5a8c;
-  border: 1px solid #c6dafc;
+  background: rgba(96, 165, 250, 0.14);
+  color: #93c5fd;
+  border: 1px solid rgba(96, 165, 250, 0.4);
 }
 
 .report-topic-tag {
@@ -1232,6 +1250,50 @@ onBeforeUnmount(() => {
   .status-bar-dot {
     animation: none;
     opacity: 0.7;
+  }
+}
+
+/* ── 议题卷轴头 ── */
+.edict {
+  position: relative;
+  padding-left: 20px;
+}
+
+.edict::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 8px;
+  bottom: 8px;
+  width: 3px;
+  border-radius: 2px;
+  background: linear-gradient(180deg, #c03a2b, rgba(192, 58, 43, 0.08));
+}
+
+.edict-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+  min-width: 0;
+}
+
+.edict-seal {
+  margin-top: 10px;
+}
+
+.edict h1 {
+  font-family: var(--font-display);
+  font-size: 32px;
+  letter-spacing: 1.5px;
+  line-height: 1.3;
+}
+
+@media (max-width: 860px) {
+  .edict {
+    padding-left: 14px;
+  }
+  .edict h1 {
+    font-size: 24px;
   }
 }
 </style>

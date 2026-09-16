@@ -139,7 +139,7 @@ function dimensionContent(p: typeof props.proposals[0]) {
   display: grid;
   grid-template-columns: 80px repeat(var(--col-count), 1fr);
   gap: 1px;
-  background: #d8dfd9;
+  background: var(--color-border-light);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
   overflow: hidden;
@@ -149,13 +149,13 @@ function dimensionContent(p: typeof props.proposals[0]) {
   display: grid;
   grid-template-columns: 80px repeat(var(--col-count), 1fr);
   gap: 1px;
-  background: #d8dfd9;
+  background: var(--color-border-light);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
   overflow: hidden;
 }
 .compare-header {
-  background: #f3f6f2;
+  background: var(--color-surface-alt);
   padding: 10px 12px;
   font-weight: 600;
   font-size: 13px;
@@ -165,11 +165,11 @@ function dimensionContent(p: typeof props.proposals[0]) {
   text-align: center;
 }
 .compare-header.selected {
-  background: #e8f2ee;
-  color: var(--color-accent);
+  background: var(--color-accent-light);
+  color: var(--color-accent-text);
 }
 .compare-label {
-  background: #f3f6f2;
+  background: var(--color-surface-alt);
   padding: 8px 10px;
   font-size: 11px;
   color: var(--color-text-muted);
@@ -177,14 +177,14 @@ function dimensionContent(p: typeof props.proposals[0]) {
   white-space: nowrap;
 }
 .compare-cell {
-  background: #fff;
+  background: var(--color-surface);
   padding: 8px 10px;
   font-size: 13px;
   line-height: 1.5;
   color: var(--color-text);
 }
 .compare-cell.selected {
-  background: #f3faf5;
+  background: rgba(95, 206, 155, 0.1);
 }
 .compare-cell.formatted :deep(p) {
   margin: 0.3em 0;
@@ -220,7 +220,7 @@ function dimensionContent(p: typeof props.proposals[0]) {
 }
 .tab-toggle.active {
   background: var(--color-accent);
-  color: #fff;
+  color: #04222a;
   border-color: var(--color-accent);
 }
 </style>

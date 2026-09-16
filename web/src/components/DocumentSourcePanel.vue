@@ -219,11 +219,11 @@ function makeSourceId() {
   gap: 12px;
   margin: 4px 0 16px;
   padding: 14px;
-  border: 1px solid rgba(15, 138, 161, 0.18);
+  border: 1px solid rgba(47, 191, 212, 0.2);
   border-radius: var(--radius-md);
   background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.72), transparent 58%),
-    rgba(245, 250, 248, 0.78);
+    linear-gradient(180deg, rgba(255, 255, 255, 0.035), transparent 58%),
+    rgba(13, 19, 25, 0.6);
 }
 
 .document-source-head {
@@ -259,9 +259,9 @@ function makeSourceId() {
   min-height: 36px;
   margin: 0;
   padding: 0 12px;
-  border: 1px solid rgba(15, 143, 127, 0.34);
+  border: 1px solid rgba(47, 191, 212, 0.34);
   border-radius: var(--radius-sm);
-  background: #ffffff;
+  background: rgba(47, 191, 212, 0.08);
   color: var(--color-accent-text);
   cursor: pointer;
   font-size: 13px;
@@ -293,7 +293,7 @@ function makeSourceId() {
   padding: 12px;
   border: 1px solid var(--color-border-light);
   border-radius: var(--radius-sm);
-  background: rgba(255, 255, 255, 0.74);
+  background: rgba(255, 255, 255, 0.04);
 }
 
 .document-source-card-head {

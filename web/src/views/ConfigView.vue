@@ -406,7 +406,7 @@ async function savePreferences() {
   display: grid;
   gap: 4px;
   font-size: 13px;
-  color: #475569;
+  color: var(--color-text-muted);
 }
 
 .model-list-area {
@@ -419,7 +419,7 @@ async function savePreferences() {
   justify-content: space-between;
   align-items: center;
   font-size: 13px;
-  color: #334155;
+  color: var(--color-text);
 }
 
 .model-chips {
@@ -430,10 +430,10 @@ async function savePreferences() {
 
 .model-chip {
   padding: 3px 8px;
-  background: rgba(15, 138, 161, 0.12);
-  border: 1px solid rgba(15, 138, 161, 0.2);
+  background: rgba(47, 191, 212, 0.12);
+  border: 1px solid rgba(47, 191, 212, 0.22);
   border-radius: 4px;
-  color: #0f766e;
+  color: var(--color-accent-text);
   font-size: 12px;
   font-family: monospace;
 }
@@ -447,29 +447,29 @@ async function savePreferences() {
 .seat-provider-header {
   font-size: 13px;
   font-weight: 600;
-  color: #334155;
+  color: var(--color-text);
 }
 
 .seat-provider-card {
   display: grid;
   gap: 8px;
   padding: 10px 12px;
-  background: rgba(0, 0, 0, 0.04);
+  background: rgba(255, 255, 255, 0.04);
   border-radius: 6px;
-  border: 1px solid rgba(0, 0, 0, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.08);
 }
 
 .seat-provider-title {
   font-size: 13px;
   font-weight: 600;
-  color: #1e293b;
+  color: var(--color-text);
 }
 
 .seat-provider-card label {
   display: grid;
   gap: 2px;
   font-size: 12px;
-  color: #475569;
+  color: var(--color-text-muted);
 }
 
 .seat-model-grid {
@@ -480,7 +480,7 @@ async function savePreferences() {
 
 .model-list-empty {
   font-size: 13px;
-  color: #64748b;
+  color: var(--color-text-dim);
 }
 
 .seat-model-row {
@@ -489,7 +489,7 @@ async function savePreferences() {
   align-items: center;
   gap: 10px;
   font-size: 13px;
-  color: #c8d0d8;
+  color: var(--color-text-muted);
 }
 
 .api-key-row {
@@ -499,14 +499,14 @@ async function savePreferences() {
 }
 
 .key-status strong {
-  color: #1e293b;
+  color: var(--color-text);
   font-family: monospace;
   margin: 0 6px;
 }
 
 .key-source {
   font-size: 11px;
-  color: #64748b;
+  color: var(--color-text-dim);
   margin-right: 6px;
 }
 
@@ -514,14 +514,14 @@ async function savePreferences() {
   display: grid;
   gap: 8px;
   padding: 10px 12px;
-  background: rgba(15, 138, 161, 0.06);
+  background: rgba(47, 191, 212, 0.07);
   border-radius: 6px;
 }
 
 .search-header {
   font-size: 13px;
   font-weight: 600;
-  color: #334155;
+  color: var(--color-text);
 }
 
 .search-source-badge {
@@ -530,12 +530,12 @@ async function savePreferences() {
   padding: 1px 6px;
   border-radius: 3px;
   margin-left: 6px;
-  background: rgba(15, 138, 161, 0.15);
-  color: #0f766e;
+  background: rgba(47, 191, 212, 0.14);
+  color: var(--color-accent-text);
 }
 .search-source-badge.page-badge {
   background: rgba(182, 38, 98, 0.12);
-  color: #be185d;
+  color: #ff8ab5;
 }
 
 .key-input-wrap {
@@ -551,7 +551,7 @@ async function savePreferences() {
 .danger {
   background: rgba(190, 24, 93, 0.15);
   border: 1px solid rgba(190, 24, 93, 0.4);
-  color: #be185d;
+  color: #ff8ab5;
   padding: 8px 16px;
   border-radius: 6px;
   cursor: pointer;
@@ -570,7 +570,7 @@ async function savePreferences() {
 }
 
 .test-result.ok {
-  background: rgba(15, 138, 161, 0.15);
+  background: rgba(47, 191, 212, 0.14);
   color: #8ddbd1;
 }
 
