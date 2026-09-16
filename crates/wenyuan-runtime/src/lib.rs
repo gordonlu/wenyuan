@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{Mutex, broadcast, oneshot};
-use tracing::info;
+use tracing::{info, warn};
 use uuid::Uuid;
 use rust_embed::RustEmbed;
 use wenyuan_agent::AgentRunner;
@@ -38,6 +38,9 @@ pub struct LocalServerHandle {
     pub token: String,
     pub shutdown_tx: oneshot::Sender<()>,
     pub data_dir: PathBuf,
+    /// MCP collaborative-meeting endpoint, when enabled and successfully bound.
+    pub mcp_addr: Option<SocketAddr>,
+    pub mcp_shutdown_tx: Option<oneshot::Sender<()>>,
 }
 
 /// Configuration for starting the local server.
@@ -61,20 +64,51 @@ impl Default for ServerConfig {
     }
 }
 
+fn mcp_enabled() -> bool {
+    !matches!(
+        std::env::var("WENYUAN_MCP_ENABLED")
+            .unwrap_or_else(|_| "true".into())
+            .trim()
+            .to_ascii_lowercase()
+            .as_str(),
+        "0" | "false" | "off" | "disabled"
+    )
+}
+
 /// Start the local Axum server on `127.0.0.1:0` (random port).
 pub async fn start_local_server(config: ServerConfig) -> anyhow::Result<LocalServerHandle> {
     tokio::fs::create_dir_all(&config.data_dir).await?;
     tokio::fs::create_dir_all(&config.web_dist).await?;
     info!("data directory: {}", config.data_dir.display());
 
-    // Load .env from data directory
+    // Load .env from data directory.
     let env_path = config.data_dir.join(".env");
     if env_path.exists() {
         dotenvy::from_path(&env_path).ok();
         info!("loaded env from {}", env_path.display());
     }
 
-    // Extract embedded web assets (always overwrite)
+    // MCP is deliberately a separate localhost listener so external agents can
+    // connect without sharing the browser session's local write token.
+    let mcp_handle = if mcp_enabled() {
+        let mcp_config = wenyuan_mcp::McpServerConfig::from_env(
+            config.data_dir.join("mcp-meetings.json"),
+        );
+        match wenyuan_mcp::start_mcp_server(mcp_config).await {
+            Ok(handle) => Some(handle),
+            Err(err) => {
+                // Do not make the main app unusable just because the optional
+                // collaboration port is occupied or unavailable.
+                warn!("MCP meeting server unavailable: {err}");
+                None
+            }
+        }
+    } else {
+        info!("MCP meeting server disabled by WENYUAN_MCP_ENABLED");
+        None
+    };
+
+    // Extract embedded web assets (always overwrite).
     tokio::fs::create_dir_all(&config.web_dist).await?;
     extract_web_dist(&config.web_dist);
     info!("web assets extracted");
@@ -109,14 +143,12 @@ pub async fn start_local_server(config: ServerConfig) -> anyhow::Result<LocalSer
     };
 
     let router = app(state);
-
     let addr: SocketAddr = "127.0.0.1:0".parse()?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let actual_addr = listener.local_addr()?;
     info!("Wenyuan server listening on http://{}", actual_addr);
 
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
-
     tokio::spawn(async move {
         axum::serve(listener, router)
             .with_graceful_shutdown(async {
@@ -126,10 +158,17 @@ pub async fn start_local_server(config: ServerConfig) -> anyhow::Result<LocalSer
             .ok();
     });
 
+    let (mcp_addr, mcp_shutdown_tx) = match mcp_handle {
+        Some(handle) => (Some(handle.addr), Some(handle.shutdown_tx)),
+        None => (None, None),
+    };
+
     Ok(LocalServerHandle {
         addr: actual_addr,
         token: local_token,
         shutdown_tx,
         data_dir: config.data_dir,
+        mcp_addr,
+        mcp_shutdown_tx,
     })
 }
