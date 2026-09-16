@@ -12,6 +12,10 @@
           <PlusCircle :size="17" />
           <span>新建议题</span>
         </RouterLink>
+        <RouterLink to="/meetings">
+          <UsersRound :size="17" />
+          <span>Agent 会议室</span>
+        </RouterLink>
         <RouterLink to="/history">
           <History :size="17" />
           <span>历史议题</span>
@@ -41,7 +45,7 @@
 </template>
 
 <script setup lang="ts">
-import { History, Library, PlusCircle, Settings } from '@lucide/vue'
+import { History, Library, PlusCircle, Settings, UsersRound } from '@lucide/vue'
 import ConfirmModal from './components/ConfirmModal.vue'
 
 const version = '0.1.1'
