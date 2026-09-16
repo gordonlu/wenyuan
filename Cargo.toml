@@ -8,6 +8,7 @@ members = [
     "crates/wenyuan-server",
     "crates/wenyuan-app",
     "crates/wenyuan-runtime",
+    "crates/wenyuan-mcp",
 ]
 resolver = "2"
 
@@ -49,3 +50,4 @@ wenyuan-server = { path = "crates/wenyuan-server" }
 wenyuan-store = { path = "crates/wenyuan-store" }
 wenyuan-runtime = { path = "crates/wenyuan-runtime" }
 wenyuan-tools = { path = "crates/wenyuan-tools" }
+wenyuan-mcp = { path = "crates/wenyuan-mcp" }

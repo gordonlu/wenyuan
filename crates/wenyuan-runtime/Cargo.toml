@@ -9,6 +9,7 @@ wenyuan-store.workspace = true
 wenyuan-provider.workspace = true
 wenyuan-agent.workspace = true
 wenyuan-core.workspace = true
+wenyuan-mcp.workspace = true
 axum.workspace = true
 tokio = { workspace = true, features = ["full"] }
 tracing.workspace = true
@@ -18,4 +19,6 @@ uuid.workspace = true
 rust-embed = "8"
 mime_guess = "2"
 directories = "6"
+serde.workspace = true
 serde_json.workspace = true
+reqwest.workspace = true
