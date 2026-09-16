@@ -4,6 +4,7 @@ import SessionWorkspaceView from './views/SessionWorkspaceView.vue'
 import HistoryView from './views/HistoryView.vue'
 import ConfigView from './views/ConfigView.vue'
 import PromptLibraryView from './views/PromptLibraryView.vue'
+import MeetingRoomView from './views/MeetingRoomView.vue'
 
 export default createRouter({
   history: createWebHistory(),
@@ -11,6 +12,7 @@ export default createRouter({
     { path: '/', component: NewSessionView },
     { path: '/sessions/:id', component: SessionWorkspaceView },
     { path: '/history', component: HistoryView },
+    { path: '/meetings/:id?', component: MeetingRoomView },
     { path: '/prompt-library', component: PromptLibraryView },
     { path: '/config', component: ConfigView },
   ],
