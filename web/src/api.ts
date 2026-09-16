@@ -1,3 +1,4 @@
+import type { CreateMeetingInput, CreateMeetingResponse, MeetingDetail, MeetingSummary } from './domain/meeting'
 import type { CodeSearchResponse, ConfigStatus, DecisionObject, EvidenceItem, FollowUpSuggestion, FollowUpTurn, ParseDocumentResponse, ProviderSettings, SessionDetails, SessionRecord, SessionSummary, TestProviderResponse, ToolRun, UserPreferences } from './domain/session'
 
 const base = ''
@@ -134,6 +135,36 @@ export const api = {
     return request<TestProviderResponse>('/api/settings/test-provider', {
       method: 'POST',
       body: JSON.stringify(input),
+    })
+  },
+
+  // ── External-agent meeting room API ──
+
+  listMeetings() {
+    return request<MeetingSummary[]>('/api/meetings')
+  },
+  getMeeting(id: string, ownerToken?: string) {
+    return request<MeetingDetail>(`/api/meetings/${id}`, {
+      method: 'GET',
+      headers: ownerToken ? { 'x-wenyuan-meeting-owner': ownerToken } : {},
+    })
+  },
+  createMeeting(input: CreateMeetingInput) {
+    return request<CreateMeetingResponse>('/api/meetings', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    })
+  },
+  startMeeting(id: string, ownerToken: string) {
+    return request<MeetingDetail>(`/api/meetings/${id}/start`, {
+      method: 'POST',
+      body: JSON.stringify({ owner_token: ownerToken }),
+    })
+  },
+  answerMeetingQuestion(id: string, questionId: string, ownerToken: string, answer: string) {
+    return request<{ ok: boolean; next_active_question?: unknown }>(`/api/meetings/${id}/questions/${questionId}/answer`, {
+      method: 'POST',
+      body: JSON.stringify({ owner_token: ownerToken, answer }),
     })
   },
 
