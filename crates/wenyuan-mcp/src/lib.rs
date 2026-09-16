@@ -53,27 +53,24 @@ struct McpState {
 
 pub async fn start_mcp_server(config: McpServerConfig) -> anyhow::Result<McpServerHandle> {
     let hub = MeetingHub::load(config.state_path).await;
-    let state = McpState { hub };
     let app = Router::new()
         .route("/health", get(health))
         .route("/mcp", post(mcp))
-        .with_state(state);
+        .with_state(McpState { hub });
 
     let listener = tokio::net::TcpListener::bind(config.addr).await?;
     let addr = listener.local_addr()?;
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
-
     tokio::spawn(async move {
-        let result = axum::serve(listener, app)
+        if let Err(err) = axum::serve(listener, app)
             .with_graceful_shutdown(async move {
                 let _ = shutdown_rx.await;
             })
-            .await;
-        if let Err(err) = result {
+            .await
+        {
             warn!("MCP meeting server stopped with error: {err}");
         }
     });
-
     info!("Wenyuan MCP meeting server listening on http://{addr}/mcp");
     Ok(McpServerHandle { addr, shutdown_tx })
 }
@@ -102,41 +99,42 @@ async fn mcp(State(state): State<McpState>, Json(request): Json<JsonRpcRequest>)
         "initialize" => Ok(json!({
             "protocolVersion": MCP_PROTOCOL_VERSION,
             "capabilities": { "tools": { "listChanged": false } },
-            "serverInfo": {
-                "name": "wenyuan-mcp",
-                "version": env!("CARGO_PKG_VERSION")
-            }
+            "serverInfo": { "name": "wenyuan-mcp", "version": env!("CARGO_PKG_VERSION") }
         })),
         "ping" => Ok(json!({})),
         "tools/list" => Ok(json!({ "tools": tool_definitions() })),
         "tools/call" => dispatch_tool_call(&state.hub, &request.params).await,
-        _ => Err(McpError::MethodNotFound(request.method)),
+        method => Err(McpError::MethodNotFound(method.to_string())),
     };
 
     match result {
-        Ok(result) => Json(json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "result": result
-        }))
-        .into_response(),
+        Ok(result) => Json(json!({ "jsonrpc": "2.0", "id": id, "result": result })).into_response(),
         Err(err) => Json(json!({
             "jsonrpc": "2.0",
             "id": id,
-            "error": {
-                "code": err.rpc_code(),
-                "message": err.to_string()
-            }
+            "error": { "code": err.rpc_code(), "message": err.to_string() }
         }))
         .into_response(),
     }
+}
+
+fn participant_auth_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["meeting_id", "participant_id", "resume_token"],
+        "properties": {
+            "meeting_id": { "type": "string" },
+            "participant_id": { "type": "string" },
+            "resume_token": { "type": "string" }
+        }
+    })
 }
 
 fn tool_definitions() -> Vec<Value> {
     vec![
         json!({
             "name": "wenyuan_create_meeting",
-            "description": "Create a 2-3 agent collaborative meeting around one user goal. No participant is assigned a fixed viewpoint.",
+            "description": "Create a shared 2-3 agent meeting around one user goal. Participants are peers; no fixed viewpoint is assigned.",
             "inputSchema": {
                 "type": "object",
                 "required": ["title", "goal", "participant_limit"],
@@ -152,8 +150,20 @@ fn tool_definitions() -> Vec<Value> {
             }
         }),
         json!({
+            "name": "wenyuan_start_meeting",
+            "description": "Host-only: start a 3-seat room early with the 2 agents already joined. At least two participants are required.",
+            "inputSchema": {
+                "type": "object",
+                "required": ["meeting_id", "owner_token"],
+                "properties": {
+                    "meeting_id": { "type": "string" },
+                    "owner_token": { "type": "string" }
+                }
+            }
+        }),
+        json!({
             "name": "wenyuan_join_meeting",
-            "description": "Join or resume a meeting participant. Use resume_token to recover after disconnect without creating a duplicate participant.",
+            "description": "Join or resume a meeting participant. Reuse resume_token after disconnect so the same agent is not duplicated.",
             "inputSchema": {
                 "type": "object",
                 "required": ["meeting_id", "join_code", "display_name"],
@@ -168,12 +178,12 @@ fn tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "wenyuan_next_task",
-            "description": "Get the participant's current task. Repeated calls are idempotent and return the same claimed turn until it is submitted.",
+            "description": "Get this participant's current meeting task. Repeated calls are idempotent until the turn is submitted.",
             "inputSchema": participant_auth_schema()
         }),
         json!({
             "name": "wenyuan_submit_turn",
-            "description": "Submit one assigned meeting turn. Duplicate submission of the same turn is accepted idempotently.",
+            "description": "Submit one assigned turn. Re-submitting an already submitted turn is idempotent.",
             "inputSchema": {
                 "type": "object",
                 "required": ["meeting_id", "participant_id", "resume_token", "turn_id", "response"],
@@ -188,7 +198,7 @@ fn tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "wenyuan_ask_user",
-            "description": "Request essential missing user information. Similar questions are merged; only one distinct user question is active at a time and later questions are queued.",
+            "description": "Ask only for essential missing information. Equivalent questions are merged and only one distinct question is active at a time.",
             "inputSchema": {
                 "type": "object",
                 "required": ["meeting_id", "participant_id", "resume_token", "question", "reason"],
@@ -204,7 +214,7 @@ fn tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "wenyuan_answer_user",
-            "description": "Host-only: answer the currently active user question. Requires the meeting owner token returned by create_meeting.",
+            "description": "Host-only: answer the current user question once. The answer is shared with all participants and is not asked again.",
             "inputSchema": {
                 "type": "object",
                 "required": ["meeting_id", "owner_token", "question_id", "answer"],
@@ -218,12 +228,12 @@ fn tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "wenyuan_heartbeat",
-            "description": "Refresh participant liveness. Agents waiting on peers should heartbeat periodically.",
+            "description": "Refresh participant liveness while waiting for peers or user input.",
             "inputSchema": participant_auth_schema()
         }),
         json!({
             "name": "wenyuan_meeting_status",
-            "description": "Get meeting stage, participant liveness, active question, and progress without exposing participant secrets.",
+            "description": "Read meeting stage, participant liveness, active user question and progress without exposing participant secrets.",
             "inputSchema": {
                 "type": "object",
                 "required": ["meeting_id"],
@@ -231,18 +241,6 @@ fn tool_definitions() -> Vec<Value> {
             }
         }),
     ]
-}
-
-fn participant_auth_schema() -> Value {
-    json!({
-        "type": "object",
-        "required": ["meeting_id", "participant_id", "resume_token"],
-        "properties": {
-            "meeting_id": { "type": "string" },
-            "participant_id": { "type": "string" },
-            "resume_token": { "type": "string" }
-        }
-    })
 }
 
 async fn dispatch_tool_call(hub: &MeetingHub, params: &Value) -> Result<Value, McpError> {
@@ -253,34 +251,14 @@ async fn dispatch_tool_call(hub: &MeetingHub, params: &Value) -> Result<Value, M
     let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
 
     let result: Result<Value, HubError> = match name {
-        "wenyuan_create_meeting" => {
-            let req: CreateMeetingRequest = from_args(args)?;
-            hub.create_meeting(req).await
-        }
-        "wenyuan_join_meeting" => {
-            let req: JoinMeetingRequest = from_args(args)?;
-            hub.join_meeting(req).await
-        }
-        "wenyuan_next_task" => {
-            let req: ParticipantAuth = from_args(args)?;
-            hub.next_task(req).await
-        }
-        "wenyuan_submit_turn" => {
-            let req: SubmitTurnRequest = from_args(args)?;
-            hub.submit_turn(req).await
-        }
-        "wenyuan_ask_user" => {
-            let req: AskUserRequest = from_args(args)?;
-            hub.ask_user(req).await
-        }
-        "wenyuan_answer_user" => {
-            let req: AnswerUserRequest = from_args(args)?;
-            hub.answer_user(req).await
-        }
-        "wenyuan_heartbeat" => {
-            let req: ParticipantAuth = from_args(args)?;
-            hub.heartbeat(req).await
-        }
+        "wenyuan_create_meeting" => hub.create_meeting(from_args(args)?).await,
+        "wenyuan_start_meeting" => hub.start_meeting(from_args(args)?).await,
+        "wenyuan_join_meeting" => hub.join_meeting(from_args(args)?).await,
+        "wenyuan_next_task" => hub.next_task(from_args(args)?).await,
+        "wenyuan_submit_turn" => hub.submit_turn(from_args(args)?).await,
+        "wenyuan_ask_user" => hub.ask_user(from_args(args)?).await,
+        "wenyuan_answer_user" => hub.answer_user(from_args(args)?).await,
+        "wenyuan_heartbeat" => hub.heartbeat(from_args(args)?).await,
         "wenyuan_meeting_status" => {
             let req: MeetingStatusRequest = from_args(args)?;
             hub.status(req.meeting_id).await
@@ -288,13 +266,10 @@ async fn dispatch_tool_call(hub: &MeetingHub, params: &Value) -> Result<Value, M
         other => return Err(McpError::UnknownTool(other.to_string())),
     };
 
-    match result {
-        Ok(payload) => Ok(tool_result(payload, false)),
-        Err(err) => Ok(tool_result(
-            json!({ "error": err.to_string(), "kind": err.kind() }),
-            true,
-        )),
-    }
+    Ok(match result {
+        Ok(payload) => tool_result(payload, false),
+        Err(err) => tool_result(json!({ "error": err.to_string(), "kind": err.kind() }), true),
+    })
 }
 
 fn from_args<T: for<'de> Deserialize<'de>>(value: Value) -> Result<T, HubError> {
@@ -303,10 +278,7 @@ fn from_args<T: for<'de> Deserialize<'de>>(value: Value) -> Result<T, HubError> 
 
 fn tool_result(payload: Value, is_error: bool) -> Value {
     json!({
-        "content": [{
-            "type": "text",
-            "text": serde_json::to_string(&payload).unwrap_or_else(|_| "{}".into())
-        }],
+        "content": [{ "type": "text", "text": serde_json::to_string(&payload).unwrap_or_else(|_| "{}".into()) }],
         "structuredContent": payload,
         "isError": is_error
     })
@@ -326,8 +298,7 @@ impl McpError {
     fn rpc_code(&self) -> i32 {
         match self {
             Self::MethodNotFound(_) => -32601,
-            Self::UnknownTool(_) => -32602,
-            Self::InvalidParams(_) => -32602,
+            Self::UnknownTool(_) | Self::InvalidParams(_) => -32602,
         }
     }
 }
@@ -356,6 +327,8 @@ pub enum HubError {
     MeetingStarted,
     #[error("meeting is full")]
     MeetingFull,
+    #[error("at least two participants are required")]
+    NotEnoughParticipants,
     #[error("meeting is paused: {0}")]
     MeetingPaused(String),
     #[error("turn not found")]
@@ -377,6 +350,7 @@ impl HubError {
             Self::InvalidOwnerToken => "invalid_owner_token",
             Self::MeetingStarted => "meeting_started",
             Self::MeetingFull => "meeting_full",
+            Self::NotEnoughParticipants => "not_enough_participants",
             Self::MeetingPaused(_) => "meeting_paused",
             Self::TurnNotFound => "turn_not_found",
             Self::WrongAssignee => "wrong_assignee",
@@ -400,35 +374,23 @@ pub struct MeetingConfig {
     pub offline_grace_secs: u64,
 }
 
-fn default_max_rounds() -> u8 {
-    2
-}
-fn default_heartbeat_timeout() -> u64 {
-    45
-}
-fn default_offline_grace() -> u64 {
-    60
-}
+fn default_max_rounds() -> u8 { 2 }
+fn default_heartbeat_timeout() -> u64 { 45 }
+fn default_offline_grace() -> u64 { 60 }
 
 impl MeetingConfig {
     fn validate(&self) -> Result<(), HubError> {
         if !(2..=3).contains(&self.participant_limit) {
-            return Err(HubError::InvalidInput(
-                "participant_limit must be 2 or 3".into(),
-            ));
+            return Err(HubError::InvalidInput("participant_limit must be 2 or 3".into()));
         }
         if !(1..=2).contains(&self.max_rounds) {
             return Err(HubError::InvalidInput("max_rounds must be 1 or 2".into()));
         }
         if self.title.trim().is_empty() || self.goal.trim().is_empty() {
-            return Err(HubError::InvalidInput(
-                "title and goal must not be empty".into(),
-            ));
+            return Err(HubError::InvalidInput("title and goal must not be empty".into()));
         }
         if self.heartbeat_timeout_secs < 10 || self.offline_grace_secs < 10 {
-            return Err(HubError::InvalidInput(
-                "heartbeat timeout and offline grace must be at least 10 seconds".into(),
-            ));
+            return Err(HubError::InvalidInput("timeouts must be at least 10 seconds".into()));
         }
         Ok(())
     }
@@ -436,22 +398,11 @@ impl MeetingConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum MeetingStage {
-    Lobby,
-    Initial,
-    CrossReview,
-    Synthesis,
-    Completed,
-    Paused,
-}
+pub enum MeetingStage { Lobby, Initial, CrossReview, Synthesis, Completed, Paused }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum ParticipantState {
-    Online,
-    Stale,
-    Left,
-}
+pub enum ParticipantState { Online, Stale, Left }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Participant {
@@ -464,22 +415,13 @@ pub struct Participant {
     resume_token: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Copy)]
 #[serde(rename_all = "snake_case")]
-pub enum TurnStage {
-    Initial,
-    CrossReview,
-    Synthesis,
-}
+pub enum TurnStage { Initial, CrossReview, Synthesis }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum TurnStatus {
-    Pending,
-    Claimed,
-    Submitted,
-    Skipped,
-}
+pub enum TurnStatus { Pending, Claimed, Submitted, Skipped }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MeetingTurn {
@@ -496,11 +438,7 @@ pub struct MeetingTurn {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum QuestionStatus {
-    Open,
-    Deferred,
-    Answered,
-}
+pub enum QuestionStatus { Open, Deferred, Answered }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserQuestion {
@@ -538,10 +476,7 @@ pub struct MeetingHub {
 
 impl MeetingHub {
     pub fn new_ephemeral() -> Self {
-        Self {
-            meetings: Arc::new(RwLock::new(HashMap::new())),
-            state_path: None,
-        }
+        Self { meetings: Arc::new(RwLock::new(HashMap::new())), state_path: None }
     }
 
     pub async fn load(state_path: Option<PathBuf>) -> Self {
@@ -549,27 +484,18 @@ impl MeetingHub {
         if let Some(path) = state_path.as_ref() {
             if let Ok(bytes) = tokio::fs::read(path).await {
                 match serde_json::from_slice::<Vec<Meeting>>(&bytes) {
-                    Ok(restored) => {
-                        meetings.extend(restored.into_iter().map(|meeting| (meeting.id, meeting)));
-                    }
+                    Ok(items) => meetings.extend(items.into_iter().map(|meeting| (meeting.id, meeting))),
                     Err(err) => warn!("failed to restore MCP meetings: {err}"),
                 }
             }
         }
-        Self {
-            meetings: Arc::new(RwLock::new(meetings)),
-            state_path: state_path.map(Arc::new),
-        }
+        Self { meetings: Arc::new(RwLock::new(meetings)), state_path: state_path.map(Arc::new) }
     }
 
     async fn persist(&self) {
-        let Some(path) = self.state_path.as_ref() else {
-            return;
-        };
+        let Some(path) = self.state_path.as_ref() else { return; };
         let snapshot: Vec<Meeting> = self.meetings.read().await.values().cloned().collect();
-        let Ok(bytes) = serde_json::to_vec_pretty(&snapshot) else {
-            return;
-        };
+        let Ok(bytes) = serde_json::to_vec_pretty(&snapshot) else { return; };
         if let Some(parent) = path.parent() {
             if let Err(err) = tokio::fs::create_dir_all(parent).await {
                 warn!("failed to create MCP state directory: {err}");
@@ -588,15 +514,10 @@ impl MeetingHub {
             context: request.context.unwrap_or_default(),
             participant_limit: request.participant_limit,
             max_rounds: request.max_rounds.unwrap_or_else(default_max_rounds),
-            heartbeat_timeout_secs: request
-                .heartbeat_timeout_secs
-                .unwrap_or_else(default_heartbeat_timeout),
-            offline_grace_secs: request
-                .offline_grace_secs
-                .unwrap_or_else(default_offline_grace),
+            heartbeat_timeout_secs: request.heartbeat_timeout_secs.unwrap_or_else(default_heartbeat_timeout),
+            offline_grace_secs: request.offline_grace_secs.unwrap_or_else(default_offline_grace),
         };
         config.validate()?;
-
         let id = Uuid::new_v4();
         let meeting = Meeting {
             id,
@@ -604,87 +525,88 @@ impl MeetingHub {
             stage: MeetingStage::Lobby,
             join_code: short_secret(),
             owner_token: Uuid::new_v4().to_string(),
-            participants: Vec::new(),
-            turns: Vec::new(),
-            questions: Vec::new(),
+            participants: vec![],
+            turns: vec![],
+            questions: vec![],
             created_at: Utc::now(),
             updated_at: Utc::now(),
             paused_reason: None,
         };
-        let join_code = meeting.join_code.clone();
-        let owner_token = meeting.owner_token.clone();
-        let participant_limit = meeting.config.participant_limit;
+        let result = json!({
+            "meeting_id": id,
+            "join_code": meeting.join_code,
+            "owner_token": meeting.owner_token,
+            "participant_limit": meeting.config.participant_limit,
+            "stage": "lobby",
+            "policy": {
+                "roles": "peer agents share the same goal; no forced viewpoint",
+                "cross_review": "only substantive disagreement or omissions; do not repeat consensus",
+                "questions": "essential questions only; deduplicated and serialized",
+                "offline": "3-agent meetings may degrade to 2 after grace; 2-agent meetings pause rather than degrade to 1"
+            }
+        });
         self.meetings.write().await.insert(id, meeting);
         self.persist().await;
+        Ok(result)
+    }
 
-        Ok(json!({
-            "meeting_id": id,
-            "join_code": join_code,
-            "owner_token": owner_token,
-            "participant_limit": participant_limit,
-            "stage": "lobby",
-            "interaction_policy": {
-                "initial": "all participants answer the same user goal independently",
-                "cross_review": "react only to material disagreements or omissions; do not repeat agreed points",
-                "synthesis": "one temporary synthesizer combines the best implementation and preserves unresolved dissent",
-                "questions": "only essential missing information; similar questions are deduplicated and only one is active at a time",
-                "offline": "3-agent meetings may degrade to 2 after grace; 2-agent meetings pause if one agent is lost"
-            }
-        }))
+    pub async fn start_meeting(&self, request: StartMeetingRequest) -> Result<Value, HubError> {
+        let meeting_id = parse_uuid(&request.meeting_id, "meeting_id")?;
+        let mut meetings = self.meetings.write().await;
+        let meeting = meetings.get_mut(&meeting_id).ok_or(HubError::MeetingNotFound)?;
+        if meeting.owner_token != request.owner_token { return Err(HubError::InvalidOwnerToken); }
+        if meeting.stage != MeetingStage::Lobby { return Err(HubError::MeetingStarted); }
+        if meeting.participants.len() < 2 { return Err(HubError::NotEnoughParticipants); }
+        start_initial_round(meeting);
+        let result = meeting_snapshot(meeting);
+        drop(meetings);
+        self.persist().await;
+        Ok(result)
     }
 
     pub async fn join_meeting(&self, request: JoinMeetingRequest) -> Result<Value, HubError> {
         let meeting_id = parse_uuid(&request.meeting_id, "meeting_id")?;
         let mut meetings = self.meetings.write().await;
-        let meeting = meetings
-            .get_mut(&meeting_id)
-            .ok_or(HubError::MeetingNotFound)?;
-        if request.join_code != meeting.join_code {
-            return Err(HubError::InvalidJoinCode);
-        }
+        let meeting = meetings.get_mut(&meeting_id).ok_or(HubError::MeetingNotFound)?;
+        if request.join_code != meeting.join_code { return Err(HubError::InvalidJoinCode); }
 
         if let Some(token) = request.resume_token.as_deref() {
-            if let Some(participant) = meeting
-                .participants
-                .iter_mut()
-                .find(|participant| participant.resume_token == token)
+            let Some(index) = meeting.participants.iter().position(|p| p.resume_token == token) else {
+                return Err(HubError::InvalidParticipantToken);
+            };
             {
+                let participant = &mut meeting.participants[index];
                 participant.last_seen = Utc::now();
                 participant.state = ParticipantState::Online;
                 if !request.display_name.trim().is_empty() {
                     participant.display_name = request.display_name.trim().to_string();
                 }
-                meeting.updated_at = Utc::now();
-                let payload = join_payload(meeting, participant);
-                drop(meetings);
-                self.persist().await;
-                return Ok(payload);
             }
-            return Err(HubError::InvalidParticipantToken);
+            meeting.updated_at = Utc::now();
+            if meeting.stage == MeetingStage::Paused && online_count(meeting) >= 2 {
+                meeting.paused_reason = None;
+                meeting.stage = infer_stage_from_turns(meeting);
+            }
+            let participant = meeting.participants[index].clone();
+            let result = join_payload(meeting, &participant);
+            drop(meetings);
+            self.persist().await;
+            return Ok(result);
         }
 
-        if meeting.stage != MeetingStage::Lobby {
-            return Err(HubError::MeetingStarted);
-        }
+        if meeting.stage != MeetingStage::Lobby { return Err(HubError::MeetingStarted); }
         if meeting.participants.len() >= usize::from(meeting.config.participant_limit) {
             return Err(HubError::MeetingFull);
         }
-        if request.display_name.trim().is_empty() {
-            return Err(HubError::InvalidInput("display_name must not be empty".into()));
-        }
-        if meeting
-            .participants
-            .iter()
-            .any(|p| p.display_name.eq_ignore_ascii_case(request.display_name.trim()))
-        {
-            return Err(HubError::InvalidInput(
-                "display_name already exists; use resume_token to reconnect".into(),
-            ));
+        let display_name = request.display_name.trim();
+        if display_name.is_empty() { return Err(HubError::InvalidInput("display_name must not be empty".into())); }
+        if meeting.participants.iter().any(|p| p.display_name.eq_ignore_ascii_case(display_name)) {
+            return Err(HubError::InvalidInput("display_name already exists; reconnect with resume_token".into()));
         }
 
         let participant = Participant {
             id: Uuid::new_v4(),
-            display_name: request.display_name.trim().to_string(),
+            display_name: display_name.to_string(),
             client_name: request.client_name.unwrap_or_default(),
             joined_at: Utc::now(),
             last_seen: Utc::now(),
@@ -696,60 +618,54 @@ impl MeetingHub {
         if meeting.participants.len() == usize::from(meeting.config.participant_limit) {
             start_initial_round(meeting);
         }
-        let payload = join_payload(meeting, &participant);
+        let result = join_payload(meeting, &participant);
         drop(meetings);
         self.persist().await;
-        Ok(payload)
+        Ok(result)
     }
 
     pub async fn next_task(&self, auth: ParticipantAuth) -> Result<Value, HubError> {
         let meeting_id = parse_uuid(&auth.meeting_id, "meeting_id")?;
         let participant_id = parse_uuid(&auth.participant_id, "participant_id")?;
         let mut meetings = self.meetings.write().await;
-        let meeting = meetings
-            .get_mut(&meeting_id)
-            .ok_or(HubError::MeetingNotFound)?;
+        let meeting = meetings.get_mut(&meeting_id).ok_or(HubError::MeetingNotFound)?;
         touch_participant(meeting, participant_id, &auth.resume_token)?;
         refresh_offline_and_progress(meeting);
 
         if let Some(question) = active_question(meeting) {
-            let result = json!({
-                "status": "waiting_for_user",
-                "question": public_question(question),
-                "stage": meeting.stage
-            });
+            let result = json!({ "status": "waiting_for_user", "question": public_question(question), "stage": meeting.stage });
             drop(meetings);
             self.persist().await;
             return Ok(result);
         }
         if meeting.stage == MeetingStage::Paused {
-            let reason = meeting
-                .paused_reason
-                .clone()
-                .unwrap_or_else(|| "meeting paused".into());
+            let reason = meeting.paused_reason.clone().unwrap_or_else(|| "meeting paused".into());
             drop(meetings);
             self.persist().await;
             return Err(HubError::MeetingPaused(reason));
         }
         if meeting.stage == MeetingStage::Completed {
-            let result = json!({
-                "status": "completed",
-                "stage": meeting.stage,
-                "final": final_response(meeting)
-            });
+            let result = json!({ "status": "completed", "stage": meeting.stage, "final": final_response(meeting) });
+            drop(meetings);
+            self.persist().await;
+            return Ok(result);
+        }
+        if meeting.stage == MeetingStage::Lobby {
+            let result = json!({ "status": "waiting_for_peers", "stage": meeting.stage, "progress": progress_summary(meeting) });
             drop(meetings);
             self.persist().await;
             return Ok(result);
         }
 
-        if let Some(turn) = meeting.turns.iter_mut().find(|turn| {
-            turn.assignee == participant_id
-                && matches!(turn.status, TurnStatus::Pending | TurnStatus::Claimed)
+        if let Some(index) = meeting.turns.iter().position(|turn| {
+            turn.assignee == participant_id && matches!(turn.status, TurnStatus::Pending | TurnStatus::Claimed)
         }) {
-            if turn.status == TurnStatus::Pending {
-                turn.status = TurnStatus::Claimed;
-                turn.updated_at = Utc::now();
+            if meeting.turns[index].status == TurnStatus::Pending {
+                meeting.turns[index].status = TurnStatus::Claimed;
+                meeting.turns[index].updated_at = Utc::now();
             }
+            let turn = meeting.turns[index].clone();
+            let answers = answered_questions(meeting);
             let result = json!({
                 "status": "task",
                 "meeting_id": meeting.id,
@@ -757,19 +673,15 @@ impl MeetingHub {
                 "turn_id": turn.id,
                 "turn_stage": turn.stage,
                 "payload": turn.payload,
-                "user_answers": answered_questions(meeting),
-                "instruction": task_instruction(&turn.stage)
+                "user_answers": answers,
+                "instruction": task_instruction(turn.stage)
             });
             drop(meetings);
             self.persist().await;
             return Ok(result);
         }
 
-        let result = json!({
-            "status": "waiting_for_peers",
-            "stage": meeting.stage,
-            "progress": progress_summary(meeting)
-        });
+        let result = json!({ "status": "waiting_for_peers", "stage": meeting.stage, "progress": progress_summary(meeting) });
         drop(meetings);
         self.persist().await;
         Ok(result)
@@ -779,46 +691,24 @@ impl MeetingHub {
         let meeting_id = parse_uuid(&request.meeting_id, "meeting_id")?;
         let participant_id = parse_uuid(&request.participant_id, "participant_id")?;
         let turn_id = parse_uuid(&request.turn_id, "turn_id")?;
-        if request.response.trim().is_empty() {
-            return Err(HubError::InvalidInput("response must not be empty".into()));
-        }
-
+        if request.response.trim().is_empty() { return Err(HubError::InvalidInput("response must not be empty".into())); }
         let mut meetings = self.meetings.write().await;
-        let meeting = meetings
-            .get_mut(&meeting_id)
-            .ok_or(HubError::MeetingNotFound)?;
+        let meeting = meetings.get_mut(&meeting_id).ok_or(HubError::MeetingNotFound)?;
         touch_participant(meeting, participant_id, &request.resume_token)?;
-        let turn = meeting
-            .turns
-            .iter_mut()
-            .find(|turn| turn.id == turn_id)
-            .ok_or(HubError::TurnNotFound)?;
-        if turn.assignee != participant_id {
-            return Err(HubError::WrongAssignee);
-        }
-        if turn.status == TurnStatus::Submitted {
-            let result = json!({
-                "ok": true,
-                "idempotent": true,
-                "turn_id": turn.id,
-                "stage": meeting.stage
-            });
+        let Some(index) = meeting.turns.iter().position(|turn| turn.id == turn_id) else { return Err(HubError::TurnNotFound); };
+        if meeting.turns[index].assignee != participant_id { return Err(HubError::WrongAssignee); }
+        if meeting.turns[index].status == TurnStatus::Submitted {
+            let result = json!({ "ok": true, "idempotent": true, "turn_id": turn_id, "stage": meeting.stage });
             drop(meetings);
             self.persist().await;
             return Ok(result);
         }
-        turn.response = Some(request.response.trim().to_string());
-        turn.status = TurnStatus::Submitted;
-        turn.updated_at = Utc::now();
+        meeting.turns[index].response = Some(request.response.trim().to_string());
+        meeting.turns[index].status = TurnStatus::Submitted;
+        meeting.turns[index].updated_at = Utc::now();
         meeting.updated_at = Utc::now();
         refresh_offline_and_progress(meeting);
-        let result = json!({
-            "ok": true,
-            "idempotent": false,
-            "turn_id": turn_id,
-            "stage": meeting.stage,
-            "progress": progress_summary(meeting)
-        });
+        let result = json!({ "ok": true, "idempotent": false, "turn_id": turn_id, "stage": meeting.stage, "progress": progress_summary(meeting) });
         drop(meetings);
         self.persist().await;
         Ok(result)
@@ -828,97 +718,67 @@ impl MeetingHub {
         let meeting_id = parse_uuid(&request.meeting_id, "meeting_id")?;
         let participant_id = parse_uuid(&request.participant_id, "participant_id")?;
         if request.question.trim().is_empty() || request.reason.trim().is_empty() {
-            return Err(HubError::InvalidInput(
-                "question and reason must not be empty".into(),
-            ));
+            return Err(HubError::InvalidInput("question and reason must not be empty".into()));
         }
         let normalized = normalize_question(&request.question);
         let missing_key = request.missing_key.unwrap_or_default().trim().to_string();
-
         let mut meetings = self.meetings.write().await;
-        let meeting = meetings
-            .get_mut(&meeting_id)
-            .ok_or(HubError::MeetingNotFound)?;
+        let meeting = meetings.get_mut(&meeting_id).ok_or(HubError::MeetingNotFound)?;
         touch_participant(meeting, participant_id, &request.resume_token)?;
 
-        if let Some(existing) = meeting.questions.iter_mut().find(|question| {
+        if let Some(index) = meeting.questions.iter().position(|question| {
             matches!(question.status, QuestionStatus::Open | QuestionStatus::Deferred)
                 && questions_match(question, &normalized, &missing_key)
         }) {
-            if !existing.asked_by.contains(&participant_id) {
-                existing.asked_by.push(participant_id);
+            if !meeting.questions[index].asked_by.contains(&participant_id) {
+                meeting.questions[index].asked_by.push(participant_id);
             }
+            let existing = meeting.questions[index].clone();
+            let active = active_question(meeting).map(public_question);
             let result = json!({
                 "deduplicated": true,
                 "queued": existing.status == QuestionStatus::Deferred,
-                "question": public_question(existing),
-                "active_question": active_question(meeting).map(public_question)
+                "question": public_question(&existing),
+                "active_question": active
             });
             drop(meetings);
             self.persist().await;
             return Ok(result);
         }
 
-        let has_open = meeting
-            .questions
-            .iter()
-            .any(|question| question.status == QuestionStatus::Open);
+        let queued = active_question(meeting).is_some();
         let question = UserQuestion {
             id: Uuid::new_v4(),
             question: request.question.trim().to_string(),
             reason: request.reason.trim().to_string(),
             missing_key,
             asked_by: vec![participant_id],
-            status: if has_open {
-                QuestionStatus::Deferred
-            } else {
-                QuestionStatus::Open
-            },
+            status: if queued { QuestionStatus::Deferred } else { QuestionStatus::Open },
             answer: None,
             created_at: Utc::now(),
             answered_at: None,
         };
-        let queued = question.status == QuestionStatus::Deferred;
-        let question_public = public_question(&question);
+        let public = public_question(&question);
         meeting.questions.push(question);
         meeting.updated_at = Utc::now();
         let active = active_question(meeting).map(public_question);
         drop(meetings);
         self.persist().await;
-        Ok(json!({
-            "deduplicated": false,
-            "queued": queued,
-            "question": question_public,
-            "active_question": active
-        }))
+        Ok(json!({ "deduplicated": false, "queued": queued, "question": public, "active_question": active }))
     }
 
     pub async fn answer_user(&self, request: AnswerUserRequest) -> Result<Value, HubError> {
         let meeting_id = parse_uuid(&request.meeting_id, "meeting_id")?;
         let question_id = parse_uuid(&request.question_id, "question_id")?;
-        if request.answer.trim().is_empty() {
-            return Err(HubError::InvalidInput("answer must not be empty".into()));
-        }
+        if request.answer.trim().is_empty() { return Err(HubError::InvalidInput("answer must not be empty".into())); }
         let mut meetings = self.meetings.write().await;
-        let meeting = meetings
-            .get_mut(&meeting_id)
-            .ok_or(HubError::MeetingNotFound)?;
-        if meeting.owner_token != request.owner_token {
-            return Err(HubError::InvalidOwnerToken);
-        }
-        let question = meeting
-            .questions
-            .iter_mut()
-            .find(|question| question.id == question_id)
-            .ok_or(HubError::QuestionNotFound)?;
-        question.answer = Some(request.answer.trim().to_string());
-        question.status = QuestionStatus::Answered;
-        question.answered_at = Some(Utc::now());
-        if let Some(next) = meeting
-            .questions
-            .iter_mut()
-            .find(|question| question.status == QuestionStatus::Deferred)
-        {
+        let meeting = meetings.get_mut(&meeting_id).ok_or(HubError::MeetingNotFound)?;
+        if meeting.owner_token != request.owner_token { return Err(HubError::InvalidOwnerToken); }
+        let Some(index) = meeting.questions.iter().position(|question| question.id == question_id) else { return Err(HubError::QuestionNotFound); };
+        meeting.questions[index].answer = Some(request.answer.trim().to_string());
+        meeting.questions[index].status = QuestionStatus::Answered;
+        meeting.questions[index].answered_at = Some(Utc::now());
+        if let Some(next) = meeting.questions.iter_mut().find(|q| q.status == QuestionStatus::Deferred) {
             next.status = QuestionStatus::Open;
         }
         meeting.updated_at = Utc::now();
@@ -933,16 +793,10 @@ impl MeetingHub {
         let meeting_id = parse_uuid(&auth.meeting_id, "meeting_id")?;
         let participant_id = parse_uuid(&auth.participant_id, "participant_id")?;
         let mut meetings = self.meetings.write().await;
-        let meeting = meetings
-            .get_mut(&meeting_id)
-            .ok_or(HubError::MeetingNotFound)?;
+        let meeting = meetings.get_mut(&meeting_id).ok_or(HubError::MeetingNotFound)?;
         touch_participant(meeting, participant_id, &auth.resume_token)?;
         refresh_offline_and_progress(meeting);
-        let result = json!({
-            "ok": true,
-            "stage": meeting.stage,
-            "progress": progress_summary(meeting)
-        });
+        let result = json!({ "ok": true, "stage": meeting.stage, "progress": progress_summary(meeting) });
         drop(meetings);
         self.persist().await;
         Ok(result)
@@ -951,9 +805,7 @@ impl MeetingHub {
     pub async fn status(&self, meeting_id: String) -> Result<Value, HubError> {
         let meeting_id = parse_uuid(&meeting_id, "meeting_id")?;
         let mut meetings = self.meetings.write().await;
-        let meeting = meetings
-            .get_mut(&meeting_id)
-            .ok_or(HubError::MeetingNotFound)?;
+        let meeting = meetings.get_mut(&meeting_id).ok_or(HubError::MeetingNotFound)?;
         refresh_offline_and_progress(meeting);
         let result = meeting_snapshot(meeting);
         drop(meetings);
@@ -972,7 +824,8 @@ pub struct CreateMeetingRequest {
     pub heartbeat_timeout_secs: Option<u64>,
     pub offline_grace_secs: Option<u64>,
 }
-
+#[derive(Debug, Deserialize)]
+pub struct StartMeetingRequest { pub meeting_id: String, pub owner_token: String }
 #[derive(Debug, Deserialize)]
 pub struct JoinMeetingRequest {
     pub meeting_id: String,
@@ -981,14 +834,8 @@ pub struct JoinMeetingRequest {
     pub client_name: Option<String>,
     pub resume_token: Option<String>,
 }
-
 #[derive(Debug, Deserialize)]
-pub struct ParticipantAuth {
-    pub meeting_id: String,
-    pub participant_id: String,
-    pub resume_token: String,
-}
-
+pub struct ParticipantAuth { pub meeting_id: String, pub participant_id: String, pub resume_token: String }
 #[derive(Debug, Deserialize)]
 pub struct SubmitTurnRequest {
     pub meeting_id: String,
@@ -997,7 +844,6 @@ pub struct SubmitTurnRequest {
     pub turn_id: String,
     pub response: String,
 }
-
 #[derive(Debug, Deserialize)]
 pub struct AskUserRequest {
     pub meeting_id: String,
@@ -1007,33 +853,17 @@ pub struct AskUserRequest {
     pub reason: String,
     pub missing_key: Option<String>,
 }
-
 #[derive(Debug, Deserialize)]
-pub struct AnswerUserRequest {
-    pub meeting_id: String,
-    pub owner_token: String,
-    pub question_id: String,
-    pub answer: String,
-}
-
+pub struct AnswerUserRequest { pub meeting_id: String, pub owner_token: String, pub question_id: String, pub answer: String }
 #[derive(Debug, Deserialize)]
-pub struct MeetingStatusRequest {
-    pub meeting_id: String,
-}
+pub struct MeetingStatusRequest { pub meeting_id: String }
 
 fn short_secret() -> String {
-    Uuid::new_v4()
-        .simple()
-        .to_string()
-        .chars()
-        .take(8)
-        .collect::<String>()
-        .to_uppercase()
+    Uuid::new_v4().simple().to_string().chars().take(8).collect::<String>().to_uppercase()
 }
 
 fn parse_uuid(value: &str, field: &str) -> Result<Uuid, HubError> {
-    Uuid::parse_str(value)
-        .map_err(|_| HubError::InvalidInput(format!("{field} must be a UUID")))
+    Uuid::parse_str(value).map_err(|_| HubError::InvalidInput(format!("{field} must be a UUID")))
 }
 
 fn join_payload(meeting: &Meeting, participant: &Participant) -> Value {
@@ -1046,7 +876,7 @@ fn join_payload(meeting: &Meeting, participant: &Participant) -> Value {
         "joined": meeting.participants.len(),
         "participant_limit": meeting.config.participant_limit,
         "heartbeat_interval_secs": (meeting.config.heartbeat_timeout_secs / 2).max(5),
-        "instruction": "Keep participant_id and resume_token. Call next_task; while waiting, send heartbeat. Do not invent a role or viewpoint: optimize for the user's stated goal."
+        "instruction": "Keep participant_id and resume_token. Call next_task; heartbeat while waiting. Solve the user's goal directly and do not invent a role or viewpoint."
     })
 }
 
@@ -1066,10 +896,10 @@ fn start_initial_round(meeting: &mut Meeting) {
                 "context": meeting.config.context,
                 "peer_outputs": [],
                 "rules": [
-                    "Solve the user's actual goal; do not adopt a preassigned viewpoint.",
-                    "Give your best implementation/recommendation independently.",
-                    "State assumptions and only essential missing information.",
-                    "Do not ask the user a question if a reasonable answer can be given with explicit assumptions."
+                    "Solve the user's actual goal; no preassigned viewpoint.",
+                    "Give your own best recommendation or implementation independently.",
+                    "State assumptions and decisive uncertainty, not generic caveats.",
+                    "Ask the user only when missing information can materially change the answer and cannot be handled with an explicit assumption."
                 ]
             }),
             response: None,
@@ -1085,96 +915,62 @@ fn refresh_offline_and_progress(meeting: &mut Meeting) {
     let now = Utc::now();
     let timeout = ChronoDuration::seconds(meeting.config.heartbeat_timeout_secs as i64);
     let grace = ChronoDuration::seconds(meeting.config.offline_grace_secs as i64);
-
     for participant in &mut meeting.participants {
-        if participant.state != ParticipantState::Left
-            && now.signed_duration_since(participant.last_seen) > timeout
-        {
+        if participant.state != ParticipantState::Left && now.signed_duration_since(participant.last_seen) > timeout {
             participant.state = ParticipantState::Stale;
         }
     }
+    if matches!(meeting.stage, MeetingStage::Completed | MeetingStage::Lobby) { return; }
 
-    if matches!(meeting.stage, MeetingStage::Completed | MeetingStage::Lobby) {
-        return;
-    }
-
-    let healthy: HashSet<Uuid> = meeting
-        .participants
-        .iter()
-        .filter(|participant| {
-            participant.state != ParticipantState::Left
-                && now.signed_duration_since(participant.last_seen) <= timeout + grace
-        })
-        .map(|participant| participant.id)
+    let healthy: HashSet<Uuid> = meeting.participants.iter()
+        .filter(|p| p.state != ParticipantState::Left && now.signed_duration_since(p.last_seen) <= timeout + grace)
+        .map(|p| p.id)
         .collect();
-
-    let current_turn_stage = match meeting.stage {
+    let current = match meeting.stage {
         MeetingStage::Initial => Some(TurnStage::Initial),
         MeetingStage::CrossReview => Some(TurnStage::CrossReview),
         MeetingStage::Synthesis => Some(TurnStage::Synthesis),
         _ => None,
     };
 
-    if let Some(current_turn_stage) = current_turn_stage {
-        let stale_assignees: Vec<Uuid> = meeting
-            .turns
-            .iter()
-            .filter(|turn| {
-                turn.stage == current_turn_stage
-                    && matches!(turn.status, TurnStatus::Pending | TurnStatus::Claimed)
-                    && !healthy.contains(&turn.assignee)
-            })
+    if let Some(stage) = current {
+        let lost: Vec<Uuid> = meeting.turns.iter()
+            .filter(|turn| turn.stage == stage && matches!(turn.status, TurnStatus::Pending | TurnStatus::Claimed) && !healthy.contains(&turn.assignee))
             .map(|turn| turn.assignee)
             .collect();
-
-        if !stale_assignees.is_empty() {
-            if meeting.config.participant_limit == 2 && healthy.len() < 2 {
+        if !lost.is_empty() {
+            if healthy.len() < 2 {
                 meeting.stage = MeetingStage::Paused;
-                meeting.paused_reason = Some(
-                    "2-agent meeting lost one participant; waiting for reconnection instead of silently becoming a single-agent answer"
-                        .into(),
-                );
+                meeting.paused_reason = Some("fewer than two live agents remain; Wenyuan will not silently turn the meeting into a single-agent answer".into());
                 meeting.updated_at = now;
                 return;
             }
-
-            if healthy.len() >= 2 {
-                if current_turn_stage == TurnStage::Synthesis {
-                    if let Some(turn) = meeting.turns.iter_mut().find(|turn| {
-                        turn.stage == TurnStage::Synthesis
-                            && matches!(turn.status, TurnStatus::Pending | TurnStatus::Claimed)
-                    }) {
-                        if let Some(replacement) = choose_synthesizer(meeting, Some(turn.assignee)) {
-                            turn.assignee = replacement;
-                            turn.status = TurnStatus::Pending;
-                            turn.updated_at = now;
-                            turn.skip_reason = Some("synthesizer_reassigned_after_disconnect".into());
-                        }
+            if stage == TurnStage::Synthesis {
+                if let Some(index) = meeting.turns.iter().position(|turn| turn.stage == TurnStage::Synthesis && matches!(turn.status, TurnStatus::Pending | TurnStatus::Claimed) && lost.contains(&turn.assignee)) {
+                    let old = meeting.turns[index].assignee;
+                    if let Some(replacement) = choose_synthesizer(meeting, Some(old)) {
+                        meeting.turns[index].assignee = replacement;
+                        meeting.turns[index].status = TurnStatus::Pending;
+                        meeting.turns[index].skip_reason = Some("synthesizer_reassigned_after_disconnect".into());
+                        meeting.turns[index].updated_at = now;
                     }
-                } else {
-                    for turn in &mut meeting.turns {
-                        if turn.stage == current_turn_stage
-                            && matches!(turn.status, TurnStatus::Pending | TurnStatus::Claimed)
-                            && stale_assignees.contains(&turn.assignee)
-                        {
-                            turn.status = TurnStatus::Skipped;
-                            turn.skip_reason = Some("participant_offline_after_grace".into());
-                            turn.updated_at = now;
-                        }
+                }
+            } else {
+                for turn in &mut meeting.turns {
+                    if turn.stage == stage && matches!(turn.status, TurnStatus::Pending | TurnStatus::Claimed) && lost.contains(&turn.assignee) {
+                        turn.status = TurnStatus::Skipped;
+                        turn.skip_reason = Some("participant_offline_after_grace".into());
+                        turn.updated_at = now;
                     }
                 }
             }
         }
     }
 
-    if meeting.stage == MeetingStage::Paused {
-        return;
-    }
-
+    if meeting.stage == MeetingStage::Paused || active_question(meeting).is_some() { return; }
     match meeting.stage {
         MeetingStage::Initial if stage_is_terminal(meeting, TurnStage::Initial) => {
-            let submitted = submitted_count(meeting, TurnStage::Initial);
-            if submitted < 2 {
+            if submitted_count(meeting, TurnStage::Initial) < 2 {
                 meeting.stage = MeetingStage::Paused;
                 meeting.paused_reason = Some("fewer than two initial opinions are available".into());
             } else if meeting.config.max_rounds >= 2 {
@@ -1183,9 +979,7 @@ fn refresh_offline_and_progress(meeting: &mut Meeting) {
                 create_synthesis_round(meeting);
             }
         }
-        MeetingStage::CrossReview if stage_is_terminal(meeting, TurnStage::CrossReview) => {
-            create_synthesis_round(meeting);
-        }
+        MeetingStage::CrossReview if stage_is_terminal(meeting, TurnStage::CrossReview) => create_synthesis_round(meeting),
         MeetingStage::Synthesis if stage_is_terminal(meeting, TurnStage::Synthesis) => {
             meeting.stage = MeetingStage::Completed;
             meeting.paused_reason = None;
@@ -1198,40 +992,26 @@ fn refresh_offline_and_progress(meeting: &mut Meeting) {
 fn create_cross_review_round(meeting: &mut Meeting) {
     meeting.stage = MeetingStage::CrossReview;
     let now = Utc::now();
-    let initial_outputs = submitted_outputs(meeting, TurnStage::Initial);
-    let eligible: Vec<Uuid> = meeting
-        .participants
-        .iter()
-        .filter(|participant| participant.state == ParticipantState::Online)
-        .map(|participant| participant.id)
-        .collect();
-    for participant_id in eligible {
-        let peer_outputs: Vec<Value> = initial_outputs
-            .iter()
-            .filter(|(author, _)| *author != participant_id)
-            .map(|(author, response)| json!({ "participant_id": author, "response": response }))
-            .collect();
+    let outputs = submitted_outputs(meeting, TurnStage::Initial);
+    let participants: Vec<Uuid> = meeting.participants.iter().filter(|p| p.state == ParticipantState::Online).map(|p| p.id).collect();
+    for participant_id in participants {
+        let peer_outputs: Vec<Value> = outputs.iter().filter(|(author, _)| *author != participant_id)
+            .map(|(author, response)| json!({ "participant_id": author, "response": response })).collect();
         meeting.turns.push(MeetingTurn {
-            id: Uuid::new_v4(),
-            stage: TurnStage::CrossReview,
-            assignee: participant_id,
-            status: TurnStatus::Pending,
+            id: Uuid::new_v4(), stage: TurnStage::CrossReview, assignee: participant_id, status: TurnStatus::Pending,
             payload: json!({
                 "title": meeting.config.title,
                 "goal": meeting.config.goal,
                 "context": meeting.config.context,
                 "peer_outputs": peer_outputs,
                 "rules": [
-                    "Do not restate points everyone already agrees on.",
+                    "Do not repeat points everyone already agrees on.",
                     "React only to material disagreement, missing constraints, or a clearly better implementation.",
-                    "You may explicitly agree when another answer is better; disagreement is not required.",
-                    "If user input is truly required, call wenyuan_ask_user once with the smallest decisive question."
+                    "Agreement is valid; disagreement is never required for its own sake.",
+                    "If user input is truly decisive, ask the smallest non-duplicate question via wenyuan_ask_user."
                 ]
             }),
-            response: None,
-            skip_reason: None,
-            created_at: now,
-            updated_at: now,
+            response: None, skip_reason: None, created_at: now, updated_at: now,
         });
     }
     meeting.updated_at = now;
@@ -1246,25 +1026,10 @@ fn create_synthesis_round(meeting: &mut Meeting) {
     meeting.stage = MeetingStage::Synthesis;
     meeting.paused_reason = None;
     let now = Utc::now();
-    let contributions: Vec<Value> = meeting
-        .turns
-        .iter()
-        .filter(|turn| turn.status == TurnStatus::Submitted)
-        .filter_map(|turn| {
-            turn.response.as_ref().map(|response| {
-                json!({
-                    "participant_id": turn.assignee,
-                    "stage": turn.stage,
-                    "response": response
-                })
-            })
-        })
-        .collect();
+    let contributions: Vec<Value> = meeting.turns.iter().filter(|turn| turn.status == TurnStatus::Submitted)
+        .filter_map(|turn| turn.response.as_ref().map(|response| json!({ "participant_id": turn.assignee, "stage": turn.stage, "response": response }))).collect();
     meeting.turns.push(MeetingTurn {
-        id: Uuid::new_v4(),
-        stage: TurnStage::Synthesis,
-        assignee,
-        status: TurnStatus::Pending,
+        id: Uuid::new_v4(), stage: TurnStage::Synthesis, assignee, status: TurnStatus::Pending,
         payload: json!({
             "title": meeting.config.title,
             "goal": meeting.config.goal,
@@ -1272,150 +1037,78 @@ fn create_synthesis_round(meeting: &mut Meeting) {
             "contributions": contributions,
             "user_answers": answered_questions(meeting),
             "rules": [
-                "Synthesize the best answer for the user's goal; you are a temporary editor, not a privileged viewpoint.",
-                "Prefer concrete implementation over averaging incompatible answers.",
-                "Preserve meaningful dissent and uncertainty instead of fabricating consensus.",
-                "Do not re-ask already answered questions.",
-                "Return a concise final recommendation, implementation steps, trade-offs, and unresolved items."
+                "You are only a temporary editor, not a privileged viewpoint.",
+                "Choose the strongest implementation for the user's goal rather than averaging incompatible answers.",
+                "Preserve meaningful dissent and uncertainty; never fabricate consensus.",
+                "Do not re-ask answered questions.",
+                "Return a concise recommendation, implementation steps, trade-offs, and unresolved items."
             ]
         }),
-        response: None,
-        skip_reason: None,
-        created_at: now,
-        updated_at: now,
+        response: None, skip_reason: None, created_at: now, updated_at: now,
     });
     meeting.updated_at = now;
 }
 
 fn choose_synthesizer(meeting: &Meeting, exclude: Option<Uuid>) -> Option<Uuid> {
-    meeting
-        .participants
-        .iter()
-        .filter(|participant| {
-            participant.state == ParticipantState::Online && Some(participant.id) != exclude
-        })
-        .min_by_key(|participant| {
-            meeting
-                .turns
-                .iter()
-                .filter(|turn| {
-                    turn.assignee == participant.id && turn.status == TurnStatus::Submitted
-                })
-                .count()
-        })
-        .map(|participant| participant.id)
+    meeting.participants.iter()
+        .filter(|p| p.state == ParticipantState::Online && Some(p.id) != exclude)
+        .min_by_key(|p| meeting.turns.iter().filter(|turn| turn.assignee == p.id && turn.status == TurnStatus::Submitted).count())
+        .map(|p| p.id)
 }
 
 fn stage_is_terminal(meeting: &Meeting, stage: TurnStage) -> bool {
     let turns: Vec<&MeetingTurn> = meeting.turns.iter().filter(|turn| turn.stage == stage).collect();
-    !turns.is_empty()
-        && turns.iter().all(|turn| {
-            matches!(turn.status, TurnStatus::Submitted | TurnStatus::Skipped)
-        })
+    !turns.is_empty() && turns.iter().all(|turn| matches!(turn.status, TurnStatus::Submitted | TurnStatus::Skipped))
 }
 
 fn submitted_count(meeting: &Meeting, stage: TurnStage) -> usize {
-    meeting
-        .turns
-        .iter()
-        .filter(|turn| turn.stage == stage && turn.status == TurnStatus::Submitted)
-        .count()
+    meeting.turns.iter().filter(|turn| turn.stage == stage && turn.status == TurnStatus::Submitted).count()
 }
 
 fn submitted_outputs(meeting: &Meeting, stage: TurnStage) -> Vec<(Uuid, String)> {
-    meeting
-        .turns
-        .iter()
-        .filter(|turn| turn.stage == stage && turn.status == TurnStatus::Submitted)
-        .filter_map(|turn| turn.response.clone().map(|response| (turn.assignee, response)))
-        .collect()
+    meeting.turns.iter().filter(|turn| turn.stage == stage && turn.status == TurnStatus::Submitted)
+        .filter_map(|turn| turn.response.clone().map(|response| (turn.assignee, response))).collect()
 }
 
-fn touch_participant(
-    meeting: &mut Meeting,
-    participant_id: Uuid,
-    resume_token: &str,
-) -> Result<(), HubError> {
-    let participant = meeting
-        .participants
-        .iter_mut()
-        .find(|participant| participant.id == participant_id)
-        .ok_or(HubError::ParticipantNotFound)?;
-    if participant.resume_token != resume_token {
-        return Err(HubError::InvalidParticipantToken);
-    }
-    participant.last_seen = Utc::now();
-    participant.state = ParticipantState::Online;
+fn online_count(meeting: &Meeting) -> usize {
+    meeting.participants.iter().filter(|p| p.state == ParticipantState::Online).count()
+}
+
+fn touch_participant(meeting: &mut Meeting, participant_id: Uuid, resume_token: &str) -> Result<(), HubError> {
+    let Some(index) = meeting.participants.iter().position(|p| p.id == participant_id) else { return Err(HubError::ParticipantNotFound); };
+    if meeting.participants[index].resume_token != resume_token { return Err(HubError::InvalidParticipantToken); }
+    meeting.participants[index].last_seen = Utc::now();
+    meeting.participants[index].state = ParticipantState::Online;
     meeting.updated_at = Utc::now();
-    if meeting.stage == MeetingStage::Paused {
-        let online = meeting
-            .participants
-            .iter()
-            .filter(|participant| participant.state == ParticipantState::Online)
-            .count();
-        if online >= 2 {
-            meeting.paused_reason = None;
-            meeting.stage = infer_stage_from_turns(meeting);
-        }
+    if meeting.stage == MeetingStage::Paused && online_count(meeting) >= 2 {
+        meeting.paused_reason = None;
+        meeting.stage = infer_stage_from_turns(meeting);
     }
     Ok(())
 }
 
 fn infer_stage_from_turns(meeting: &Meeting) -> MeetingStage {
-    if meeting
-        .turns
-        .iter()
-        .any(|turn| turn.stage == TurnStage::Synthesis && turn.status != TurnStatus::Submitted)
-    {
-        MeetingStage::Synthesis
-    } else if meeting
-        .turns
-        .iter()
-        .any(|turn| turn.stage == TurnStage::CrossReview && !matches!(turn.status, TurnStatus::Submitted | TurnStatus::Skipped))
-    {
-        MeetingStage::CrossReview
-    } else if meeting
-        .turns
-        .iter()
-        .any(|turn| turn.stage == TurnStage::Initial && !matches!(turn.status, TurnStatus::Submitted | TurnStatus::Skipped))
-    {
-        MeetingStage::Initial
-    } else if meeting
-        .turns
-        .iter()
-        .any(|turn| turn.stage == TurnStage::Synthesis && turn.status == TurnStatus::Submitted)
-    {
-        MeetingStage::Completed
-    } else {
-        MeetingStage::Initial
-    }
+    if meeting.turns.iter().any(|t| t.stage == TurnStage::Synthesis && t.status != TurnStatus::Submitted) { MeetingStage::Synthesis }
+    else if meeting.turns.iter().any(|t| t.stage == TurnStage::CrossReview && !matches!(t.status, TurnStatus::Submitted | TurnStatus::Skipped)) { MeetingStage::CrossReview }
+    else if meeting.turns.iter().any(|t| t.stage == TurnStage::Initial && !matches!(t.status, TurnStatus::Submitted | TurnStatus::Skipped)) { MeetingStage::Initial }
+    else if meeting.turns.iter().any(|t| t.stage == TurnStage::Synthesis && t.status == TurnStatus::Submitted) { MeetingStage::Completed }
+    else { MeetingStage::Initial }
 }
 
 fn normalize_question(input: &str) -> String {
-    input
-        .chars()
-        .filter(|ch| !ch.is_whitespace() && !ch.is_ascii_punctuation())
-        .flat_map(char::to_lowercase)
-        .collect()
+    input.chars().filter(|ch| !ch.is_whitespace() && !ch.is_ascii_punctuation()).flat_map(char::to_lowercase).collect()
 }
 
 fn questions_match(existing: &UserQuestion, normalized: &str, missing_key: &str) -> bool {
-    if !missing_key.is_empty() && existing.missing_key == missing_key {
-        return true;
-    }
+    if !missing_key.is_empty() && existing.missing_key == missing_key { return true; }
     let other = normalize_question(&existing.question);
-    if other == normalized {
-        return true;
-    }
+    if other == normalized { return true; }
     let min_len = other.chars().count().min(normalized.chars().count());
     min_len >= 8 && (other.contains(normalized) || normalized.contains(&other))
 }
 
 fn active_question(meeting: &Meeting) -> Option<&UserQuestion> {
-    meeting
-        .questions
-        .iter()
-        .find(|question| question.status == QuestionStatus::Open)
+    meeting.questions.iter().find(|q| q.status == QuestionStatus::Open)
 }
 
 fn public_question(question: &UserQuestion) -> Value {
@@ -1430,97 +1123,41 @@ fn public_question(question: &UserQuestion) -> Value {
 }
 
 fn answered_questions(meeting: &Meeting) -> Vec<Value> {
-    meeting
-        .questions
-        .iter()
-        .filter(|question| question.status == QuestionStatus::Answered)
-        .filter_map(|question| {
-            question.answer.as_ref().map(|answer| {
-                json!({
-                    "question": question.question,
-                    "answer": answer,
-                    "missing_key": question.missing_key
-                })
-            })
-        })
-        .collect()
+    meeting.questions.iter().filter(|q| q.status == QuestionStatus::Answered)
+        .filter_map(|q| q.answer.as_ref().map(|answer| json!({ "question": q.question, "answer": answer, "missing_key": q.missing_key }))).collect()
 }
 
-fn task_instruction(stage: &TurnStage) -> &'static str {
+fn task_instruction(stage: TurnStage) -> &'static str {
     match stage {
-        TurnStage::Initial => {
-            "Give your own best answer to the same user goal. Do not role-play a fixed perspective."
-        }
-        TurnStage::CrossReview => {
-            "Review only substantive disagreement or omissions. Do not repeat consensus for the sake of interaction."
-        }
-        TurnStage::Synthesis => {
-            "Act as temporary synthesizer: choose the strongest implementation, preserve real dissent, and avoid fake consensus."
-        }
+        TurnStage::Initial => "Give your own best answer to the same user goal. Do not role-play a fixed perspective.",
+        TurnStage::CrossReview => "Review only substantive disagreement or omissions. Do not repeat consensus just to create interaction.",
+        TurnStage::Synthesis => "Act as temporary synthesizer: choose the strongest implementation, preserve real dissent, and avoid fake consensus.",
     }
 }
 
 fn final_response(meeting: &Meeting) -> Option<Value> {
-    meeting
-        .turns
-        .iter()
-        .rev()
-        .find(|turn| turn.stage == TurnStage::Synthesis && turn.status == TurnStatus::Submitted)
-        .and_then(|turn| {
-            turn.response.as_ref().map(|response| {
-                json!({
-                    "response": response,
-                    "synthesizer": turn.assignee,
-                    "degraded": meeting
-                        .turns
-                        .iter()
-                        .any(|turn| turn.status == TurnStatus::Skipped),
-                    "skipped_turns": meeting
-                        .turns
-                        .iter()
-                        .filter(|turn| turn.status == TurnStatus::Skipped)
-                        .count()
-                })
-            })
-        })
+    meeting.turns.iter().rev().find(|turn| turn.stage == TurnStage::Synthesis && turn.status == TurnStatus::Submitted)
+        .and_then(|turn| turn.response.as_ref().map(|response| json!({
+            "response": response,
+            "synthesizer": turn.assignee,
+            "degraded": meeting.turns.iter().any(|turn| turn.status == TurnStatus::Skipped),
+            "skipped_turns": meeting.turns.iter().filter(|turn| turn.status == TurnStatus::Skipped).count()
+        })))
 }
 
 fn progress_summary(meeting: &Meeting) -> Value {
-    let mut by_stage = HashMap::new();
+    let mut stages = HashMap::new();
     for stage in [TurnStage::Initial, TurnStage::CrossReview, TurnStage::Synthesis] {
         let total = meeting.turns.iter().filter(|turn| turn.stage == stage).count();
-        let submitted = meeting
-            .turns
-            .iter()
-            .filter(|turn| turn.stage == stage && turn.status == TurnStatus::Submitted)
-            .count();
-        let skipped = meeting
-            .turns
-            .iter()
-            .filter(|turn| turn.stage == stage && turn.status == TurnStatus::Skipped)
-            .count();
-        by_stage.insert(
-            format!("{stage:?}").to_lowercase(),
-            json!({ "total": total, "submitted": submitted, "skipped": skipped }),
-        );
+        let submitted = meeting.turns.iter().filter(|turn| turn.stage == stage && turn.status == TurnStatus::Submitted).count();
+        let skipped = meeting.turns.iter().filter(|turn| turn.stage == stage && turn.status == TurnStatus::Skipped).count();
+        stages.insert(format!("{stage:?}").to_lowercase(), json!({ "total": total, "submitted": submitted, "skipped": skipped }));
     }
     json!({
-        "turns": by_stage,
-        "participants_online": meeting
-            .participants
-            .iter()
-            .filter(|participant| participant.state == ParticipantState::Online)
-            .count(),
-        "questions_open": meeting
-            .questions
-            .iter()
-            .filter(|question| question.status == QuestionStatus::Open)
-            .count(),
-        "questions_deferred": meeting
-            .questions
-            .iter()
-            .filter(|question| question.status == QuestionStatus::Deferred)
-            .count()
+        "turns": stages,
+        "participants_online": online_count(meeting),
+        "questions_open": meeting.questions.iter().filter(|q| q.status == QuestionStatus::Open).count(),
+        "questions_deferred": meeting.questions.iter().filter(|q| q.status == QuestionStatus::Deferred).count()
     })
 }
 
@@ -1531,12 +1168,8 @@ fn meeting_snapshot(meeting: &Meeting) -> Value {
         "goal": meeting.config.goal,
         "stage": meeting.stage,
         "participant_limit": meeting.config.participant_limit,
-        "participants": meeting.participants.iter().map(|participant| json!({
-            "id": participant.id,
-            "display_name": participant.display_name,
-            "client_name": participant.client_name,
-            "state": participant.state,
-            "last_seen": participant.last_seen
+        "participants": meeting.participants.iter().map(|p| json!({
+            "id": p.id, "display_name": p.display_name, "client_name": p.client_name, "state": p.state, "last_seen": p.last_seen
         })).collect::<Vec<_>>(),
         "active_question": active_question(meeting).map(public_question),
         "progress": progress_summary(meeting),
@@ -1550,66 +1183,43 @@ mod tests {
     use super::*;
 
     async fn create_two(hub: &MeetingHub) -> (Value, Value, Value) {
-        let created = hub
-            .create_meeting(CreateMeetingRequest {
-                title: "test".into(),
-                goal: "find the best implementation".into(),
-                context: None,
-                participant_limit: 2,
-                max_rounds: Some(2),
-                heartbeat_timeout_secs: Some(10),
-                offline_grace_secs: Some(10),
-            })
-            .await
-            .unwrap();
+        let created = hub.create_meeting(CreateMeetingRequest {
+            title: "test".into(), goal: "find the best implementation".into(), context: None,
+            participant_limit: 2, max_rounds: Some(2), heartbeat_timeout_secs: Some(10), offline_grace_secs: Some(10),
+        }).await.unwrap();
         let meeting_id = created["meeting_id"].as_str().unwrap().to_string();
         let join_code = created["join_code"].as_str().unwrap().to_string();
-        let a = hub
-            .join_meeting(JoinMeetingRequest {
-                meeting_id: meeting_id.clone(),
-                join_code: join_code.clone(),
-                display_name: "A".into(),
-                client_name: Some("client-a".into()),
-                resume_token: None,
-            })
-            .await
-            .unwrap();
-        let b = hub
-            .join_meeting(JoinMeetingRequest {
-                meeting_id,
-                join_code,
-                display_name: "B".into(),
-                client_name: Some("client-b".into()),
-                resume_token: None,
-            })
-            .await
-            .unwrap();
+        let a = hub.join_meeting(JoinMeetingRequest {
+            meeting_id: meeting_id.clone(), join_code: join_code.clone(), display_name: "A".into(), client_name: Some("client-a".into()), resume_token: None,
+        }).await.unwrap();
+        let b = hub.join_meeting(JoinMeetingRequest {
+            meeting_id, join_code, display_name: "B".into(), client_name: Some("client-b".into()), resume_token: None,
+        }).await.unwrap();
         (created, a, b)
     }
 
     fn auth(join: &Value) -> ParticipantAuth {
         ParticipantAuth {
-            meeting_id: join["meeting_id"].as_str().unwrap().to_string(),
-            participant_id: join["participant_id"].as_str().unwrap().to_string(),
-            resume_token: join["resume_token"].as_str().unwrap().to_string(),
+            meeting_id: join["meeting_id"].as_str().unwrap().into(),
+            participant_id: join["participant_id"].as_str().unwrap().into(),
+            resume_token: join["resume_token"].as_str().unwrap().into(),
         }
     }
 
     #[tokio::test]
-    async fn two_participants_start_same_goal_without_fixed_roles() {
+    async fn two_agents_receive_the_same_goal_without_roles() {
         let hub = MeetingHub::new_ephemeral();
-        let (_created, a, b) = create_two(&hub).await;
-        let task_a = hub.next_task(auth(&a)).await.unwrap();
-        let task_b = hub.next_task(auth(&b)).await.unwrap();
-        assert_eq!(task_a["status"], "task");
-        assert_eq!(task_b["status"], "task");
-        assert_eq!(task_a["payload"]["goal"], task_b["payload"]["goal"]);
+        let (_, a, b) = create_two(&hub).await;
+        let ta = hub.next_task(auth(&a)).await.unwrap();
+        let tb = hub.next_task(auth(&b)).await.unwrap();
+        assert_eq!(ta["payload"]["goal"], tb["payload"]["goal"]);
+        assert_eq!(ta["turn_stage"], "initial");
     }
 
     #[tokio::test]
-    async fn repeated_next_task_is_idempotent() {
+    async fn next_task_is_idempotent_until_submit() {
         let hub = MeetingHub::new_ephemeral();
-        let (_created, a, _b) = create_two(&hub).await;
+        let (_, a, _) = create_two(&hub).await;
         let first = hub.next_task(auth(&a)).await.unwrap();
         let second = hub.next_task(auth(&a)).await.unwrap();
         assert_eq!(first["turn_id"], second["turn_id"]);
@@ -1618,97 +1228,68 @@ mod tests {
     #[tokio::test]
     async fn duplicate_user_questions_are_merged() {
         let hub = MeetingHub::new_ephemeral();
-        let (_created, a, b) = create_two(&hub).await;
-        let req_a = AskUserRequest {
-            meeting_id: a["meeting_id"].as_str().unwrap().into(),
-            participant_id: a["participant_id"].as_str().unwrap().into(),
-            resume_token: a["resume_token"].as_str().unwrap().into(),
-            question: "用户的预算上限是多少？".into(),
-            reason: "会改变实现方案".into(),
-            missing_key: Some("budget".into()),
-        };
-        let req_b = AskUserRequest {
-            meeting_id: b["meeting_id"].as_str().unwrap().into(),
-            participant_id: b["participant_id"].as_str().unwrap().into(),
-            resume_token: b["resume_token"].as_str().unwrap().into(),
-            question: "预算上限是多少".into(),
-            reason: "影响推荐".into(),
-            missing_key: Some("budget".into()),
-        };
-        let first = hub.ask_user(req_a).await.unwrap();
-        let second = hub.ask_user(req_b).await.unwrap();
+        let (_, a, b) = create_two(&hub).await;
+        let first = hub.ask_user(AskUserRequest {
+            meeting_id: a["meeting_id"].as_str().unwrap().into(), participant_id: a["participant_id"].as_str().unwrap().into(),
+            resume_token: a["resume_token"].as_str().unwrap().into(), question: "用户的预算上限是多少？".into(), reason: "会改变方案".into(), missing_key: Some("budget".into()),
+        }).await.unwrap();
+        let second = hub.ask_user(AskUserRequest {
+            meeting_id: b["meeting_id"].as_str().unwrap().into(), participant_id: b["participant_id"].as_str().unwrap().into(),
+            resume_token: b["resume_token"].as_str().unwrap().into(), question: "预算上限是多少".into(), reason: "影响推荐".into(), missing_key: Some("budget".into()),
+        }).await.unwrap();
         assert_eq!(first["deduplicated"], false);
         assert_eq!(second["deduplicated"], true);
         assert_eq!(second["question"]["asked_by_count"], 2);
     }
 
     #[tokio::test]
-    async fn two_agent_meeting_pauses_when_one_is_lost() {
+    async fn two_agent_meeting_pauses_after_disconnect_grace() {
         let hub = MeetingHub::new_ephemeral();
-        let (_created, a, b) = create_two(&hub).await;
+        let (_, a, b) = create_two(&hub).await;
         let meeting_id = Uuid::parse_str(a["meeting_id"].as_str().unwrap()).unwrap();
         let b_id = Uuid::parse_str(b["participant_id"].as_str().unwrap()).unwrap();
-        {
-            let mut meetings = hub.meetings.write().await;
-            let meeting = meetings.get_mut(&meeting_id).unwrap();
-            let participant = meeting
-                .participants
-                .iter_mut()
-                .find(|participant| participant.id == b_id)
-                .unwrap();
-            participant.last_seen = Utc::now() - ChronoDuration::seconds(25);
-            refresh_offline_and_progress(meeting);
-            assert_eq!(meeting.stage, MeetingStage::Paused);
-        }
+        let mut meetings = hub.meetings.write().await;
+        let meeting = meetings.get_mut(&meeting_id).unwrap();
+        meeting.participants.iter_mut().find(|p| p.id == b_id).unwrap().last_seen = Utc::now() - ChronoDuration::seconds(25);
+        refresh_offline_and_progress(meeting);
+        assert_eq!(meeting.stage, MeetingStage::Paused);
     }
 
     #[tokio::test]
-    async fn three_agent_meeting_can_degrade_to_two() {
+    async fn three_agent_meeting_degrades_to_two_after_grace() {
         let hub = MeetingHub::new_ephemeral();
-        let created = hub
-            .create_meeting(CreateMeetingRequest {
-                title: "test".into(),
-                goal: "best implementation".into(),
-                context: None,
-                participant_limit: 3,
-                max_rounds: Some(1),
-                heartbeat_timeout_secs: Some(10),
-                offline_grace_secs: Some(10),
-            })
-            .await
-            .unwrap();
+        let created = hub.create_meeting(CreateMeetingRequest {
+            title: "test".into(), goal: "best implementation".into(), context: None,
+            participant_limit: 3, max_rounds: Some(1), heartbeat_timeout_secs: Some(10), offline_grace_secs: Some(10),
+        }).await.unwrap();
         let meeting_id = created["meeting_id"].as_str().unwrap().to_string();
         let join_code = created["join_code"].as_str().unwrap().to_string();
-        let mut joined = Vec::new();
+        let mut joined = vec![];
         for name in ["A", "B", "C"] {
-            joined.push(
-                hub.join_meeting(JoinMeetingRequest {
-                    meeting_id: meeting_id.clone(),
-                    join_code: join_code.clone(),
-                    display_name: name.into(),
-                    client_name: None,
-                    resume_token: None,
-                })
-                .await
-                .unwrap(),
-            );
+            joined.push(hub.join_meeting(JoinMeetingRequest {
+                meeting_id: meeting_id.clone(), join_code: join_code.clone(), display_name: name.into(), client_name: None, resume_token: None,
+            }).await.unwrap());
         }
         let meeting_uuid = Uuid::parse_str(&meeting_id).unwrap();
         let c_id = Uuid::parse_str(joined[2]["participant_id"].as_str().unwrap()).unwrap();
-        {
-            let mut meetings = hub.meetings.write().await;
-            let meeting = meetings.get_mut(&meeting_uuid).unwrap();
-            let participant = meeting
-                .participants
-                .iter_mut()
-                .find(|participant| participant.id == c_id)
-                .unwrap();
-            participant.last_seen = Utc::now() - ChronoDuration::seconds(25);
-            refresh_offline_and_progress(meeting);
-            assert_ne!(meeting.stage, MeetingStage::Paused);
-            assert!(meeting.turns.iter().any(|turn| {
-                turn.assignee == c_id && turn.status == TurnStatus::Skipped
-            }));
-        }
+        let mut meetings = hub.meetings.write().await;
+        let meeting = meetings.get_mut(&meeting_uuid).unwrap();
+        meeting.participants.iter_mut().find(|p| p.id == c_id).unwrap().last_seen = Utc::now() - ChronoDuration::seconds(25);
+        refresh_offline_and_progress(meeting);
+        assert_ne!(meeting.stage, MeetingStage::Paused);
+        assert!(meeting.turns.iter().any(|turn| turn.assignee == c_id && turn.status == TurnStatus::Skipped));
+    }
+
+    #[tokio::test]
+    async fn resume_token_reconnects_same_participant() {
+        let hub = MeetingHub::new_ephemeral();
+        let (created, a, _) = create_two(&hub).await;
+        let resumed = hub.join_meeting(JoinMeetingRequest {
+            meeting_id: a["meeting_id"].as_str().unwrap().into(),
+            join_code: created["join_code"].as_str().unwrap().into(),
+            display_name: "A".into(), client_name: Some("client-a-2".into()),
+            resume_token: Some(a["resume_token"].as_str().unwrap().into()),
+        }).await.unwrap();
+        assert_eq!(resumed["participant_id"], a["participant_id"]);
     }
 }
