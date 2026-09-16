@@ -13,6 +13,8 @@ use wenyuan_server::{
     search_backend_from_env, settings::SettingsManager,
 };
 
+mod meeting_ui;
+
 #[derive(RustEmbed)]
 #[folder = "../../web/dist"]
 struct WebAssets;
@@ -107,6 +109,7 @@ pub async fn start_local_server(config: ServerConfig) -> anyhow::Result<LocalSer
         info!("MCP meeting server disabled by WENYUAN_MCP_ENABLED");
         None
     };
+    let mcp_addr_for_ui = mcp_handle.as_ref().map(|handle| handle.addr);
 
     // Extract embedded web assets (always overwrite).
     tokio::fs::create_dir_all(&config.web_dist).await?;
@@ -142,7 +145,11 @@ pub async fn start_local_server(config: ServerConfig) -> anyhow::Result<LocalSer
         local_token: local_token.clone(),
     };
 
-    let router = app(state);
+    let router = app(state).merge(meeting_ui::router(
+        config.data_dir.clone(),
+        mcp_addr_for_ui,
+        local_token.clone(),
+    ));
     let addr: SocketAddr = "127.0.0.1:0".parse()?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let actual_addr = listener.local_addr()?;
